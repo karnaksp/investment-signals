@@ -1,0 +1,16 @@
+detector:
+  sample_every_seconds: 5
+  min_baseline_points: 12
+  baseline_points: 120
+  trade_window_seconds: 60
+  price_window_seconds: 90
+  orderbook_window_seconds: 120
+  alert_cooldown_seconds: 120
+
+  volume_zscore_threshold: 4.0
+  trade_count_zscore_threshold: 4.0
+  price_return_zscore_threshold: 3.5
+  spread_zscore_threshold: 3.0
+  imbalance_zscore_threshold: 3.0
+  imbalance_absolute_threshold: 0.65
+

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinvest-signal-engine"
+version = "0.1.0"
+description = "Realtime anomaly detection pipeline for T-Invest market data."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "cachetools",
+  "clickhouse-connect",
+  "deprecation",
+  "fastapi",
+  "grpcio>=1.39.0",
+  "httpx",
+  "kafka-python-ng",
+  "protobuf>=4.21.6,<6",
+  "python-dateutil",
+  "pyyaml",
+  "uvicorn[standard]",
+]
+
+[project.scripts]
+tinvest-raw-stream = "tinvest_signal_engine.services.ingestor:main"
+tinvest-detector = "tinvest_signal_engine.services.detector_service:main"
+tinvest-api = "tinvest_signal_engine.services.api:main"
+tinvest-local-notifier = "tinvest_signal_engine.services.local_notifier:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,91 @@
+services:
+  redpanda:
+    image: ${REDPANDA_IMAGE:-redpandadata/redpanda:latest}
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --set
+      - redpanda.auto_create_topics_enabled=true
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:${HOST_KAFKA_PORT:-39092}
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092,OUTSIDE://localhost:${HOST_KAFKA_PORT:-39092}
+      - --pandaproxy-addr
+      - PLAINTEXT://0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - PLAINTEXT://redpanda:8082
+    ports:
+      - "${HOST_KAFKA_PORT:-39092}:${HOST_KAFKA_PORT:-39092}"
+      - "${HOST_REDPANDA_METRICS_PORT:-39644}:9644"
+    volumes:
+      - ./redpanda:/var/lib/redpanda/data
+
+  redpanda-console:
+    image: ${REDPANDA_CONSOLE_IMAGE:-redpandadata/console:latest}
+    depends_on:
+      - redpanda
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "${HOST_REDPANDA_CONSOLE_PORT:-38080}:8080"
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:latest}
+    ports:
+      - "${HOST_CLICKHOUSE_HTTP_PORT:-38123}:8123"
+      - "${HOST_CLICKHOUSE_NATIVE_PORT:-39000}:9000"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-default}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USERNAME:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ./clickhouse:/var/lib/clickhouse
+      - ./sql/clickhouse/init:/docker-entrypoint-initdb.d
+
+  ingestor:
+    build:
+      context: .
+    depends_on:
+      - redpanda
+    env_file:
+      - .env
+    volumes:
+      - ./conf:/app/conf:ro
+    command: ["tinvest-raw-stream"]
+    restart: unless-stopped
+
+  detector:
+    build:
+      context: .
+    depends_on:
+      - redpanda
+      - clickhouse
+    env_file:
+      - .env
+    volumes:
+      - ./conf:/app/conf:ro
+    command: ["tinvest-detector"]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+    depends_on:
+      - clickhouse
+    env_file:
+      - .env
+    command: ["tinvest-api"]
+    ports:
+      - "${HOST_API_PORT:-38000}:8000"
+    restart: unless-stopped

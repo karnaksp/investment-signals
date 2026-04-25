@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+.mypy_cache
+*.pyc
+*.pyo
+*.pyd
+.tmp_pip
+.tmp_invest_python
+data
+

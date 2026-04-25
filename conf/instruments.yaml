@@ -1,0 +1,34 @@
+instruments:
+  - ticker: SBER
+    class_code: TQBR
+    alias: sber
+    subscriptions:
+      trades: true
+      last_price: true
+      info: true
+      order_book_depth: 10
+      candles: false
+      candle_interval: 1m
+
+  - ticker: GAZP
+    class_code: TQBR
+    alias: gazp
+    subscriptions:
+      trades: true
+      last_price: true
+      info: true
+      order_book_depth: 10
+      candles: false
+      candle_interval: 1m
+
+  - ticker: LKOH
+    class_code: TQBR
+    alias: lkoh
+    subscriptions:
+      trades: true
+      last_price: true
+      info: true
+      order_book_depth: 10
+      candles: false
+      candle_interval: 1m
+
