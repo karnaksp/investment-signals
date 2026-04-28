@@ -16,7 +16,7 @@ T-Invest MarketDataStream
    +----+----+
    |         |
    v         v
-ClickHouse  Alert topic / webhook
+Postgres   Alert topic / webhook
    |
    v
  FastAPI
@@ -33,14 +33,15 @@ ClickHouse  Alert topic / webhook
   - spread widening
   - order book imbalance
   - trading status change
-- Stores signals in ClickHouse.
+- Stores only trigger signals (anomalies) in Postgres.
+- Keeps the main market stream in Kafka as a transit stream.
 - Exposes recent signals and summaries through FastAPI.
 
 ## Why this stack
 
 - `T-Invest` gives the official market stream.
 - `Redpanda` gives a Kafka-compatible event backbone with low local setup cost.
-- `ClickHouse` is a strong fit for fast analytics over append-only signal events.
+- `Postgres` is a reliable OLTP storage for trigger events and API reads.
 - `FastAPI` is enough for a thin read API and integration surface.
 
 This keeps the project close to a real event pipeline while remaining lightweight enough to run locally.
@@ -51,7 +52,7 @@ This keeps the project close to a real event pipeline while remaining lightweigh
 conf/
   detectors.yaml
   instruments.yaml
-sql/clickhouse/init/
+sql/postgres/init/
   001_market_signals.sql
 src/tinvest_signal_engine/
   config.py
@@ -114,9 +115,10 @@ tinvest-raw-stream
 tinvest-detector
 tinvest-api
 tinvest-local-notifier
+tinvest-threshold-cron
 ```
 
-You still need a running Kafka-compatible broker and ClickHouse.
+You still need a running Kafka-compatible broker and Postgres.
 
 ## Configuration
 
@@ -127,6 +129,31 @@ You still need a running Kafka-compatible broker and ClickHouse.
 ### Detector thresholds
 
 `conf/detectors.yaml` controls rolling windows, sample interval, z-score thresholds, and cooldowns.
+
+Automatic per-instrument overrides are written by `tinvest-threshold-cron` into `conf/detectors.overrides.yaml` and hot-reloaded by detector service.
+The daily job uses hourly candles for the last 7 days and computes:
+
+`price_move_absolute_threshold_bps = mean(abs((close - open) / open)) * 10_000 * THRESHOLD_HOURLY_DEVIATION_MULTIPLIER`
+
+Useful env vars:
+
+- `DETECTORS_OVERRIDES_CONFIG=conf/detectors.overrides.yaml`
+- `THRESHOLD_RECALC_INTERVAL_HOURS=24`
+- `THRESHOLD_LOOKBACK_DAYS=7`
+- `THRESHOLD_HOURLY_DEVIATION_MULTIPLIER=1.0`
+- `CONFIG_RELOAD_INTERVAL_SECONDS=10`
+
+### Telegram alerts
+
+Detector can send trigger alerts directly to Telegram via bot API.
+
+Set in `.env`:
+
+- `TELEGRAM_BOT_TOKEN=<your_bot_token>`
+- `TELEGRAM_CHAT_ID=<chat_or_channel_id>`
+- `TELEGRAM_MESSAGE_THREAD_ID=<optional_topic_id_for_forum_chat>`
+
+If token/chat id are not set, Telegram delivery is disabled.
 
 ## API
 
@@ -140,6 +167,7 @@ You still need a running Kafka-compatible broker and ClickHouse.
 - The current implementation keeps streaming state in memory per instrument.
 - For production scale, the next step would be a stateful stream processor or partition-aware horizontal workers.
 - The repository vendors the official `tinkoff/invest-python` SDK source locally under `src/tinkoff` so Docker builds do not depend on access to a pre-release-only PyPI package.
+- Redpanda retention is configured to cap local data usage (100MB) for lightweight local runs.
 
 ## Official references
 

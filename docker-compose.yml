@@ -1,4 +1,17 @@
+# ============================================================================
+# Локальный стек: брокер сообщений (Redpanda), Postgres, сбор рыночных данных,
+# детектор сигналов, API, пересчёт порогов по истории.
+#
+# Переменные окружения — из файла .env в корне проекта (порты, токены и т.д.).
+# Конфиги детектора и списка инструментов монтируются из ./conf (см. volumes).
+#
+# Полезные команды:
+#   docker compose up -d --build
+#   docker compose logs -f detector ingestor
+# ============================================================================
+
 services:
+  # Kafka-совместимый брокер; хранение ограничено (~100MB на топик через init).
   redpanda:
     image: ${REDPANDA_IMAGE:-redpandadata/redpanda:latest}
     command:
@@ -15,7 +28,11 @@ services:
       - "0"
       - --check=false
       - --set
-      - redpanda.auto_create_topics_enabled=true
+      - redpanda.auto_create_topics_enabled=false
+      - --set
+      - redpanda.log_retention_bytes=104857600
+      - --set
+      - redpanda.retention_bytes=104857600
       - --kafka-addr
       - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:${HOST_KAFKA_PORT:-39092}
       - --advertise-kafka-addr
@@ -30,6 +47,27 @@ services:
     volumes:
       - ./redpanda:/var/lib/redpanda/data
 
+  # Одноразовый контейнер: создаёт топики и выставляет retention.
+  redpanda-init:
+    image: ${REDPANDA_IMAGE:-redpandadata/redpanda:latest}
+    depends_on:
+      - redpanda
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        for i in $(seq 1 60); do
+          if rpk -X brokers=redpanda:9092 cluster info >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+        rpk -X brokers=redpanda:9092 topic create marketdata.raw -p 1 -r 1 --if-not-exists
+        rpk -X brokers=redpanda:9092 topic create marketdata.signals -p 1 -r 1 --if-not-exists
+        rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
+        rpk -X brokers=redpanda:9092 topic alter-config marketdata.signals --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
+
+  # Веб-консоль для просмотра топиков и сообщений (опционально).
   redpanda-console:
     image: ${REDPANDA_CONSOLE_IMAGE:-redpandadata/console:latest}
     depends_on:
@@ -39,25 +77,28 @@ services:
     ports:
       - "${HOST_REDPANDA_CONSOLE_PORT:-38080}:8080"
 
-  clickhouse:
-    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:latest}
+  # Хранилище сигналов и состояние для API.
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     ports:
-      - "${HOST_CLICKHOUSE_HTTP_PORT:-38123}:8123"
-      - "${HOST_CLICKHOUSE_NATIVE_PORT:-39000}:9000"
+      - "${HOST_POSTGRES_PORT:-35432}:5432"
     environment:
-      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-default}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USERNAME:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      POSTGRES_DB: ${POSTGRES_DATABASE:-signal_engine}
+      POSTGRES_USER: ${POSTGRES_USERNAME:-signal_engine}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-signal_engine}
     volumes:
-      - ./clickhouse:/var/lib/clickhouse
-      - ./sql/clickhouse/init:/docker-entrypoint-initdb.d
+      - ./postgres:/var/lib/postgresql/data
+      - ./sql/postgres/init:/docker-entrypoint-initdb.d
 
+  # Поток T-Invest → Kafka (сырые события); читает conf/instruments.yaml.
   ingestor:
     build:
       context: .
     depends_on:
-      - redpanda
+      redpanda:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     volumes:
@@ -65,12 +106,17 @@ services:
     command: ["tinvest-raw-stream"]
     restart: unless-stopped
 
+  # Kafka → детектор → Postgres + Kafka (сигналы); читает detectors.yaml и overrides.
   detector:
     build:
       context: .
     depends_on:
-      - redpanda
-      - clickhouse
+      redpanda:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_started
     env_file:
       - .env
     volumes:
@@ -78,11 +124,23 @@ services:
     command: ["tinvest-detector"]
     restart: unless-stopped
 
+  # Ежедневный пересчёт порогов → запись в conf/detectors.overrides.yaml (том не read-only).
+  threshold-cron:
+    build:
+      context: .
+    env_file:
+      - .env
+    volumes:
+      - ./conf:/app/conf
+    command: ["tinvest-threshold-cron"]
+    restart: unless-stopped
+
+  # HTTP API поверх Postgres (история сигналов).
   api:
     build:
       context: .
     depends_on:
-      - clickhouse
+      - postgres
     env_file:
       - .env
     command: ["tinvest-api"]

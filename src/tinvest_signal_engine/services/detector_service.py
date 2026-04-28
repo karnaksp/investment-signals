@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from kafka import KafkaConsumer, KafkaProducer
 
-from ..config import RuntimeSettings, load_detector_settings
+from ..config import RuntimeSettings, load_detector_config
 from ..detector_core import SignalDetector
 from ..logging_utils import configure_logging
 from ..models import NormalizedEvent
-from ..sinks import WebhookAlertSink, create_clickhouse_signal_store_with_retry
+from ..sinks import (
+    TelegramAlertSink,
+    WebhookAlertSink,
+    create_postgres_signal_store_with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,19 +44,71 @@ def build_signal_producer(settings: RuntimeSettings) -> KafkaProducer:
 def main() -> None:
     settings = RuntimeSettings.from_env()
     configure_logging(settings.log_level)
-    detector = SignalDetector(load_detector_settings(settings.detector_path))
+    loaded = load_detector_config(
+        settings.detector_path, settings.detector_overrides_path
+    )
+    detector = SignalDetector(loaded.default, loaded.per_instrument)
+    detector_mtime = settings.detector_path.stat().st_mtime
+    detector_overrides_mtime = (
+        settings.detector_overrides_path.stat().st_mtime
+        if settings.detector_overrides_path.exists()
+        else None
+    )
+    reload_iv = settings.config_reload_interval_seconds
+    last_config_poll = time.monotonic()
     consumer = build_consumer(settings)
     producer = build_signal_producer(settings)
-    signal_store = create_clickhouse_signal_store_with_retry(
+    signal_store = create_postgres_signal_store_with_retry(
         settings,
         service_name="detector",
     )
     webhook_sink = WebhookAlertSink(settings.alert_webhook_url)
+    telegram_sink = TelegramAlertSink(
+        bot_token=settings.telegram_bot_token,
+        chat_id=settings.telegram_chat_id,
+        message_thread_id=settings.telegram_message_thread_id,
+    )
 
     logger.info("Starting detector service")
 
     try:
         for message in consumer:
+            if reload_iv > 0:
+                now = time.monotonic()
+                if now - last_config_poll >= reload_iv:
+                    last_config_poll = now
+                    try:
+                        mtime = settings.detector_path.stat().st_mtime
+                        overrides_mtime = (
+                            settings.detector_overrides_path.stat().st_mtime
+                            if settings.detector_overrides_path.exists()
+                            else None
+                        )
+                        changed = (
+                            mtime != detector_mtime
+                            or overrides_mtime
+                            != detector_overrides_mtime
+                        )
+                        if changed:
+                            loaded = load_detector_config(
+                                settings.detector_path,
+                                settings.detector_overrides_path,
+                            )
+                            detector = SignalDetector(
+                                loaded.default,
+                                loaded.per_instrument,
+                            )
+                            detector_mtime = mtime
+                            detector_overrides_mtime = overrides_mtime
+                            logger.info(
+                                "Reloaded detector config from %s (+ %s)",
+                                settings.detector_path,
+                                settings.detector_overrides_path,
+                            )
+                    except OSError:
+                        logger.exception("Detector config not accessible")
+                    except Exception:
+                        logger.exception("Failed to reload detector config")
             try:
                 event = NormalizedEvent.from_dict(message.value)
                 signals = detector.process(event)
@@ -68,6 +125,11 @@ def main() -> None:
                             webhook_sink.send(signal)
                         except Exception:
                             logger.exception("Failed to deliver alert webhook")
+                    if telegram_sink.enabled:
+                        try:
+                            telegram_sink.send(signal)
+                        except Exception:
+                            logger.exception("Failed to send Telegram alert")
             except Exception:
                 logger.exception("Failed to process market event")
     except KeyboardInterrupt:
@@ -76,4 +138,6 @@ def main() -> None:
         producer.flush()
         producer.close()
         consumer.close()
+        webhook_sink.close()
+        telegram_sink.close()
         signal_store.close()

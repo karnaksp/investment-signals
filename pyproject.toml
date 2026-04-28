@@ -10,12 +10,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "cachetools",
-  "clickhouse-connect",
   "deprecation",
   "fastapi",
   "grpcio>=1.39.0",
   "httpx",
   "kafka-python-ng",
+  "psycopg[binary]>=3.2",
   "protobuf>=4.21.6,<6",
   "python-dateutil",
   "pyyaml",
@@ -27,6 +27,7 @@ tinvest-raw-stream = "tinvest_signal_engine.services.ingestor:main"
 tinvest-detector = "tinvest_signal_engine.services.detector_service:main"
 tinvest-api = "tinvest_signal_engine.services.api:main"
 tinvest-local-notifier = "tinvest_signal_engine.services.local_notifier:main"
+tinvest-threshold-cron = "tinvest_signal_engine.services.threshold_cron:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

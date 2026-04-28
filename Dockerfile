@@ -11,7 +11,8 @@ COPY conf ./conf
 COPY sql ./sql
 
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
+    pip install --no-cache-dir --retries 20 --timeout 60 "setuptools>=69" wheel && \
+    pip install --no-cache-dir --no-build-isolation .
 
 CMD ["tinvest-api"]
 

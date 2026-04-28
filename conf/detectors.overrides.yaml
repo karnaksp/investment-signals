@@ -1,0 +1,28 @@
+# ============================================================================
+# Автоматические переопределения порогов детектора (пишет сервис threshold-cron).
+#
+# Ручное редактирование:
+#   Можно править блок per_instrument вручную — изменения подхватит detector
+#   так же, как и основной detectors.yaml (через CONFIG_RELOAD_INTERVAL_SECONDS).
+#
+# Поля метаданных (generated_at, lookback_days, metric, multiplier)
+# обновляются cron при каждом пересчёте; их можно не трогать.
+#
+# Структура per_instrument такая же, как в detectors.yaml → detector:,
+# только без обёртки "detector:" — только те ключи, которые нужно переопределить.
+#
+# Типичное использование cron:
+#   price_move_absolute_threshold_bps — минимальный ход цены в bps за окно,
+#   выведенный из средней почасовой волатильности за lookback_days.
+# ============================================================================
+
+generated_at: null
+lookback_days: 7
+metric: hourly_abs_return_bps_mean
+multiplier: 1.0
+
+# Пример после расчёта (ключи = TICKER_CLASS):
+# per_instrument:
+#   SBER_TQBR:
+#     price_move_absolute_threshold_bps: 12.34
+per_instrument: {}

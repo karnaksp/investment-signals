@@ -154,15 +154,26 @@ def main() -> None:
     if not settings.tinvest_token:
         raise RuntimeError("TINVEST_TOKEN is required")
 
-    instrument_configs = load_instrument_configs(settings.instruments_path)
     kafka_producer = build_kafka_producer(settings)
     target = INVEST_GRPC_API_SANDBOX if settings.tinvest_use_sandbox else None
-
-    logger.info("Starting raw ingestor for %s instruments", len(instrument_configs))
+    reload_iv = settings.config_reload_interval_seconds
 
     try:
         while True:
             try:
+                instrument_configs = load_instrument_configs(
+                    settings.instruments_path
+                )
+                logger.info(
+                    "Starting raw ingestor for %s instruments",
+                    len(instrument_configs),
+                )
+                try:
+                    instruments_mtime = settings.instruments_path.stat().st_mtime
+                except OSError:
+                    instruments_mtime = 0.0
+                last_config_poll = time.monotonic()
+
                 with Client(
                     settings.tinvest_token,
                     target=target,
@@ -179,6 +190,24 @@ def main() -> None:
                     subscribe_to_stream(market_data_stream, instrument_configs)
 
                     for message in market_data_stream:
+                        if reload_iv > 0:
+                            now = time.monotonic()
+                            if now - last_config_poll >= reload_iv:
+                                last_config_poll = now
+                                try:
+                                    new_mtime = (
+                                        settings.instruments_path.stat().st_mtime
+                                    )
+                                    if new_mtime != instruments_mtime:
+                                        logger.info(
+                                            "instruments.yaml changed; "
+                                            "reconnecting market data stream"
+                                        )
+                                        break
+                                except OSError:
+                                    logger.exception(
+                                        "instruments config not accessible"
+                                    )
                         normalized = normalize_stream_message(message, registry)
                         if normalized is None:
                             continue

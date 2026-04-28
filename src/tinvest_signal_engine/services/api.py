@@ -5,7 +5,7 @@ import uvicorn
 
 from ..config import RuntimeSettings
 from ..logging_utils import configure_logging
-from ..sinks import create_clickhouse_signal_store_with_retry
+from ..sinks import create_postgres_signal_store_with_retry
 
 
 def create_app() -> FastAPI:
@@ -14,13 +14,15 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="T-Invest Signal API",
         version="0.1.0",
-        description="Realtime anomaly signals produced from T-Invest market data.",
+        description=(
+            "Realtime anomaly signals produced from T-Invest market data."
+        ),
     )
 
     @app.on_event("startup")
     def startup() -> None:
         app.state.settings = settings
-        app.state.signal_store = create_clickhouse_signal_store_with_retry(
+        app.state.signal_store = create_postgres_signal_store_with_retry(
             settings,
             service_name="api",
         )

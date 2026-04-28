@@ -1,12 +1,33 @@
+# ============================================================================
+# Список инструментов для подписки на поток MarketDataStream (ingestor).
+#
+# Для каждого инструмента задаются:
+#   ticker       — тикер в терминале T-Invest (конкретный контракт для фьючерсов).
+#   class_code   — режим торгов (TQBR — акции МосБиржи, SPBFUT — срочный рынок и т.д.).
+#   alias        — короткое имя для логов/алиаса (латиница, без пробелов).
+#
+# instrument_id в пайплайне = "{ticker}_{class_code}" — тот же ключ используется
+# в detectors.yaml в per_instrument и в detectors.overrides.yaml.
+#
+# После правки файла ingestor переподключится сам (см. CONFIG_RELOAD_INTERVAL_SECONDS).
+# Фьючерсы при экспирации нужно роллировать на актуальный контракт вручную или скриптом.
+# ============================================================================
+
 instruments:
+  # --- Пример: голубые фишки (акции, TQBR) ---
   - ticker: SBER
     class_code: TQBR
     alias: sber
     subscriptions:
+      # Лента обезличенных сделок (для объёма, частоты сделок, дельты по направлению).
       trades: true
+      # Последняя цена (дополняет оценку движения цены).
       last_price: true
-      info: true
-      order_book_depth: 10
+      # Справочная информация по инструменту (обычно для детектора не нужна).
+      info: false
+      # Глубина стакана: число уровней с каждой стороны; пусто/null — не подписываться на стакан.
+      order_book_depth:
+      # Свечи (если true — указать candle_interval).
       candles: false
       candle_interval: 1m
 
@@ -16,8 +37,8 @@ instruments:
     subscriptions:
       trades: true
       last_price: true
-      info: true
-      order_book_depth: 10
+      info: false
+      order_book_depth:
       candles: false
       candle_interval: 1m
 
@@ -27,8 +48,41 @@ instruments:
     subscriptions:
       trades: true
       last_price: true
-      info: true
-      order_book_depth: 10
+      info: false
+      order_book_depth:
       candles: false
       candle_interval: 1m
 
+  # --- Фьючерсы (пример контрактов; при смене экспирации замените ticker) ---
+  - ticker: BRM6
+    class_code: SPBFUT
+    alias: brent_oil
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth:
+      candles: false
+      candle_interval: 1m
+
+  - ticker: GDM6
+    class_code: SPBFUT
+    alias: gold
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth:
+      candles: false
+      candle_interval: 1m
+
+  - ticker: SVM6
+    class_code: SPBFUT
+    alias: silver
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth:
+      candles: false
+      candle_interval: 1m
