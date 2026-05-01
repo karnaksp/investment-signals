@@ -1,3 +1,5 @@
+"""Доменные модели потока: нормализованное событие и сигнал детектора."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

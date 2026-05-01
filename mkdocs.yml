@@ -1,0 +1,66 @@
+# Сборка: pip install -e ".[docs]" && python -m mkdocs build
+# Просмотр: python -m mkdocs serve
+
+site_name: T-Invest Signal Engine
+site_description: Конвейер обнаружения рыночных аномалий по данным T-Invest
+
+theme:
+  name: material
+  language: ru
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Тёмная тема
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Светлая тема
+  features:
+    - navigation.expand
+    - navigation.instant
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_div_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - toc:
+      permalink: true
+
+nav:
+  - Главная: index.md
+  - Архитектура: architecture.md
+  - Детекторы и паттерны: detectors.md
+  - HTTP API (Swagger): openapi.md
+  - Код (автодок):
+      - Обзор модулей: reference/overview.md
+      - config: reference/config.md
+      - models и serialization: reference/models.md
+      - detector_core: reference/detector_core.md
+      - instruments: reference/instruments.md
+      - sinks: reference/sinks.md
+      - Сервисы CLI: reference/services.md

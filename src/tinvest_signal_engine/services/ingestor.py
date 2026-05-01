@@ -1,3 +1,5 @@
+"""Инжестор: подписка на MarketDataStream и публикация в топик сырых событий."""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,5 @@
+"""Скользящие окна, z-score и генерация ``TriggerSignal`` (см. ``models``)."""
+
 from __future__ import annotations
 
 import math
@@ -50,6 +52,8 @@ class InstrumentState:
 
 
 class SignalDetector:
+    """Обновляет состояние по инструменту и возвращает список новых сигналов."""
+
     def __init__(
         self,
         settings: DetectorSettings,

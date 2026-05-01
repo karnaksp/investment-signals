@@ -1,3 +1,5 @@
+"""Всплывающие уведомления на рабочем столе Windows для локального нотификатора."""
+
 from __future__ import annotations
 
 import logging

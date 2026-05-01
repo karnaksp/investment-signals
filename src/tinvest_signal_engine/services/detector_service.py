@@ -1,3 +1,5 @@
+"""Сервис детектора: чтение raw-топика, запись сигналов в Postgres и Kafka."""
+
 from __future__ import annotations
 
 import json

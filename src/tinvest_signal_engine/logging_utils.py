@@ -1,3 +1,5 @@
+"""Единообразная настройка логирования для CLI-сервисов."""
+
 from __future__ import annotations
 
 import logging

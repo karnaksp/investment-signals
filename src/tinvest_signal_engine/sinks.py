@@ -1,3 +1,5 @@
+"""Вывод сигналов: Postgres, HTTP webhook и Telegram Bot API."""
+
 from __future__ import annotations
 
 import logging

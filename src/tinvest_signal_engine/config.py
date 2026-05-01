@@ -1,3 +1,9 @@
+"""Загрузка YAML и настроек окружения.
+
+Содержит типы для списка инструментов, порогов детектора и единый
+:class:`RuntimeSettings`, собираемый из переменных среды для всех сервисов.
+"""
+
 from __future__ import annotations
 
 import os
@@ -50,7 +56,7 @@ class InstrumentSubscriptionConfig:
 
 @dataclass(frozen=True)
 class LoadedDetectorConfig:
-    """Detector defaults plus optional per-instrument overrides (key = instrument_id)."""
+    """Базовые настройки детектора и переопределения по instrument_id."""
 
     default: "DetectorSettings"
     per_instrument: dict[str, "DetectorSettings"]
@@ -205,7 +211,9 @@ class RuntimeSettings:
         )
 
 
-def _detector_settings_from_mapping(detector: dict[str, Any]) -> DetectorSettings:
+def _detector_settings_from_mapping(
+    detector: dict[str, Any],
+) -> DetectorSettings:
     return DetectorSettings(
         sample_every_seconds=int(detector.get("sample_every_seconds", 5)),
         min_baseline_points=int(detector.get("min_baseline_points", 12)),

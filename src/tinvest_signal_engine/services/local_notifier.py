@@ -1,3 +1,5 @@
+"""Потребитель топика сигналов на хосте; показ desktop-уведомлений (Windows)."""
+
 from __future__ import annotations
 
 import json

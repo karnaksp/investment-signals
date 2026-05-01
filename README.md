@@ -1,8 +1,8 @@
 # T-Invest Signal Engine
 
-Realtime market anomaly detection pipeline for T-Invest data.
+Конвейер обнаружения рыночных аномалий в реальном времени по данным T-Invest.
 
-The project is built as a small data-engineering stack, not as a single script:
+Проект собран как небольшой data-engineering стек:
 
 ```text
 T-Invest MarketDataStream
@@ -22,31 +22,32 @@ Postgres   Alert topic / webhook
  FastAPI
 ```
 
-## What it does
+## Что делает система
 
-- Pulls realtime market data from the official T-Invest stream.
-- Publishes normalized JSON events into a Kafka-compatible broker.
-- Detects rolling anomalies per ticker:
-  - abnormal volume
-  - abnormal trade count
-  - sharp price move
-  - spread widening
-  - order book imbalance
-  - trading status change
-- Stores only trigger signals (anomalies) in Postgres.
-- Keeps the main market stream in Kafka as a transit stream.
-- Exposes recent signals and summaries through FastAPI.
+- Забирает рыночные данные в реальном времени из официального потока T-Invest.
+- Публикует нормализованные JSON-события в Kafka-совместимый брокер.
+- Обнаруживает скользящие аномалии по каждому тикеру:
+  - аномальный объём
+  - аномальное число сделок
+  - резкое движение цены
+  - расширение спреда
+  - дисбаланс стакана
+  - смена торгового статуса
+- Отправляет алерт в мессенджер.
+- Сохраняет в Postgres только срабатывания (аномалии).
+- Основной рыночный поток держит в Kafka как транзитный.
+- Отдаёт последние сигналы и сводки через FastAPI.
 
-## Why this stack
+## Зачем такой стек
 
-- `T-Invest` gives the official market stream.
-- `Redpanda` gives a Kafka-compatible event backbone with low local setup cost.
-- `Postgres` is a reliable OLTP storage for trigger events and API reads.
-- `FastAPI` is enough for a thin read API and integration surface.
+- `T-Invest` даёт официальный рыночный поток.
+- `Redpanda` — Kafka-совместимый каркас событий с низкой стоимостью локального развёртывания.
+- `Postgres` — надёжное OLTP-хранилище для триггер-событий и чтения API.
+- `FastAPI` достаточно для тонкого read API и точки интеграции.
 
-This keeps the project close to a real event pipeline while remaining lightweight enough to run locally.
+Так проект остаётся близким к реальному event pipeline, но достаточно лёгким для локального запуска.
 
-## Project layout
+## Структура проекта
 
 ```text
 conf/
@@ -67,75 +68,60 @@ tests/
   test_detector.py
 ```
 
-## Quickstart
+## Быстрый старт
 
-1. Copy `.env.example` to `.env`.
-2. Put your T-Invest token into `TINVEST_TOKEN`.
-3. Adjust `conf/instruments.yaml` with your watchlist.
-4. Start the stack:
+1. Скопируйте `.env.example` в `.env`.
+2. Укажите токен T-Invest в `TINVEST_TOKEN`.
+3. Настройте `conf/instruments.yaml` под свой список инструментов.
+4. Запустите стек:
 
 ```bash
 docker compose up --build
 ```
 
-5. Open:
+5. Откройте в браузере:
 
 - Redpanda Console: `http://localhost:38080`
-- API health: `http://localhost:38000/health`
-- Recent signals: `http://localhost:38000/signals/recent`
+- Проверка API: `http://localhost:38000/health`
+- Последние сигналы: `http://localhost:38000/signals/recent`
 
-## Desktop popup alerts on Windows
+## Всплывающие уведомления на рабочем столе Windows
 
-This is possible without administrator rights.
+Это возможно без прав администратора.
 
-Important detail: popup notifications must be shown by a process running on your Windows host, not from inside Docker. Because of that, the repository includes a separate local notifier that subscribes to the signal topic and shows system popups on your desktop.
+Важно: всплывающие уведомления должен показывать процесс на хосте Windows, а не изнутри Docker. Поэтому в репозитории есть отдельный локальный нотификатор: он подписывается на топик сигналов и показывает системные всплывающие окна на рабочем столе.
 
-Run it in a second terminal on Windows:
+Запустите во втором терминале на Windows:
 
 ```bash
 pip install -e .
 tinvest-local-notifier
 ```
 
-By default it reads Kafka from `localhost:39092`, which matches the exposed Redpanda port in `docker-compose.yml`.
+По умолчанию он ходит в Kafka по `localhost:39092` — это тот же порт Redpanda, что проброшен в `docker-compose.yml`.
 
-Relevant env vars:
+Полезные переменные окружения:
 
 - `KAFKA_HOST_BOOTSTRAP_SERVERS=localhost:39092`
 - `LOCAL_NOTIFIER_CONSUMER_GROUP=local-notifier`
 - `LOCAL_NOTIFICATION_DURATION_SECONDS=5`
 
-## Local Python run
+## Конфигурация
 
-If you prefer to run the services without Docker:
+### Инструменты
 
-```bash
-pip install -e .
-tinvest-raw-stream
-tinvest-detector
-tinvest-api
-tinvest-local-notifier
-tinvest-threshold-cron
-```
+`conf/instruments.yaml` — список инструментов. Каждый задаётся парой `ticker` + `class_code`; то же поддерживается в T-Invest как `instrument_id`.
 
-You still need a running Kafka-compatible broker and Postgres.
+### Пороги детектора
 
-## Configuration
+`conf/detectors.yaml` задаёт скользящие окна, интервал выборки, пороги z-score и длительность cooldown.
 
-### Instruments
-
-`conf/instruments.yaml` is the watchlist. Each instrument is configured by `ticker` + `class_code`, which is also supported by T-Invest as `instrument_id`.
-
-### Detector thresholds
-
-`conf/detectors.yaml` controls rolling windows, sample interval, z-score thresholds, and cooldowns.
-
-Automatic per-instrument overrides are written by `tinvest-threshold-cron` into `conf/detectors.overrides.yaml` and hot-reloaded by detector service.
-The daily job uses hourly candles for the last 7 days and computes:
+Автоматические переопределения по инструментам пишет `tinvest-threshold-cron` в `conf/detectors.overrides.yaml`; сервис детектора подхватывает их без перезапуска.
+Ежедневное задание берёт часовые свечи за последние 7 дней и считает:
 
 `price_move_absolute_threshold_bps = mean(abs((close - open) / open)) * 10_000 * THRESHOLD_HOURLY_DEVIATION_MULTIPLIER`
 
-Useful env vars:
+Полезные переменные окружения:
 
 - `DETECTORS_OVERRIDES_CONFIG=conf/detectors.overrides.yaml`
 - `THRESHOLD_RECALC_INTERVAL_HOURS=24`
@@ -143,17 +129,32 @@ Useful env vars:
 - `THRESHOLD_HOURLY_DEVIATION_MULTIPLIER=1.0`
 - `CONFIG_RELOAD_INTERVAL_SECONDS=10`
 
-### Telegram alerts
+### Алерты в Telegram
 
-Detector can send trigger alerts directly to Telegram via bot API.
+Детектор может отправлять алерты по срабатыванию напрямую в Telegram через Bot API.
 
-Set in `.env`:
+В `.env`:
 
-- `TELEGRAM_BOT_TOKEN=<your_bot_token>`
-- `TELEGRAM_CHAT_ID=<chat_or_channel_id>`
-- `TELEGRAM_MESSAGE_THREAD_ID=<optional_topic_id_for_forum_chat>`
+- `TELEGRAM_BOT_TOKEN=<ваш_токен_бота>`
+- `TELEGRAM_CHAT_ID=<id_чата_или_канала>`
+- `TELEGRAM_MESSAGE_THREAD_ID=<необязательно_id_топика_в_форуме>`
 
-If token/chat id are not set, Telegram delivery is disabled.
+Если токен или chat id не заданы, доставка в Telegram отключена.
+
+## Документация
+
+- **Архитектура и роли компонентов** — `docs/architecture.md` (потоки данных, таблицы топиков и сервисов).
+- **Детекторы и торговые паттерны** — `docs/detectors.md` (типы сигналов, смысл для рынка, окна и пороги).
+- **Статический сайт из MkDocs** (включая автосправочник по коду `tinvest_signal_engine`):
+
+```bash
+pip install -e ".[docs]"
+python -m mkdocs serve
+```
+
+Сборка в каталог `site/`: `python -m mkdocs build` (или `mkdocs build`, если скрипт в `PATH`).
+
+- **Интерактивное описание REST** при запущенном API: Swagger UI `http://localhost:38000/docs`, ReDoc `http://localhost:38000/redoc`, схема OpenAPI `http://localhost:38000/openapi.json`.
 
 ## API
 
@@ -161,16 +162,17 @@ If token/chat id are not set, Telegram delivery is disabled.
 - `GET /signals/recent?limit=50&instrument_id=SBER_TQBR`
 - `GET /signals/summary?minutes=60`
 
-## Notes
+Подробности параметров и схем ответов — на странице `/docs` у работающего сервиса `tinvest-api`.
 
-- The detector logic is intentionally modular and lives in `detector_core.py`.
-- The current implementation keeps streaming state in memory per instrument.
-- For production scale, the next step would be a stateful stream processor or partition-aware horizontal workers.
-- The repository vendors the official `tinkoff/invest-python` SDK source locally under `src/tinkoff` so Docker builds do not depend on access to a pre-release-only PyPI package.
-- Redpanda retention is configured to cap local data usage (100MB) for lightweight local runs.
+## Замечания
 
-## Official references
+- Логика детектора намеренно модульная и находится в `detector_core.py`.
+- Текущая реализация держит состояние стриминга в памяти по каждому инструменту.
+- В репозитории vendored исходники официального SDK `tinkoff/invest-python` в `src/tinkoff`, чтобы Docker-сборки не зависели от доступа к PyPI-пакету только в пререлизе.
+- Retention Redpanda настроен с ограничением локального объёма данных (100 МБ) для лёгких локальных прогонов.
+
+## Официальные ссылки
 
 - T-Invest `MarketDataStream`: <https://developer.tbank.ru/invest/api/market-data-stream-service-market-data-stream>
 - T-Invest `GetInstrumentBy`: <https://developer.tbank.ru/invest/api/instruments-service-get-instrument-by>
-- Official Python SDK: <https://github.com/Tinkoff/invest-python>
+- Официальный Python SDK: <https://github.com/Tinkoff/invest-python>

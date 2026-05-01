@@ -1,2 +1,7 @@
-"""Realtime anomaly detection pipeline for T-Invest market data."""
+"""Движок сигналов по потоку рынка T-Invest.
+
+Собирает нормализованные события, ищет аномалии в скользящих окнах,
+пишет срабатывания в Postgres и в Kafka-топик сигналов. Точки входа CLI —
+в пакете ``tinvest_signal_engine.services``.
+"""
 

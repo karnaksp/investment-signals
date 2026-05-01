@@ -1,3 +1,5 @@
+"""Утилиты времени, JSON-совместимых структур и котировок из payload."""
+
 from __future__ import annotations
 
 import enum

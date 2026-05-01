@@ -1,3 +1,5 @@
+"""Реестр метаданных инструментов по ответам API T-Invest."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

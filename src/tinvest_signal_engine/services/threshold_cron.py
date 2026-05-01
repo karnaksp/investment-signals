@@ -1,3 +1,5 @@
+"""Периодический пересчёт порогов по истории свечей и запись YAML overrides."""
+
 from __future__ import annotations
 
 import logging

@@ -26,7 +26,7 @@ instruments:
       # Справочная информация по инструменту (обычно для детектора не нужна).
       info: false
       # Глубина стакана: число уровней с каждой стороны; пусто/null — не подписываться на стакан.
-      order_book_depth:
+      order_book_depth: 50
       # Свечи (если true — указать candle_interval).
       candles: false
       candle_interval: 1m
@@ -61,7 +61,7 @@ instruments:
       trades: true
       last_price: true
       info: false
-      order_book_depth:
+      order_book_depth: 50
       candles: false
       candle_interval: 1m
 
@@ -72,7 +72,7 @@ instruments:
       trades: true
       last_price: true
       info: false
-      order_book_depth:
+      order_book_depth: 50
       candles: false
       candle_interval: 1m
 
@@ -83,6 +83,6 @@ instruments:
       trades: true
       last_price: true
       info: false
-      order_book_depth:
+      order_book_depth: 50
       candles: false
       candle_interval: 1m
