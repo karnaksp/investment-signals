@@ -5,21 +5,31 @@
 Проект собран как небольшой data-engineering стек:
 
 ```text
-T-Invest MarketDataStream
-        |
-        v
-     Redpanda (raw: JSON или protobuf+SR)
-    /         \
-   v           v
-Detector    ClickHouse (Kafka Engine → MergeTree archive)
-   |
-+--+--+
-|     |
-v     v
-Postgres   signals topic / webhook / Telegram
-   |
-   v
-FastAPI · Prometheus / Grafana · Dagster (пороги + unary single-shot → Kafka / YAML)
+T-Invest (MarketDataStream)
+            |
+            v
+       tinvest-raw-stream (ingestor)
+            |
+            v
+   Redpanda (+ Schema Registry): marketdata.raw / .raw.unary / .signals
+      /              |                    \
+     v               v                     v
+ClickHouse     tinvest-detector ◄── Redis (состояние окон, опционально)
+Kafka→MergeTree      |              при REDIS_URL
+ + feature bars      +----------+----------+
+                      v          v          v
+                 Postgres    signals    sinks (TG / webhook …)
+                 (сигналы)    topic
+
+tinvest-api (FastAPI) ──► Postgres · ClickHouse (read)
+
+Оркестрация и unary (в Kafka, те же entrypoints что в compose):
+  Dagster (webserver + daemon) ──► пороги в conf/*.yaml · single-shot unary
+  tinvest-market-unary-emitter   ──► профиль compose «unary», цикл unary → raw
+
+Observability:
+  Prometheus ◄── detector · Redpanda · tinvest-accuracy-metrics (JSON из var/accuracy)
+  Grafana
 ```
 
 ## Что делает система
