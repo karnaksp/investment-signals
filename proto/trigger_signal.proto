@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package tinvest.signal.v1;
+
+// Wire model aligned with TriggerSignal.to_dict() for Schema Registry.
+message TriggerSignalV1 {
+  string signal_id = 1;
+  string detected_at_rfc3339 = 2;
+  string instrument_id = 3;
+  string ticker = 4;
+  string class_code = 5;
+  string alias = 6;
+  string source_event_type = 7;
+  string signal_type = 8;
+  int32 severity = 9;
+  double metric_value = 10;
+  double baseline_value = 11;
+  double z_score = 12;
+  int32 window_seconds = 13;
+  string summary = 14;
+  string payload_json = 15;
+}

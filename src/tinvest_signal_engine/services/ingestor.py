@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
@@ -21,6 +20,9 @@ from tinkoff.invest import (
 from tinkoff.invest.constants import INVEST_GRPC_API_SANDBOX
 
 from ..config import RuntimeSettings, load_instrument_configs
+from ..kafka_proto import build_raw_value_serializer
+from ..kafka_wire_config import validate_kafka_wire_settings
+from ..schema_registry import register_protobuf_schema, schema_subject_for_topic
 from ..instruments import InstrumentMetadata, build_instrument_registry
 from ..logging_utils import configure_logging
 from ..models import NormalizedEvent
@@ -36,7 +38,14 @@ CONTROL_FIELDS = (
     "subscribe_last_price_response",
     "ping",
 )
-PAYLOAD_FIELDS = ("trade", "last_price", "orderbook", "trading_status", "candle")
+PAYLOAD_FIELDS = (
+    "trade",
+    "last_price",
+    "orderbook",
+    "trading_status",
+    "candle",
+    "open_interest",
+)
 INTERVAL_MAP = {
     "1m": SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE,
     "5m": SubscriptionInterval.SUBSCRIPTION_INTERVAL_FIVE_MINUTES,
@@ -58,16 +67,45 @@ INTERVAL_MAP = {
 }
 
 
+def _kafka_compression_type(settings: RuntimeSettings) -> str | None:
+    codec = (settings.kafka_compression_codec or "").strip().lower()
+    if codec in {"", "none", "off", "plaintext"}:
+        return None
+    return codec
+
+
 def build_kafka_producer(settings: RuntimeSettings) -> KafkaProducer:
-    return KafkaProducer(
-        bootstrap_servers=settings.kafka_bootstrap_servers.split(","),
-        acks="all",
-        linger_ms=50,
-        key_serializer=lambda value: value.encode("utf-8"),
-        value_serializer=lambda value: json.dumps(
-            value, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8"),
+    compression = _kafka_compression_type(settings)
+    sid = settings.kafka_protobuf_schema_id_raw
+    register_fn = None
+    if (
+        settings.kafka_raw_value_format == "protobuf"
+        and sid is None
+        and settings.schema_registry_url
+    ):
+        proto_path = settings.proto_dir / "normalized_event.proto"
+        subject = schema_subject_for_topic(settings.kafka_raw_topic)
+        sr_url = settings.schema_registry_url
+
+        def register_fn() -> int:
+            return register_protobuf_schema(sr_url, subject, proto_path)
+
+    value_serializer = build_raw_value_serializer(
+        format_name=settings.kafka_raw_value_format,
+        schema_id=sid,
+        register_schema=register_fn,
     )
+    producer_kwargs: dict[str, Any] = {
+        "bootstrap_servers": settings.kafka_bootstrap_servers.split(","),
+        "acks": "all",
+        "linger_ms": settings.kafka_linger_ms,
+        "batch_size": settings.kafka_batch_bytes,
+        "key_serializer": lambda value: value.encode("utf-8"),
+        "value_serializer": value_serializer,
+    }
+    if compression is not None:
+        producer_kwargs["compression_type"] = compression
+    return KafkaProducer(**producer_kwargs)
 
 
 def subscribe_to_stream(stream, instruments) -> None:
@@ -143,6 +181,7 @@ def normalize_stream_message(message, registry) -> NormalizedEvent | None:
             alias=metadata.alias,
             figi=metadata.figi,
             uid=metadata.uid,
+            lot=int(metadata.lot or 0),
             source_time=source_time,
             received_at=utc_now(),
             payload=plain_value,
@@ -152,6 +191,7 @@ def normalize_stream_message(message, registry) -> NormalizedEvent | None:
 
 def main() -> None:
     settings = RuntimeSettings.from_env()
+    validate_kafka_wire_settings(settings, check_signal=False)
     configure_logging(settings.log_level)
     if not settings.tinvest_token:
         raise RuntimeError("TINVEST_TOKEN is required")
@@ -213,10 +253,21 @@ def main() -> None:
                         normalized = normalize_stream_message(message, registry)
                         if normalized is None:
                             continue
+                        out_val: Any = (
+                            normalized
+                            if settings.kafka_raw_value_format == "protobuf"
+                            else normalized.to_dict()
+                        )
                         kafka_producer.send(
                             settings.kafka_raw_topic,
                             key=normalized.instrument_id,
-                            value=normalized.to_dict(),
+                            value=out_val,
+                        )
+                        logger.info(
+                            "raw_kafka_send event_id=%s instrument_id=%s event_type=%s",
+                            normalized.event_id,
+                            normalized.instrument_id,
+                            normalized.event_type,
                         )
             except KeyboardInterrupt:
                 raise

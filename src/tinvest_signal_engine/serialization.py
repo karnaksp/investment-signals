@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import enum
-import json
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
+
+import orjson
 
 
 def utc_now() -> datetime:
@@ -64,8 +65,38 @@ def quotation_to_float(value: Any) -> float | None:
     return None
 
 
+def _orjson_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return normalized.isoformat()
+    if isinstance(value, enum.Enum):
+        return value.name
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def json_dumps(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return orjson.dumps(payload, default=_orjson_default).decode("utf-8")
+
+
+def json_dumps_bytes(payload: dict[str, Any]) -> bytes:
+    return orjson.dumps(payload, default=_orjson_default)
+
+
+def json_loads(raw: str | bytes | bytearray | memoryview) -> Any:
+    return orjson.loads(raw)
+
+
+def kafka_json_serializer(value: Any) -> bytes:
+    """Kafka ``value_serializer`` for dict payloads on the hot path."""
+    if isinstance(value, dict):
+        return orjson.dumps(value, default=_orjson_default)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    return orjson.dumps(value, default=_orjson_default)
+
+
+def kafka_json_deserializer(raw: bytes) -> Any:
+    return orjson.loads(raw)
 
 
 def _is_empty(value: Any) -> bool:
@@ -74,4 +105,3 @@ def _is_empty(value: Any) -> bool:
     if isinstance(value, (list, tuple, dict, set)):
         return len(value) == 0
     return False
-

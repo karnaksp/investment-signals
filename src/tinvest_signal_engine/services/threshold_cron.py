@@ -1,4 +1,9 @@
-"""Периодический пересчёт порогов по истории свечей и запись YAML overrides."""
+"""Пересчёт порогов по истории свечей и запись YAML overrides.
+
+Основной сценарий в compose — вызов :func:`run_recalc_once` из Dagster
+(``threshold_recalc_job``). :func:`main` оставлен для legacy-сервиса
+``tinvest-threshold-cron`` (бесконечный цикл).
+"""
 
 from __future__ import annotations
 
@@ -113,6 +118,14 @@ def _recalculate(settings: RuntimeSettings) -> None:
     )
 
 
+def run_recalc_once(settings: RuntimeSettings | None = None) -> None:
+    """Один прогон пересчёта порогов (Dagster, тесты, ручной вызов)."""
+    cfg = settings or RuntimeSettings.from_env()
+    if not cfg.tinvest_token:
+        raise RuntimeError("TINVEST_TOKEN is required")
+    _recalculate(cfg)
+
+
 def main() -> None:
     settings = RuntimeSettings.from_env()
     configure_logging(settings.log_level)
@@ -122,7 +135,7 @@ def main() -> None:
     sleep_seconds = interval_hours * 3600
     while True:
         try:
-            _recalculate(settings)
+            run_recalc_once(settings)
         except Exception:
             logger.exception("Threshold recalculation failed")
         logger.info("Next threshold recalculation in %s hours", interval_hours)

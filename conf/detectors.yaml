@@ -10,39 +10,57 @@
 # Ключ инструмента совпадает с форматом в conf/instruments.yaml: TICKER_CLASS
 # (например SBER_TQBR, BRM6_SPBFUT).
 #
-# Авто-пороги из пайплайна threshold-cron лежат в detectors.overrides.yaml
+# Авто-пороги из Dagster (threshold_recalc_job) или legacy threshold-cron — в detectors.overrides.yaml
 # и мержятся поверх этого файла (см. DETECTORS_OVERRIDES_CONFIG в .env).
 # ============================================================================
 
 detector:
   # Как часто (сек) пересчитывать выборки при наличии событий в окне.
-  sample_every_seconds: 5
+  # Реже — меньше корреляции между соседними точками истории и меньше «дребезга».
+  sample_every_seconds: 15
 
   # Минимум точек в истории для расчёта z-score (иначе сигнал не считается).
-  min_baseline_points: 12
+  min_baseline_points: 24
 
   # Максимум точек в каждой скользящей истории (обрезка «хвоста»).
-  baseline_points: 120
+  baseline_points: 160
 
   # Окно для ленты сделок: объём, число сделок, дельта по направлению (сек).
-  trade_window_seconds: 60
+  trade_window_seconds: 180
 
   # Окно для оценки движения цены по last_price/trade (сек).
-  price_window_seconds: 90
+  price_window_seconds: 180
 
   # Окно для спреда и имбаланса стакана (сек).
-  orderbook_window_seconds: 120
+  orderbook_window_seconds: 180
 
   # Пауза между любыми двумя алертами одного типа (сек), кроме combo сигналов.
-  alert_cooldown_seconds: 120
+  alert_cooldown_seconds: 300
+
+  # Дополнительно к z-score: относительное отклонение метрики от baseline (доля).
+  # При почти нулевом std z-score раздувается — этот порог отсекает «микроскопические» выбросы.
+  min_relative_metric_excursion: 0.12
+
+  # Расстояние mid до ближайшего limit_up/down (bps); 0 = выключено (см. поля стакана в стриме).
+  limit_band_warning_bps: 0
+  # Алерт при is_consistent=false в снимке стакана.
+  signal_orderbook_inconsistent: false
+  # z-score по потоку open_interest (фьючерсы); 0 = выключено.
+  open_interest_zscore_threshold: 0
+  # z-score по (high−low)/open в bps на закрытых свечах; 0 = выключено (нужны candles в instruments).
+  candle_range_zscore_threshold: 0
+  # Сигнал market_access_changed при смене limit_order_available / market_order_available.
+  track_market_access_flags: true
+  # Прикладывать к payload сигнала последние unary-снимки (Kafka: market_values / tech_analysis).
+  attach_unary_context_to_signals: true
 
   # --- Пороги z-score по типам сигналов ---
   # Чем выше — тем реже срабатывание (нужен более «редкий» выброс относительно базы).
-  volume_zscore_threshold: 4.0
-  trade_count_zscore_threshold: 4.0
-  price_return_zscore_threshold: 3.5
-  spread_zscore_threshold: 3.0
-  imbalance_zscore_threshold: 3.0
+  volume_zscore_threshold: 4.5
+  trade_count_zscore_threshold: 4.5
+  price_return_zscore_threshold: 4.0
+  spread_zscore_threshold: 3.5
+  imbalance_zscore_threshold: 3.5
 
   # Дополнительный порог по модулю имбаланса (0..1): ниже этого абсолютного
   # отклонения от 50/50 не считаем «аномальным» даже при высоком z-score.
@@ -59,10 +77,10 @@ detector:
   combo_enabled: true
 
   # За сколько секунд «назад» считать компоненты combo актуальными (свежесть).
-  combo_freshness_seconds: 15
+  combo_freshness_seconds: 45
 
   # Сумма баллов по компонентам должна быть >= этого числа для алерта combo.
-  combo_min_score: 6
+  combo_min_score: 7
 
   # Отдельная пауза между алертами microstructure_combo_* (сек).
   combo_alert_cooldown_seconds: 180
@@ -79,6 +97,35 @@ detector:
 
   # Минимальный |накопленная дельта по лотам| за trade_window, чтобы дать баллы за дельту.
   combo_delta_min_abs_qty: 1.0
+
+  # --- Эвристика «спуфинг» верхних уровней (L2/L3 сумма по 3 уровням) ---
+  # Ищет резкое исчезновение крупной стены на одной стороне при почти неподвижном mid.
+  # По умолчанию выключено: включайте осознанно (много ложных срабатываний на тонких инструментах).
+  # spoofing_enabled: false
+  # spoofing_wall_ratio: 2.5          # bid_L3 / ask_L3 (или зеркально для ask)
+  # spoofing_qty_drop_ratio: 0.55    # доля «схлопывания» стены между двумя снапшотами
+  # spoofing_max_mid_move_bps: 3.0   # допустимое движение mid между снапшотами
+  # spoofing_max_gap_seconds: 2.0    # максимум времени между снапшотами
+  # spoofing_min_wall_qty: 500.0     # минимальный объём стены (лоты, сумма 3 уровней)
+  # spoofing_lookback_seconds: 5.0   # хвост истории снапшотов
+
+  # order_book_depth_levels: 5     # L2: сколько уровней суммировать для imbalance / OBI / spoofing
+  # obi_dynamics_enabled: false
+  # obi_delta_absolute_threshold: 0.12
+  # obi_delta_zscore_threshold: 2.5
+  # trade_burst_enabled: false
+  # trade_burst_window_ms: 100
+  # trade_burst_min_trades: 50
+  # trade_burst_min_abs_qty: 5.0
+  # lead_lag_enabled: false
+  # lead_lag_window_seconds: 30
+  # lead_lag_leader_move_bps: 8.0
+  # lead_lag_follower_max_bps: 2.0
+
+# lead_lag:
+#   pairs:
+#     - leader: SBER_TQBR
+#       follower: LKOH_TQBR
 
 # -----------------------------------------------------------------------------
 # Переопределения только для выбранных инструментов (ключ = TICKER_CLASS).

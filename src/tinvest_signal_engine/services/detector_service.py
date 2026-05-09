@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
+from typing import Any
 
 from kafka import KafkaConsumer, KafkaProducer
 
 from ..config import RuntimeSettings, load_detector_config
+from ..data_quality import log_validation_failure, validate_normalized_event_dict
 from ..detector_core import SignalDetector
+from ..kafka_proto import (
+    build_raw_value_deserializer,
+    build_signal_value_serializer,
+)
+from ..kafka_wire_config import validate_kafka_wire_settings
 from ..logging_utils import configure_logging
-from ..models import NormalizedEvent
+from ..metrics import (
+    observe_message,
+    observe_signals,
+    start_metrics_server,
+    timed_process_block,
+)
+from ..models import NormalizedEvent, TriggerSignal
+from ..redis_detector_state import flush_detector_to_redis, hydrate_detector_from_redis
+from ..signal_enrichment import enrich_signal_for_delivery
+from ..schema_registry import register_protobuf_schema, schema_subject_for_topic
 from ..sinks import (
     TelegramAlertSink,
     WebhookAlertSink,
@@ -21,35 +36,76 @@ from ..sinks import (
 logger = logging.getLogger(__name__)
 
 
+def _kafka_compression_type(settings: RuntimeSettings) -> str | None:
+    codec = (settings.kafka_compression_codec or "").strip().lower()
+    if codec in {"", "none", "off", "plaintext"}:
+        return None
+    return codec
+
+
 def build_consumer(settings: RuntimeSettings) -> KafkaConsumer:
+    deserializer = build_raw_value_deserializer(
+        format_name=settings.kafka_raw_value_format,
+    )
     return KafkaConsumer(
         settings.kafka_raw_topic,
         bootstrap_servers=settings.kafka_bootstrap_servers.split(","),
         auto_offset_reset=settings.kafka_auto_offset_reset,
         enable_auto_commit=True,
         group_id=settings.kafka_consumer_group,
-        value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+        value_deserializer=deserializer,
     )
 
 
 def build_signal_producer(settings: RuntimeSettings) -> KafkaProducer:
-    return KafkaProducer(
-        bootstrap_servers=settings.kafka_bootstrap_servers.split(","),
-        acks="all",
-        key_serializer=lambda value: value.encode("utf-8"),
-        value_serializer=lambda value: json.dumps(
-            value, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8"),
+    compression = _kafka_compression_type(settings)
+    sid = settings.kafka_protobuf_schema_id_signal
+    register_fn = None
+    if (
+        settings.kafka_signal_value_format == "protobuf"
+        and sid is None
+        and settings.schema_registry_url
+    ):
+        proto_path = settings.proto_dir / "trigger_signal.proto"
+        subject = schema_subject_for_topic(settings.kafka_signal_topic)
+        sr_url = settings.schema_registry_url
+
+        def register_fn() -> int:
+            return register_protobuf_schema(sr_url, subject, proto_path)
+
+    value_serializer = build_signal_value_serializer(
+        format_name=settings.kafka_signal_value_format,
+        schema_id=sid,
+        register_schema=register_fn,
     )
+    producer_kwargs: dict[str, Any] = {
+        "bootstrap_servers": settings.kafka_bootstrap_servers.split(","),
+        "acks": "all",
+        "linger_ms": settings.kafka_linger_ms,
+        "batch_size": settings.kafka_batch_bytes,
+        "key_serializer": lambda value: value.encode("utf-8"),
+        "value_serializer": value_serializer,
+    }
+    if compression is not None:
+        producer_kwargs["compression_type"] = compression
+    return KafkaProducer(**producer_kwargs)
 
 
 def main() -> None:
     settings = RuntimeSettings.from_env()
+    validate_kafka_wire_settings(settings)
     configure_logging(settings.log_level)
+    if settings.metrics_listen_port:
+        start_metrics_server(settings.metrics_listen_port)
     loaded = load_detector_config(
         settings.detector_path, settings.detector_overrides_path
     )
-    detector = SignalDetector(loaded.default, loaded.per_instrument)
+    detector = SignalDetector(
+        loaded.default,
+        loaded.per_instrument,
+        lead_lag_pairs=loaded.lead_lag_pairs,
+    )
+    hydrate_detector_from_redis(detector, settings.redis_url)
     detector_mtime = settings.detector_path.stat().st_mtime
     detector_overrides_mtime = (
         settings.detector_overrides_path.stat().st_mtime
@@ -72,6 +128,17 @@ def main() -> None:
     )
 
     logger.info("Starting detector service")
+    if settings.redis_url:
+        try:
+            import redis
+
+            redis.Redis.from_url(settings.redis_url, decode_responses=True).ping()
+            logger.info("Redis ping OK (%s)", settings.redis_url)
+        except Exception:
+            logger.exception("Redis unavailable at REDIS_URL (detector continues)")
+
+    redis_flush_iv = max(0, settings.redis_alert_flush_interval_seconds)
+    last_redis_flush = time.monotonic()
 
     try:
         for message in consumer:
@@ -88,10 +155,10 @@ def main() -> None:
                         )
                         changed = (
                             mtime != detector_mtime
-                            or overrides_mtime
-                            != detector_overrides_mtime
+                            or overrides_mtime != detector_overrides_mtime
                         )
                         if changed:
+                            flush_detector_to_redis(detector, settings.redis_url)
                             loaded = load_detector_config(
                                 settings.detector_path,
                                 settings.detector_overrides_path,
@@ -99,7 +166,9 @@ def main() -> None:
                             detector = SignalDetector(
                                 loaded.default,
                                 loaded.per_instrument,
+                                lead_lag_pairs=loaded.lead_lag_pairs,
                             )
+                            hydrate_detector_from_redis(detector, settings.redis_url)
                             detector_mtime = mtime
                             detector_overrides_mtime = overrides_mtime
                             logger.info(
@@ -111,32 +180,83 @@ def main() -> None:
                         logger.exception("Detector config not accessible")
                     except Exception:
                         logger.exception("Failed to reload detector config")
+            raw_value = message.value
+            if not isinstance(raw_value, dict):
+                observe_message(event_type="unknown", outcome="invalid_shape")
+                logger.warning("Skipping non-dict Kafka payload: %r", type(raw_value))
+                continue
+            issues = validate_normalized_event_dict(raw_value)
+            if issues:
+                log_validation_failure(errors=issues, sample=raw_value)
+                observe_message(
+                    event_type=str(raw_value.get("event_type", "unknown")),
+                    outcome="invalid_payload",
+                )
+                continue
             try:
-                event = NormalizedEvent.from_dict(message.value)
-                signals = detector.process(event)
-                for signal in signals:
-                    signal_store.insert_signal(signal)
-                    producer.send(
-                        settings.kafka_signal_topic,
-                        key=signal.instrument_id,
-                        value=signal.to_dict(),
-                    )
-                    logger.info("%s", signal.summary)
-                    if webhook_sink.enabled:
-                        try:
-                            webhook_sink.send(signal)
-                        except Exception:
-                            logger.exception("Failed to deliver alert webhook")
-                    if telegram_sink.enabled:
-                        try:
-                            telegram_sink.send(signal)
-                        except Exception:
-                            logger.exception("Failed to send Telegram alert")
+                with timed_process_block():
+                    event = NormalizedEvent.from_dict(raw_value)
+                    signals = detector.process(event)
+                    signals = detector.enrich_signals_with_unary(signals)
+                    delivered: list[TriggerSignal] = []
+                    for signal in signals:
+                        signal = enrich_signal_for_delivery(signal)
+                        min_q = settings.signal_min_quality_score
+                        if min_q is not None:
+                            qs = signal.payload.get("quality_score")
+                            if isinstance(qs, int) and qs < min_q:
+                                logger.info(
+                                    "Skip signal below quality floor: %s "
+                                    "quality_score=%s min=%s",
+                                    signal.signal_type,
+                                    qs,
+                                    min_q,
+                                )
+                                continue
+                        delivered.append(signal)
+                    for signal in delivered:
+                        signal_store.insert_signal(signal)
+                        out_val: Any = (
+                            signal
+                            if settings.kafka_signal_value_format == "protobuf"
+                            else signal.to_dict()
+                        )
+                        producer.send(
+                            settings.kafka_signal_topic,
+                            key=signal.instrument_id,
+                            value=out_val,
+                        )
+                        logger.info("%s", signal.summary)
+                        if webhook_sink.enabled:
+                            try:
+                                webhook_sink.send(signal)
+                            except Exception:
+                                logger.exception("Failed to deliver alert webhook")
+                        if telegram_sink.enabled:
+                            try:
+                                telegram_sink.send(signal)
+                            except Exception:
+                                logger.exception("Failed to send Telegram alert")
+                    observe_message(event_type=event.event_type, outcome="ok")
+                    if delivered:
+                        observe_signals(
+                            [s.signal_type for s in delivered]
+                        )
+                    if redis_flush_iv > 0 and settings.redis_url:
+                        now_mono = time.monotonic()
+                        if now_mono - last_redis_flush >= redis_flush_iv:
+                            flush_detector_to_redis(detector, settings.redis_url)
+                            last_redis_flush = now_mono
             except Exception:
+                observe_message(
+                    event_type=str(raw_value.get("event_type", "unknown")),
+                    outcome="error",
+                )
                 logger.exception("Failed to process market event")
     except KeyboardInterrupt:
         logger.info("Detector service stopped by user")
     finally:
+        flush_detector_to_redis(detector, settings.redis_url)
         producer.flush()
         producer.close()
         consumer.close()

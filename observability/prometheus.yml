@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: redpanda
+    metrics_path: /public_metrics
+    static_configs:
+      - targets: ["redpanda:9644"]
+
+  - job_name: detector
+    static_configs:
+      - targets: ["detector:9108"]
+
+  - job_name: accuracy_metrics
+    static_configs:
+      - targets: ["accuracy-metrics:9110"]
+
+  # Раскомментируйте при `docker compose --profile unary up -d market-unary-emitter`:
+  # - job_name: market_unary_emitter
+  #   static_configs:
+  #     - targets: ["market-unary-emitter:9109"]

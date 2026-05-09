@@ -37,6 +37,18 @@ def _env_optional_int(name: str) -> int | None:
     return int(value) if value else None
 
 
+def _parse_admin_ip_allowlist(raw: str) -> frozenset[str] | None:
+    parts = tuple(p.strip() for p in (raw or "").split(",") if p.strip())
+    return frozenset(parts) if parts else None
+
+
+def _runtime_proto_dir() -> Path:
+    env = (os.getenv("PROTO_DIR") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return (Path(__file__).resolve().parent.parent.parent / "proto").resolve()
+
+
 @dataclass(frozen=True)
 class InstrumentSubscriptionConfig:
     ticker: str
@@ -60,6 +72,7 @@ class LoadedDetectorConfig:
 
     default: "DetectorSettings"
     per_instrument: dict[str, "DetectorSettings"]
+    lead_lag_pairs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,6 +102,40 @@ class DetectorSettings:
     combo_imbalance_long_threshold: float = 0.80
     combo_imbalance_short_threshold: float = 0.20
     combo_delta_min_abs_qty: float = 1.0
+    spoofing_enabled: bool = False
+    spoofing_wall_ratio: float = 2.5
+    spoofing_qty_drop_ratio: float = 0.55
+    spoofing_max_mid_move_bps: float = 3.0
+    spoofing_max_gap_seconds: float = 2.0
+    spoofing_min_wall_qty: float = 500.0
+    spoofing_lookback_seconds: float = 5.0
+    order_book_depth_levels: int = 5
+    obi_dynamics_enabled: bool = False
+    obi_delta_absolute_threshold: float = 0.12
+    obi_delta_zscore_threshold: float = 2.5
+    trade_burst_enabled: bool = False
+    trade_burst_window_ms: int = 100
+    trade_burst_min_trades: int = 50
+    trade_burst_min_abs_qty: float = 5.0
+    lead_lag_enabled: bool = False
+    lead_lag_window_seconds: int = 30
+    lead_lag_leader_move_bps: float = 8.0
+    lead_lag_follower_max_bps: float = 2.0
+    # Дополнительно к z-score: |metric−baseline|/|baseline|, если |baseline|≥1e-9.
+    # 0 = выключено. Снижает ложные срабатывания при «крошечном» std вокруг плоской базы.
+    min_relative_metric_excursion: float = 0.0
+    # Расстояние mid до ближайшего limit_up/limit_down (bps); 0 = не сигналить.
+    limit_band_warning_bps: float = 0.0
+    # Сигнал при is_consistent=false в снимке стакана из стрима.
+    signal_orderbook_inconsistent: bool = False
+    # z-score по истории открытого интереса (событие open_interest); 0 = выключено.
+    open_interest_zscore_threshold: float = 0.0
+    # z-score по диапазону свечи (high−low)/open в bps; 0 = выключено.
+    candle_range_zscore_threshold: float = 0.0
+    # Сигналить смену limit_order_available / market_order_available в trading_status.
+    track_market_access_flags: bool = True
+    # Добавлять в payload сигнала последний unary-снимок (market_values / tech_analysis), если есть.
+    attach_unary_context_to_signals: bool = True
 
 
 @dataclass(frozen=True)
@@ -99,6 +146,8 @@ class RuntimeSettings:
     kafka_bootstrap_servers: str
     kafka_host_bootstrap_servers: str
     kafka_raw_topic: str
+    # Отдельный топик для unary-эмиттера (иначе None → тот же kafka_raw_topic).
+    kafka_raw_unary_topic: str | None
     kafka_signal_topic: str
     kafka_consumer_group: str
     kafka_auto_offset_reset: str
@@ -114,6 +163,7 @@ class RuntimeSettings:
     postgres_startup_check_interval_seconds: int
     api_host: str
     api_port: int
+    api_reload: bool
     alert_webhook_url: str | None
     telegram_bot_token: str | None
     telegram_chat_id: str | None
@@ -126,6 +176,42 @@ class RuntimeSettings:
     threshold_recalc_interval_hours: int
     threshold_lookback_days: int
     threshold_hourly_deviation_multiplier: float
+    metrics_listen_port: int | None
+    kafka_linger_ms: int
+    kafka_batch_bytes: int
+    kafka_compression_codec: str
+    redis_url: str | None
+    redis_alert_flush_interval_seconds: int
+    proto_dir: Path
+    kafka_raw_value_format: str
+    kafka_signal_value_format: str
+    schema_registry_url: str | None
+    kafka_protobuf_schema_id_raw: int | None
+    kafka_protobuf_schema_id_signal: int | None
+    admin_api_token: str | None
+    signal_accuracy_json_path: Path
+    clickhouse_http_url: str | None
+    clickhouse_http_username: str | None
+    clickhouse_http_password: str | None
+    # Не публиковать сигналы с quality_score ниже порога (после enrich). None = выключено.
+    signal_min_quality_score: int | None
+    # Периодический unary-эмиттер → Kafka raw (см. tinvest-market-unary-emitter). 0 = выключено.
+    market_unary_poll_seconds: int
+    # Один цикл опроса и выход (Dagster / ручной прогон); иначе бесконечный цикл как сервис.
+    market_unary_single_shot: bool
+    # Режимы через запятую: market_values, tech_analysis (регистр не важен).
+    market_unary_modes_csv: str
+    market_unary_market_value_types_csv: str
+    market_unary_tech_indicator: str
+    market_unary_tech_interval: str
+    market_unary_tech_type_of_price: str
+    market_unary_tech_length: int
+    market_unary_tech_window_minutes: int
+    market_unary_tech_sleep_ms: int
+    market_unary_max_backoff_seconds: int
+    market_unary_metrics_listen_port: int | None
+    admin_api_rate_limit_per_minute: int
+    admin_api_allowed_ips: frozenset[str] | None
 
     @classmethod
     def from_env(cls) -> "RuntimeSettings":
@@ -155,6 +241,9 @@ class RuntimeSettings:
                 "KAFKA_HOST_BOOTSTRAP_SERVERS", "localhost:19092"
             ),
             kafka_raw_topic=os.getenv("KAFKA_RAW_TOPIC", "marketdata.raw"),
+            kafka_raw_unary_topic=(
+                (os.getenv("KAFKA_RAW_UNARY_TOPIC") or "").strip() or None
+            ),
             kafka_signal_topic=os.getenv(
                 "KAFKA_SIGNAL_TOPIC", "marketdata.signals"
             ),
@@ -184,6 +273,7 @@ class RuntimeSettings:
             ),
             api_host=os.getenv("API_HOST", "0.0.0.0"),
             api_port=int(os.getenv("API_PORT", "8000")),
+            api_reload=_env_bool("TINVEST_API_RELOAD", default=False),
             alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
@@ -207,6 +297,102 @@ class RuntimeSettings:
                 os.getenv(
                     "THRESHOLD_HOURLY_DEVIATION_MULTIPLIER", "1.0"
                 )
+            ),
+            metrics_listen_port=_env_optional_int("METRICS_LISTEN_PORT"),
+            kafka_linger_ms=int(os.getenv("KAFKA_LINGER_MS", "5")),
+            kafka_batch_bytes=int(os.getenv("KAFKA_BATCH_BYTES", "32768")),
+            kafka_compression_codec=(
+                os.getenv("KAFKA_COMPRESSION_CODEC", "lz4").strip().lower()
+                or "lz4"
+            ),
+            redis_url=(os.getenv("REDIS_URL") or "").strip() or None,
+            redis_alert_flush_interval_seconds=int(
+                os.getenv("REDIS_ALERT_FLUSH_INTERVAL_SECONDS", "30")
+            ),
+            proto_dir=_runtime_proto_dir(),
+            kafka_raw_value_format=(
+                os.getenv("KAFKA_RAW_VALUE_FORMAT", "json").strip().lower()
+                or "json"
+            ),
+            kafka_signal_value_format=(
+                os.getenv("KAFKA_SIGNAL_VALUE_FORMAT", "json").strip().lower()
+                or "json"
+            ),
+            schema_registry_url=(
+                (os.getenv("SCHEMA_REGISTRY_URL") or "").strip() or None
+            ),
+            kafka_protobuf_schema_id_raw=_env_optional_int(
+                "KAFKA_PROTOBUF_SCHEMA_ID_RAW"
+            ),
+            kafka_protobuf_schema_id_signal=_env_optional_int(
+                "KAFKA_PROTOBUF_SCHEMA_ID_SIGNAL"
+            ),
+            admin_api_token=(os.getenv("ADMIN_API_TOKEN") or "").strip() or None,
+            signal_accuracy_json_path=Path(
+                os.getenv(
+                    "SIGNAL_ACCURACY_JSON_PATH",
+                    "var/accuracy/signal_accuracy.json",
+                )
+            ).expanduser(),
+            clickhouse_http_url=(
+                (os.getenv("CLICKHOUSE_HTTP_URL") or "").strip() or None
+            ),
+            clickhouse_http_username=(
+                (os.getenv("CLICKHOUSE_USERNAME") or "").strip() or None
+            ),
+            clickhouse_http_password=(
+                (os.getenv("CLICKHOUSE_PASSWORD") or "").strip() or None
+            ),
+            signal_min_quality_score=_env_optional_int(
+                "SIGNAL_MIN_QUALITY_SCORE"
+            ),
+            market_unary_poll_seconds=int(
+                os.getenv("MARKET_UNARY_POLL_SECONDS", "0")
+            ),
+            market_unary_single_shot=_env_bool(
+                "MARKET_UNARY_SINGLE_SHOT", default=False
+            ),
+            market_unary_modes_csv=(
+                os.getenv("MARKET_UNARY_MODES", "market_values").strip()
+                or "market_values"
+            ),
+            market_unary_market_value_types_csv=(
+                os.getenv(
+                    "MARKET_UNARY_MARKET_VALUE_TYPES",
+                    "last_price,open_interest,close_price",
+                ).strip()
+                or "last_price,open_interest,close_price"
+            ),
+            market_unary_tech_indicator=(
+                os.getenv("MARKET_UNARY_TECH_INDICATOR", "rsi").strip() or "rsi"
+            ),
+            market_unary_tech_interval=(
+                os.getenv("MARKET_UNARY_TECH_INTERVAL", "1h").strip() or "1h"
+            ),
+            market_unary_tech_type_of_price=(
+                os.getenv("MARKET_UNARY_TECH_TYPE_OF_PRICE", "close").strip()
+                or "close"
+            ),
+            market_unary_tech_length=int(
+                os.getenv("MARKET_UNARY_TECH_LENGTH", "14")
+            ),
+            market_unary_tech_window_minutes=int(
+                os.getenv("MARKET_UNARY_TECH_WINDOW_MINUTES", "1440")
+            ),
+            market_unary_tech_sleep_ms=int(
+                os.getenv("MARKET_UNARY_TECH_SLEEP_MS", "250")
+            ),
+            market_unary_max_backoff_seconds=int(
+                os.getenv("MARKET_UNARY_MAX_BACKOFF_SECONDS", "900")
+            ),
+            market_unary_metrics_listen_port=_env_optional_int(
+                "MARKET_UNARY_METRICS_LISTEN_PORT"
+            ),
+            admin_api_rate_limit_per_minute=int(
+                os.getenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "120")
+            ),
+            admin_api_allowed_ips=_parse_admin_ip_allowlist(
+                os.getenv("ADMIN_API_ALLOWED_IPS", "")
             ),
         )
 
@@ -271,6 +457,68 @@ def _detector_settings_from_mapping(
         ),
         combo_delta_min_abs_qty=float(
             detector.get("combo_delta_min_abs_qty", 1.0)
+        ),
+        spoofing_enabled=bool(detector.get("spoofing_enabled", False)),
+        spoofing_wall_ratio=float(detector.get("spoofing_wall_ratio", 2.5)),
+        spoofing_qty_drop_ratio=float(
+            detector.get("spoofing_qty_drop_ratio", 0.55)
+        ),
+        spoofing_max_mid_move_bps=float(
+            detector.get("spoofing_max_mid_move_bps", 3.0)
+        ),
+        spoofing_max_gap_seconds=float(
+            detector.get("spoofing_max_gap_seconds", 2.0)
+        ),
+        spoofing_min_wall_qty=float(
+            detector.get("spoofing_min_wall_qty", 500.0)
+        ),
+        spoofing_lookback_seconds=float(
+            detector.get("spoofing_lookback_seconds", 5.0)
+        ),
+        order_book_depth_levels=int(detector.get("order_book_depth_levels", 5)),
+        obi_dynamics_enabled=bool(detector.get("obi_dynamics_enabled", False)),
+        obi_delta_absolute_threshold=float(
+            detector.get("obi_delta_absolute_threshold", 0.12)
+        ),
+        obi_delta_zscore_threshold=float(
+            detector.get("obi_delta_zscore_threshold", 2.5)
+        ),
+        trade_burst_enabled=bool(detector.get("trade_burst_enabled", False)),
+        trade_burst_window_ms=int(detector.get("trade_burst_window_ms", 100)),
+        trade_burst_min_trades=int(detector.get("trade_burst_min_trades", 50)),
+        trade_burst_min_abs_qty=float(
+            detector.get("trade_burst_min_abs_qty", 5.0)
+        ),
+        lead_lag_enabled=bool(detector.get("lead_lag_enabled", False)),
+        lead_lag_window_seconds=int(
+            detector.get("lead_lag_window_seconds", 30)
+        ),
+        lead_lag_leader_move_bps=float(
+            detector.get("lead_lag_leader_move_bps", 8.0)
+        ),
+        lead_lag_follower_max_bps=float(
+            detector.get("lead_lag_follower_max_bps", 2.0)
+        ),
+        min_relative_metric_excursion=float(
+            detector.get("min_relative_metric_excursion", 0.0)
+        ),
+        limit_band_warning_bps=float(
+            detector.get("limit_band_warning_bps", 0.0)
+        ),
+        signal_orderbook_inconsistent=bool(
+            detector.get("signal_orderbook_inconsistent", False)
+        ),
+        open_interest_zscore_threshold=float(
+            detector.get("open_interest_zscore_threshold", 0.0)
+        ),
+        candle_range_zscore_threshold=float(
+            detector.get("candle_range_zscore_threshold", 0.0)
+        ),
+        track_market_access_flags=bool(
+            detector.get("track_market_access_flags", True)
+        ),
+        attach_unary_context_to_signals=bool(
+            detector.get("attach_unary_context_to_signals", True)
         ),
     )
 
@@ -348,9 +596,22 @@ def load_detector_config(
         merged = {**detector_block, **overrides}
         per_instrument[key] = _detector_settings_from_mapping(merged)
 
+    lead_block = raw.get("lead_lag") or {}
+    pairs_raw = lead_block.get("pairs") if isinstance(lead_block, dict) else []
+    lead_lag_pairs: list[tuple[str, str]] = []
+    if isinstance(pairs_raw, list):
+        for item in pairs_raw:
+            if not isinstance(item, dict):
+                continue
+            leader = str(item.get("leader", "")).strip()
+            follower = str(item.get("follower", "")).strip()
+            if leader and follower:
+                lead_lag_pairs.append((leader, follower))
+
     return LoadedDetectorConfig(
         default=base_settings,
         per_instrument=per_instrument,
+        lead_lag_pairs=tuple(lead_lag_pairs),
     )
 
 

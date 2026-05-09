@@ -1,6 +1,6 @@
 # ============================================================================
-# Локальный стек: брокер сообщений (Redpanda), Postgres, сбор рыночных данных,
-# детектор сигналов, API, пересчёт порогов по истории.
+# Локальный стек: Redpanda (+ Schema Registry), Postgres, ClickHouse (архив raw),
+# Prometheus/Grafana, сбор рыночных данных, детектор, API, пересчёт порогов.
 #
 # Переменные окружения — из файла .env в корне проекта (порты, токены и т.д.).
 # Конфиги детектора и списка инструментов монтируются из ./conf (см. volumes).
@@ -8,6 +8,14 @@
 # Полезные команды:
 #   docker compose up -d --build
 #   docker compose logs -f detector ingestor
+#   Dagster (UI + daemon, расписания порогов и unary single-shot): http://localhost:${HOST_DAGSTER_PORT:-30300}
+#   Постоянный unary-цикл (альтернатива расписанию Dagster):
+#   docker compose --profile unary up -d market-unary-emitter
+#   Старый бесконечный tinvest-threshold-cron без Dagster:
+#   docker compose --profile legacy-threshold-cron up -d threshold-cron
+#
+# API (админка): без пересборки образа правки в ./src/tinvest_signal_engine
+# подхватываются за счёт volume + TINVEST_API_RELOAD (uvicorn --reload).
 # ============================================================================
 
 services:
@@ -41,9 +49,12 @@ services:
       - PLAINTEXT://0.0.0.0:8082
       - --advertise-pandaproxy-addr
       - PLAINTEXT://redpanda:8082
+      - --schema-registry-addr
+      - PLAINTEXT://0.0.0.0:8081
     ports:
       - "${HOST_KAFKA_PORT:-39092}:${HOST_KAFKA_PORT:-39092}"
       - "${HOST_REDPANDA_METRICS_PORT:-39644}:9644"
+      - "${HOST_SCHEMA_REGISTRY_PORT:-18081}:8081"
     volumes:
       - ./redpanda:/var/lib/redpanda/data
 
@@ -63,8 +74,10 @@ services:
           sleep 1
         done
         rpk -X brokers=redpanda:9092 topic create marketdata.raw -p 1 -r 1 --if-not-exists
+        rpk -X brokers=redpanda:9092 topic create marketdata.raw.unary -p 1 -r 1 --if-not-exists
         rpk -X brokers=redpanda:9092 topic create marketdata.signals -p 1 -r 1 --if-not-exists
         rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
+        rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw.unary --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
         rpk -X brokers=redpanda:9092 topic alter-config marketdata.signals --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
 
   # Веб-консоль для просмотра топиков и сообщений (опционально).
@@ -101,6 +114,8 @@ services:
         condition: service_completed_successfully
     env_file:
       - .env
+    environment:
+      PROTO_DIR: /app/proto
     volumes:
       - ./conf:/app/conf:ro
     command: ["tinvest-raw-stream"]
@@ -117,15 +132,41 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_started
+      redis:
+        condition: service_started
     env_file:
       - .env
+    environment:
+      METRICS_LISTEN_PORT: "${METRICS_LISTEN_PORT:-9108}"
+      PROTO_DIR: /app/proto
     volumes:
       - ./conf:/app/conf:ro
     command: ["tinvest-detector"]
     restart: unless-stopped
+    expose:
+      - "9108"
 
-  # Ежедневный пересчёт порогов → запись в conf/detectors.overrides.yaml (том не read-only).
+  # Метрики из JSON выхода duckdb_label_signals (mount ./var/accuracy).
+  accuracy-metrics:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      SIGNAL_ACCURACY_JSON_PATH: /data/signal_accuracy.json
+      ACCURACY_METRICS_PORT: "9110"
+    volumes:
+      - ./var/accuracy:/data
+    command: ["tinvest-accuracy-metrics"]
+    restart: unless-stopped
+    expose:
+      - "9110"
+    ports:
+      - "${HOST_ACCURACY_METRICS_PORT:-39110}:9110"
+
+  # Устаревший режим: бесконечный цикл вместо Dagster. По умолчанию не поднимается.
   threshold-cron:
+    profiles: ["legacy-threshold-cron"]
     build:
       context: .
     env_file:
@@ -135,15 +176,215 @@ services:
     command: ["tinvest-threshold-cron"]
     restart: unless-stopped
 
+  # Dagster: расписания пересчёта порогов и unary single-shot → те же entrypoints, что compose.
+  dagster-webserver:
+    build:
+      context: .
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      PROTO_DIR: /app/proto
+      MARKET_UNARY_POLL_SECONDS: "${MARKET_UNARY_POLL_SECONDS:-300}"
+    volumes:
+      - dagster_home:/opt/dagster/dagster_home
+      - ./conf:/app/conf
+    command:
+      - dagster-webserver
+      - -h
+      - "0.0.0.0"
+      - -p
+      - "3000"
+      - -m
+      - tinvest_signal_engine.orchestration_defs
+    ports:
+      - "${HOST_DAGSTER_PORT:-30300}:3000"
+    restart: unless-stopped
+
+  dagster-daemon:
+    build:
+      context: .
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      PROTO_DIR: /app/proto
+      MARKET_UNARY_POLL_SECONDS: "${MARKET_UNARY_POLL_SECONDS:-300}"
+    volumes:
+      - dagster_home:/opt/dagster/dagster_home
+      - ./conf:/app/conf
+    command:
+      - dagster-daemon
+      - run
+      - -m
+      - tinvest_signal_engine.orchestration_defs
+    restart: unless-stopped
+
+  # Unary GetMarketValues / GetTechAnalysis → тот же raw-топик (детектор их игнорирует).
+  market-unary-emitter:
+    profiles: ["unary"]
+    build:
+      context: .
+    depends_on:
+      redpanda:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      PROTO_DIR: /app/proto
+      MARKET_UNARY_POLL_SECONDS: "${MARKET_UNARY_POLL_SECONDS:-300}"
+      MARKET_UNARY_METRICS_LISTEN_PORT: "${MARKET_UNARY_METRICS_LISTEN_PORT:-9109}"
+    volumes:
+      - ./conf:/app/conf:ro
+    command: ["tinvest-market-unary-emitter"]
+    restart: unless-stopped
+    expose:
+      - "9109"
+
+  # OLAP: сырой поток из Redpanda через Kafka Engine (см. sql/clickhouse/init).
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8}
+    depends_on:
+      redpanda:
+        condition: service_started
+      redpanda-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      # Пароль пользователя default при первом создании данных (см. .env).
+      CLICKHOUSE_USER: ${CLICKHOUSE_USERNAME:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    ports:
+      - "${HOST_CLICKHOUSE_HTTP_PORT:-38123}:8123"
+      - "${HOST_CLICKHOUSE_NATIVE_PORT:-39000}:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:8123/ping 2>/dev/null | grep -q Ok || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  clickhouse-init:
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./sql/clickhouse/init:/init:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        CH_USER="$${CLICKHOUSE_USERNAME:-default}"
+        CH_PASS="$${CLICKHOUSE_PASSWORD:-}"
+        CH_AUTH=()
+        if [ -n "$$CH_PASS" ]; then
+          CH_AUTH=(--user "$$CH_USER" --password "$$CH_PASS")
+        fi
+        for i in $$(seq 1 90); do
+          if clickhouse-client --host clickhouse "$${CH_AUTH[@]}" -q 'SELECT 1' >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+        for sql in /init/*.sql; do
+          echo "Applying $${sql}..."
+          clickhouse-client --host clickhouse "$${CH_AUTH[@]}" --multiquery < "$${sql}"
+        done
+        echo 'ClickHouse init done'
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v2.53.0}
+    depends_on:
+      - redpanda
+      - detector
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${HOST_PROMETHEUS_PORT:-39090}:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:11.2.0}
+    depends_on:
+      - prometheus
+    ports:
+      - "${HOST_GRAFANA_PORT:-33000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    ports:
+      - "${HOST_REDIS_PORT:-36379}:6379"
+    command:
+      - redis-server
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis_data:/data
+
   # HTTP API поверх Postgres (история сигналов).
   api:
     build:
       context: .
     depends_on:
-      - postgres
+      postgres:
+        condition: service_started
+      clickhouse-init:
+        condition: service_completed_successfully
     env_file:
       - .env
+    environment:
+      # Внутри сети compose (перекрывает localhost из .env для CH и JSON точности).
+      CLICKHOUSE_HTTP_URL: http://clickhouse:8123
+      SIGNAL_ACCURACY_JSON_PATH: /app/var/accuracy/signal_accuracy.json
+      # Горячая перезагрузка Python при изменении смонтированного пакета.
+      TINVEST_API_RELOAD: "1"
+    volumes:
+      - ./var/accuracy:/app/var/accuracy:ro
+      # Код и статика админки с хоста → без docker compose build после правок UI.
+      - ./src/tinvest_signal_engine:/usr/local/lib/python3.12/site-packages/tinvest_signal_engine:ro
     command: ["tinvest-api"]
     ports:
       - "${HOST_API_PORT:-38000}:8000"
     restart: unless-stopped
+
+volumes:
+  clickhouse_data:
+  grafana_data:
+  redis_data:
+  dagster_home:

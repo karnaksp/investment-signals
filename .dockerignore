@@ -8,5 +8,7 @@ __pycache__
 *.pyd
 .tmp_pip
 .tmp_invest_python
+# В образе `tinkoff/` подтягивается git clone (см. Dockerfile); не тащить с хоста.
+src/tinkoff
 data
 

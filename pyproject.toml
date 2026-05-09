@@ -12,13 +12,17 @@ dependencies = [
   "cachetools",
   "deprecation",
   "fastapi",
-  "grpcio>=1.39.0",
+  "grpcio>=1.59.3",
   "httpx",
   "kafka-python-ng",
+  "lz4>=4.3",
+  "orjson>=3.10",
+  "prometheus-client>=0.20",
   "psycopg[binary]>=3.2",
-  "protobuf>=4.21.6,<6",
+  "protobuf>=4.25.1,<6",
   "python-dateutil",
   "pyyaml",
+  "redis>=5.0.0",
   "uvicorn[standard]",
 ]
 
@@ -28,6 +32,8 @@ tinvest-detector = "tinvest_signal_engine.services.detector_service:main"
 tinvest-api = "tinvest_signal_engine.services.api:main"
 tinvest-local-notifier = "tinvest_signal_engine.services.local_notifier:main"
 tinvest-threshold-cron = "tinvest_signal_engine.services.threshold_cron:main"
+tinvest-accuracy-metrics = "tinvest_signal_engine.services.accuracy_metrics:main"
+tinvest-market-unary-emitter = "tinvest_signal_engine.services.market_unary_emitter:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -35,9 +41,28 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tinvest_signal_engine = ["static/**/*.html", "static/**/*.js", "static/vendor/**/*.js"]
+
 [project.optional-dependencies]
+orchestration = [
+  "dagster>=1.8.0,<2",
+  "dagster-webserver>=1.8.0,<2",
+]
+dev = [
+  "playwright>=1.40",
+  "dagster>=1.8.0,<2",
+  "dagster-webserver>=1.8.0,<2",
+]
 docs = [
   "mkdocs>=1.6",
   "mkdocs-material>=9.5",
   "mkdocstrings[python]>=0.26",
+]
+backtest = [
+  "clickhouse-connect>=0.7.0",
+  "duckdb>=1.0.0",
+]
+proto = [
+  "grpcio-tools>=1.62,<1.70",
 ]

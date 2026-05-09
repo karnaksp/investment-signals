@@ -6,6 +6,9 @@
 - **[Детекторы и торговые паттерны](detectors.md)** — какие типы сигналов бывают, что они означают с точки зрения рынка, формулы и пороги.
 - **[HTTP API (OpenAPI)](openapi.md)** — как пользоваться интерактивной автодокументацией REST-сервиса.
 - **[Справочник по коду](reference/overview.md)** — автоматически извлечённые из Python-докстрингов описания модулей пакета `tinvest_signal_engine` (без vendored SDK `tinkoff`).
+- **[Оркестрация (Dagster)](orchestration.md)** — расписания порогов и unary.
+- **[Аналитика сигналов в Postgres](signal_analytics.md)** — примеры SQL.
+- **[Решение проблем](troubleshooting.md)** — Telegram, синтетический тест сигнала, ClickHouse init, Dagster.
 
 Краткое введение и быстрый старт — в корневом файле `README.md` репозитория.
 

@@ -19,6 +19,7 @@ class NormalizedEvent:
     alias: str
     figi: str
     uid: str
+    lot: int
     source_time: datetime
     received_at: datetime
     payload: dict[str, Any]
@@ -33,6 +34,7 @@ class NormalizedEvent:
             "alias": self.alias,
             "figi": self.figi,
             "uid": self.uid,
+            "lot": int(self.lot),
             "source_time": self.source_time.isoformat(),
             "received_at": self.received_at.isoformat(),
             "payload": self.payload,
@@ -49,6 +51,7 @@ class NormalizedEvent:
             alias=str(data["alias"]),
             figi=str(data.get("figi", "")),
             uid=str(data.get("uid", "")),
+            lot=int(data.get("lot", 0) or 0),
             source_time=parse_timestamp(data["source_time"]),
             received_at=parse_timestamp(data["received_at"]),
             payload=dict(data.get("payload", {})),

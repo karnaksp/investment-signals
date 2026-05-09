@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package tinvest.signal.v1;
+
+// Wire model aligned with NormalizedEvent.to_dict() for Schema Registry (next rollout).
+message NormalizedEventV1 {
+  string event_id = 1;
+  string event_type = 2;
+  string instrument_id = 3;
+  string ticker = 4;
+  string class_code = 5;
+  string alias = 6;
+  string figi = 7;
+  string uid = 8;
+  int32 lot = 9;
+  string source_time_rfc3339 = 10;
+  string received_at_rfc3339 = 11;
+  // Opaque JSON for microstructure payload (trade / orderbook / …).
+  string payload_json = 12;
+}

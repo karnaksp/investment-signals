@@ -55,6 +55,9 @@ nav:
   - Главная: index.md
   - Архитектура: architecture.md
   - Детекторы и паттерны: detectors.md
+  - Оркестрация (Dagster): orchestration.md
+  - Аналитика сигналов (SQL): signal_analytics.md
+  - Решение проблем: troubleshooting.md
   - HTTP API (Swagger): openapi.md
   - Код (автодок):
       - Обзор модулей: reference/overview.md

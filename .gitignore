@@ -13,10 +13,14 @@ build/
 *.egg-info/
 .tmp_pip/
 .tmp_invest_python/
+# T-Invest SDK: см. scripts/sync_invest_sdk.py и Dockerfile
+src/tinkoff/
 data/
 /clickhouse/
-/sql/clickhouse/
+# DDL в sql/clickhouse/init/ версионируем; локальные дампы — не коммитить вручную
 /postgres/
 /redpanda/
 site/
+var/
+.playwright-mcp/
 
