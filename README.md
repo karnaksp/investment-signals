@@ -76,6 +76,7 @@ sql/clickhouse/init/
   002_feature_store_bars.sql
 scripts/
   push_synthetic_trading_status.py  # тест: trading_status → Kafka → сигнал
+  resolve_nearest_futures.py        # ближайшие SPBFUT → блок FUTURES_NEAREST в instruments.yaml
 observability/
   prometheus.yml
   grafana/provisioning/...
@@ -154,7 +155,7 @@ tinvest-local-notifier
 
 ### Инструменты
 
-`conf/instruments.yaml` — список инструментов. Каждый задаётся парой `ticker` + `class_code`; то же поддерживается в T-Invest как `instrument_id`.
+`conf/instruments.yaml` — список инструментов. Каждый задаётся парой `ticker` + `class_code`; то же поддерживается в T-Invest как `instrument_id`. Блок фьючерсов SPBFUT между маркерами `FUTURES_NEAREST` — **ближайшие ликвидные контракты** (нефть, металлы, валютные пары, пшеница, газ, Nasdaq, Sber/Газпром, индексы и т.д.); пересборка: `python scripts/resolve_nearest_futures.py --write` (нужен `TINVEST_TOKEN`). После записи YAML **ingestor** подхватит список при следующем перечитывании конфига (см. `CONFIG_RELOAD_INTERVAL_SECONDS`) или сразу при старте контейнера.
 
 ### Пороги детектора
 

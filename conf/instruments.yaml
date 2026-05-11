@@ -10,7 +10,8 @@
 # в detectors.yaml в per_instrument и в detectors.overrides.yaml.
 #
 # После правки файла ingestor переподключится сам (см. CONFIG_RELOAD_INTERVAL_SECONDS).
-# Фьючерсы при экспирации нужно роллировать на актуальный контракт вручную или скриптом.
+# Фьючерсы SPBFUT: блок FUTURES_NEAREST — ближайшие контракты (сырьё, FX, пшеница, газ, Nasdaq,
+# Sber/GAZP, индексы и т.д.); обновление: ``python scripts/resolve_nearest_futures.py --write``.
 # ============================================================================
 
 instruments:
@@ -53,7 +54,8 @@ instruments:
       candles: false
       candle_interval: 1m
 
-  # --- Фьючерсы (пример контрактов; при смене экспирации замените ticker) ---
+      # >>> FUTURES_NEAREST_BEGIN (python scripts/resolve_nearest_futures.py --write)
+  # Ближайшие контракты по дате экспирации (см. скрипт).
   - ticker: BRM6
     class_code: SPBFUT
     alias: brent_oil
@@ -64,7 +66,6 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-
   - ticker: GDM6
     class_code: SPBFUT
     alias: gold
@@ -75,7 +76,6 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-
   - ticker: SVM6
     class_code: SPBFUT
     alias: silver
@@ -86,3 +86,134 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
+  - ticker: SiM6
+    class_code: SPBFUT
+    alias: usd_rub
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: EuM6
+    class_code: SPBFUT
+    alias: eur_rub
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: CRM6
+    class_code: SPBFUT
+    alias: cny_rub
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: W4K6
+    class_code: SPBFUT
+    alias: wheat
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: PDM6
+    class_code: SPBFUT
+    alias: palladium
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: PTM6
+    class_code: SPBFUT
+    alias: platinum
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: NGK6
+    class_code: SPBFUT
+    alias: nat_gas_us
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: NAM6
+    class_code: SPBFUT
+    alias: nasdaq100
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: SRM6
+    class_code: SPBFUT
+    alias: sber_fut
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GZM6
+    class_code: SPBFUT
+    alias: gazp_fut
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GLM6
+    class_code: SPBFUT
+    alias: gold_rub
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: RIM6
+    class_code: SPBFUT
+    alias: rts_index
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: MXM6
+    class_code: SPBFUT
+    alias: imoex
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  # <<< FUTURES_NEAREST_END

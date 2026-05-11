@@ -540,8 +540,10 @@ def load_instrument_configs(path: Path) -> list[InstrumentSubscriptionConfig]:
             raise ValueError(
                 f"'subscriptions' for {item!r} in {path} must be a mapping"
             )
-        ticker = str(item["ticker"]).strip().upper()
+        ticker_raw = str(item["ticker"]).strip()
         class_code = str(item["class_code"]).strip().upper()
+        # SPBFUT: тикер регистрозависим (напр. SiM6); иначе GetInstrumentBy → 50002.
+        ticker = ticker_raw if class_code == "SPBFUT" else ticker_raw.upper()
         result.append(
             InstrumentSubscriptionConfig(
                 ticker=ticker,

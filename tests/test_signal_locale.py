@@ -12,6 +12,7 @@ from tinvest_signal_engine.signal_locale import (
 )
 from tinvest_signal_engine.terminal_links import (
     t_invest_instrument_url,
+    t_invest_terminal_open_chart_url,
     t_invest_terminal_search_url,
 )
 
@@ -45,10 +46,26 @@ def test_signal_type_ru_known_detector_types() -> None:
     assert "частоты" in signal_type_ru("trade_rate_spike").lower()
 
 
-def test_terminal_search_url_has_ticker() -> None:
-    u = t_invest_terminal_search_url(ticker="GAZP")
+def test_terminal_search_url_deeplink_chart_widget() -> None:
+    u = t_invest_terminal_search_url(ticker="GAZP", class_code="TQBR")
     assert "GAZP" in u.upper()
     assert "terminal" in u
+    assert "widget_name=CHART_TV" in u
+    assert "symbolId%2CGAZP" in u or "symbolId,GAZP" in u
+
+
+def test_terminal_open_chart_spbfut_preserves_ticker_case() -> None:
+    u = t_invest_terminal_open_chart_url(ticker="SiM6", class_code="SPBFUT")
+    assert "symbolId%2CSiM6" in u or "symbolId,SiM6" in u
+
+
+def test_terminal_open_chart_prefers_instrument_uid() -> None:
+    u = t_invest_terminal_open_chart_url(
+        ticker="SBER", instrument_uid="abc-uid-1", class_code="TQBR"
+    )
+    assert "instrumentUid" in u
+    assert "abc-uid-1" in u
+    assert "CHART_TV" in u
 
 
 def test_enrich_preserves_summary_en_on_repeat() -> None:

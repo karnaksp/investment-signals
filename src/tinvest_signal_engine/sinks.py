@@ -774,7 +774,9 @@ class TelegramAlertSink:
             sig,
             ticker_terminal_url=str(
                 p.get("terminal_url")
-                or t_invest_terminal_search_url(ticker=sig.ticker)
+                or t_invest_terminal_search_url(
+                    ticker=sig.ticker, class_code=sig.class_code
+                )
             ),
             instrument_page_url=str(
                 p.get("instrument_page_url")
