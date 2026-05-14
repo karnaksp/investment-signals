@@ -50,6 +50,15 @@ def _severity_ru(sev: int) -> str:
     return "низкая"
 
 
+def _instrument_caption(signal: TriggerSignal) -> str:
+    display_name = str(
+        (signal.payload or {}).get("instrument_display_name") or ""
+    ).strip()
+    if display_name:
+        return f"{signal.ticker} — {display_name}"
+    return signal.ticker
+
+
 def build_plain_explanation_ru(signal: TriggerSignal) -> str:
     """Короткое объяснение «что случилось» без английского жаргона в заголовке."""
     st = signal.signal_type
@@ -147,8 +156,12 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
 def build_summary_ru(signal: TriggerSignal, quality: dict) -> str:
     """Многострочное описание на русском для БД и логов."""
     expl = build_plain_explanation_ru(signal)
+    instrument_caption = _instrument_caption(signal)
     lines = [
-        f"{signal_type_ru(signal.signal_type)} — {signal.ticker} ({signal.class_code}).",
+        (
+            f"{signal_type_ru(signal.signal_type)} — "
+            f"{instrument_caption} ({signal.class_code})."
+        ),
         expl,
         f"Серьёзность: {_severity_ru(int(signal.severity))} (уровень {signal.severity}). "
         f"|z|={abs(signal.z_score):.2f}, метрика={signal.metric_value:.4g}, "
@@ -182,9 +195,14 @@ def build_telegram_html(
     wterm = html.escape(t_invest_web_terminal_url())
     score = quality["quality_score"]
     tier = html.escape(str(quality["quality_tier_ru"]))
+    display_name = str(
+        (signal.payload or {}).get("instrument_display_name") or ""
+    ).strip()
+    display_suffix = f" — {html.escape(display_name)}" if display_name else ""
     # Вложенность <b><a>…</a></b> у Bot API часто даёт 400; допустимо <a><b>…</b></a>.
     return (
-        f"<a href=\"{term_href}\"><b>{t_esc}</b></a> ({html.escape(signal.class_code)})\n"
+        f"<a href=\"{term_href}\"><b>{t_esc}</b></a>"
+        f"{display_suffix} ({html.escape(signal.class_code)})\n"
         f"Тип: {type_ru} <code>{type_raw}</code>\n"
         f"Оценка: <b>{score}</b>/100 ({tier})\n"
         f"Терминал: <a href=\"{wterm}\">tbank.ru/terminal</a> · "
@@ -203,8 +221,10 @@ def format_plain_alert_ru(
     q = signal.payload or {}
     score = q.get("quality_score", "")
     tier = q.get("quality_tier_ru", "")
+    instrument_caption = _instrument_caption(signal)
     head = (
-        f"{signal.ticker} ({signal.class_code}) — {signal_type_ru(signal.signal_type)}\n"
+        f"{instrument_caption} ({signal.class_code}) — "
+        f"{signal_type_ru(signal.signal_type)}\n"
         f"Терминал: {ticker_terminal_url}\n"
         f"Карточка: {instrument_page_url}\n"
     )

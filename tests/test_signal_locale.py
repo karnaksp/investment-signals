@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import textwrap
 
 from tinvest_signal_engine.models import TriggerSignal
 from tinvest_signal_engine.signal_enrichment import enrich_signal_for_delivery
@@ -77,6 +78,35 @@ def test_enrich_preserves_summary_en_on_repeat() -> None:
     assert "<a href=" in s1.payload.get("telegram_html", "")
     s2 = enrich_signal_for_delivery(s1)
     assert s2.payload.get("summary_en") == s0.summary
+
+
+def test_enrich_adds_display_name_from_instruments_yaml(
+    tmp_path, monkeypatch
+) -> None:
+    instruments_yaml = tmp_path / "instruments.yaml"
+    instruments_yaml.write_text(
+        textwrap.dedent(
+            """
+            instruments:
+              - ticker: SBER
+                class_code: TQBR
+                alias: sber
+                display_name: Сбербанк
+                subscriptions:
+                  trades: true
+                  last_price: true
+                  info: false
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INSTRUMENTS_CONFIG", str(instruments_yaml))
+
+    enriched = enrich_signal_for_delivery(_signal(instrument_id="SBER_TQBR"))
+
+    assert enriched.payload.get("instrument_display_name") == "Сбербанк"
+    assert "Сбербанк" in enriched.payload.get("telegram_html", "")
+    assert "Сбербанк" in enriched.summary
 
 
 def test_spoofing_explanation_ask_not_bid() -> None:

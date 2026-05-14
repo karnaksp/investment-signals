@@ -54,6 +54,7 @@ class InstrumentSubscriptionConfig:
     ticker: str
     class_code: str
     alias: str
+    display_name: str | None = None
     trades: bool = True
     last_price: bool = True
     info: bool = True
@@ -549,6 +550,9 @@ def load_instrument_configs(path: Path) -> list[InstrumentSubscriptionConfig]:
                 ticker=ticker,
                 class_code=class_code,
                 alias=str(item.get("alias", ticker)).strip().lower(),
+                display_name=(
+                    str(item.get("display_name", "")).strip() or None
+                ),
                 trades=bool(subscriptions.get("trades", True)),
                 last_price=bool(subscriptions.get("last_price", True)),
                 info=bool(subscriptions.get("info", True)),

@@ -47,6 +47,7 @@ FUT_SUB = """    subscriptions:
 class FutureSpec:
     alias: str
     basic_asset: str
+    display_name: str
     """Точное значение ``Future.basic_asset`` из API."""
     exclude_name_substrings: tuple[str, ...] = ()
     require_name_substrings: tuple[str, ...] = ()
@@ -55,55 +56,95 @@ class FutureSpec:
 
 
 SPECS: tuple[FutureSpec, ...] = (
-    FutureSpec(alias="brent_oil", basic_asset="Brent"),
-    FutureSpec(alias="gold", basic_asset="Золото в долларах"),
+    FutureSpec(
+        alias="brent_oil",
+        basic_asset="Brent",
+        display_name="Нефть Brent (фьючерс)",
+    ),
+    FutureSpec(
+        alias="gold",
+        basic_asset="Золото в долларах",
+        display_name="Золото (фьючерс)",
+    ),
     FutureSpec(
         alias="silver",
         basic_asset="Серебро",
+        display_name="Серебро (фьючерс)",
         require_name_substrings=("SILV-",),
         exclude_name_substrings=("мини", "SILVM"),
     ),
     FutureSpec(
         alias="usd_rub",
         basic_asset="USD/RUB",
+        display_name="USD/RUB (фьючерс)",
         ticker_pattern=r"^Si[FGHJKMNQUVXZ]\d$",
     ),
     FutureSpec(
         alias="eur_rub",
         basic_asset="EUR/RUB",
+        display_name="EUR/RUB (фьючерс)",
         ticker_pattern=r"^Eu[FGHJKMNQUVXZ]\d$",
     ),
     FutureSpec(
         alias="cny_rub",
         basic_asset="CNY/RUB",
+        display_name="CNY/RUB (фьючерс)",
         ticker_pattern=r"^CR[FGHJKMNQUVXZ]\d$",
     ),
     FutureSpec(
         alias="wheat",
         basic_asset="Пшеница",
+        display_name="Пшеница (фьючерс)",
         require_name_substrings=("WHEAT-",),
     ),
     FutureSpec(
         alias="palladium",
         basic_asset="Палладий",
+        display_name="Палладий (фьючерс)",
         ticker_pattern=r"^PD[FGHJKMNQUVXZ]\d$",
     ),
     FutureSpec(
         alias="platinum",
         basic_asset="Платина",
+        display_name="Платина (фьючерс)",
         ticker_pattern=r"^PT[FGHJKMNQUVXZ]\d$",
     ),
     FutureSpec(
         alias="nat_gas_us",
         basic_asset="Газ (США)",
+        display_name="Природный газ США (фьючерс)",
         exclude_name_substrings=("микро", "мини"),
     ),
-    FutureSpec(alias="nasdaq100", basic_asset="Nasdaq 100"),
-    FutureSpec(alias="sber_fut", basic_asset="SBER"),
-    FutureSpec(alias="gazp_fut", basic_asset="GAZP"),
-    FutureSpec(alias="gold_rub", basic_asset="Золото в рублях"),
-    FutureSpec(alias="rts_index", basic_asset="RTSI"),
-    FutureSpec(alias="imoex", basic_asset="IMOEX"),
+    FutureSpec(
+        alias="nasdaq100",
+        basic_asset="Nasdaq 100",
+        display_name="Nasdaq 100 (фьючерс)",
+    ),
+    FutureSpec(
+        alias="sber_fut",
+        basic_asset="SBER",
+        display_name="Сбербанк (фьючерс)",
+    ),
+    FutureSpec(
+        alias="gazp_fut",
+        basic_asset="GAZP",
+        display_name="Газпром (фьючерс)",
+    ),
+    FutureSpec(
+        alias="gold_rub",
+        basic_asset="Золото в рублях",
+        display_name="Золото в рублях (фьючерс)",
+    ),
+    FutureSpec(
+        alias="rts_index",
+        basic_asset="RTSI",
+        display_name="Индекс РТС (фьючерс)",
+    ),
+    FutureSpec(
+        alias="imoex",
+        basic_asset="IMOEX",
+        display_name="Индекс МосБиржи (фьючерс)",
+    ),
 )
 
 
@@ -157,16 +198,17 @@ def _pick_nearest(futures: list, spec: FutureSpec) -> object | None:
     return min(candidates, key=lambda x: _aware_utc(x.expiration_date) or now)
 
 
-def _yaml_block(entries: list[tuple[str, str]]) -> str:
-    """entries: (alias, ticker) — тикер как в API (регистр важен, напр. ``SiM6``)."""
+def _yaml_block(entries: list[tuple[str, str, str]]) -> str:
+    """entries: (alias, ticker, display_name) — тикер как в API (регистр важен, напр. ``SiM6``)."""
     lines = [
         f"  {BEGIN} (python scripts/resolve_nearest_futures.py --write)",
         "  # Ближайшие контракты по дате экспирации (см. скрипт).",
     ]
-    for alias, ticker in entries:
+    for alias, ticker, display_name in entries:
         lines.append(f"  - ticker: {ticker}")
         lines.append("    class_code: SPBFUT")
         lines.append(f"    alias: {alias}")
+        lines.append(f"    display_name: {display_name}")
         lines.append(FUT_SUB)
     lines.append(f"  {END}")
     return "\n".join(lines) + "\n"
@@ -237,7 +279,7 @@ def main() -> int:
         fut_resp = client.instruments.futures()
         futures = list(fut_resp.instruments)
 
-    resolved: list[tuple[str, str]] = []
+    resolved: list[tuple[str, str, str]] = []
     for spec in SPECS:
         f = _pick_nearest(futures, spec)
         if f is None:
@@ -251,13 +293,13 @@ def main() -> int:
         print(
             f"{spec.alias:12s}  {ticker:8s}  exp={exp.date() if exp else '?'}  {f.name[:52]}"
         )
-        resolved.append((spec.alias, ticker))
+        resolved.append((spec.alias, ticker, spec.display_name))
 
     block = _yaml_block(resolved)
     print("\n--- YAML ---")
     print(block)
 
-    tickers = [t for _, t in resolved]
+    tickers = [t for _, t, _ in resolved]
     print("\nПроверка GetInstrumentBy …")
     _verify_tickers(token, sandbox=sandbox, tickers=tickers)
 

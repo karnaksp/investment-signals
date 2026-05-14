@@ -17,6 +17,7 @@ def test_spbfut_ticker_preserves_case(tmp_path: Path) -> None:
               - ticker: SiM6
                 class_code: SPBFUT
                 alias: usd_rub
+                display_name: USD/RUB (фьючерс)
                 subscriptions:
                   trades: true
                   last_price: true
@@ -36,4 +37,5 @@ def test_spbfut_ticker_preserves_case(tmp_path: Path) -> None:
     assert len(cf) == 2
     assert cf[0].ticker == "SiM6"
     assert cf[0].instrument_id == "SiM6_SPBFUT"
+    assert cf[0].display_name == "USD/RUB (фьючерс)"
     assert cf[1].ticker == "SBER"

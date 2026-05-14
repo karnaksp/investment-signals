@@ -5,6 +5,7 @@
 #   ticker       — тикер в терминале T-Invest (конкретный контракт для фьючерсов).
 #   class_code   — режим торгов (TQBR — акции МосБиржи, SPBFUT — срочный рынок и т.д.).
 #   alias        — короткое имя для логов/алиаса (латиница, без пробелов).
+#   display_name — человекочитаемая расшифровка для Telegram/админки.
 #
 # instrument_id в пайплайне = "{ticker}_{class_code}" — тот же ключ используется
 # в detectors.yaml в per_instrument и в detectors.overrides.yaml.
@@ -19,6 +20,7 @@ instruments:
   - ticker: SBER
     class_code: TQBR
     alias: sber
+    display_name: Сбербанк
     subscriptions:
       # Лента обезличенных сделок (для объёма, частоты сделок, дельты по направлению).
       trades: true
@@ -35,6 +37,7 @@ instruments:
   - ticker: GAZP
     class_code: TQBR
     alias: gazp
+    display_name: Газпром
     subscriptions:
       trades: true
       last_price: true
@@ -46,6 +49,7 @@ instruments:
   - ticker: LKOH
     class_code: TQBR
     alias: lkoh
+    display_name: ЛУКОЙЛ
     subscriptions:
       trades: true
       last_price: true
@@ -59,6 +63,7 @@ instruments:
   - ticker: BRM6
     class_code: SPBFUT
     alias: brent_oil
+    display_name: Нефть Brent (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -69,6 +74,7 @@ instruments:
   - ticker: GDM6
     class_code: SPBFUT
     alias: gold
+    display_name: Золото (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -79,6 +85,7 @@ instruments:
   - ticker: SVM6
     class_code: SPBFUT
     alias: silver
+    display_name: Серебро (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -89,6 +96,7 @@ instruments:
   - ticker: SiM6
     class_code: SPBFUT
     alias: usd_rub
+    display_name: USD/RUB (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -99,6 +107,7 @@ instruments:
   - ticker: EuM6
     class_code: SPBFUT
     alias: eur_rub
+    display_name: EUR/RUB (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -109,6 +118,7 @@ instruments:
   - ticker: CRM6
     class_code: SPBFUT
     alias: cny_rub
+    display_name: CNY/RUB (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -119,6 +129,7 @@ instruments:
   - ticker: W4K6
     class_code: SPBFUT
     alias: wheat
+    display_name: Пшеница (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -129,6 +140,7 @@ instruments:
   - ticker: PDM6
     class_code: SPBFUT
     alias: palladium
+    display_name: Палладий (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -139,6 +151,7 @@ instruments:
   - ticker: PTM6
     class_code: SPBFUT
     alias: platinum
+    display_name: Платина (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -149,6 +162,7 @@ instruments:
   - ticker: NGK6
     class_code: SPBFUT
     alias: nat_gas_us
+    display_name: Природный газ США (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -159,6 +173,7 @@ instruments:
   - ticker: NAM6
     class_code: SPBFUT
     alias: nasdaq100
+    display_name: Nasdaq 100 (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -169,6 +184,7 @@ instruments:
   - ticker: SRM6
     class_code: SPBFUT
     alias: sber_fut
+    display_name: Сбербанк (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -179,6 +195,7 @@ instruments:
   - ticker: GZM6
     class_code: SPBFUT
     alias: gazp_fut
+    display_name: Газпром (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -189,6 +206,7 @@ instruments:
   - ticker: GLM6
     class_code: SPBFUT
     alias: gold_rub
+    display_name: Золото в рублях (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -199,6 +217,7 @@ instruments:
   - ticker: RIM6
     class_code: SPBFUT
     alias: rts_index
+    display_name: Индекс РТС (фьючерс)
     subscriptions:
       trades: true
       last_price: true
@@ -209,6 +228,7 @@ instruments:
   - ticker: MXM6
     class_code: SPBFUT
     alias: imoex
+    display_name: Индекс МосБиржи (фьючерс)
     subscriptions:
       trades: true
       last_price: true
