@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from tinkoff.invest import InstrumentIdType
+from tinkoff.invest.exceptions import RequestError
 
 from .config import InstrumentSubscriptionConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -60,11 +64,21 @@ def build_instrument_registry(
 ) -> InstrumentRegistry:
     registry = InstrumentRegistry()
     for item in instrument_configs:
-        response = client.instruments.get_instrument_by(
-            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-            class_code=item.class_code,
-            id=item.ticker,
-        )
+        try:
+            response = client.instruments.get_instrument_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code=item.class_code,
+                id=item.ticker,
+            )
+        except RequestError as exc:
+            logger.error(
+                "GetInstrumentBy failed ticker=%r class_code=%r alias=%r: %s",
+                item.ticker,
+                item.class_code,
+                item.alias,
+                exc,
+            )
+            raise
         instrument = response.instrument
         registry.add(
             InstrumentMetadata(
@@ -80,4 +94,3 @@ def build_instrument_registry(
             )
         )
     return registry
-

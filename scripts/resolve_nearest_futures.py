@@ -194,8 +194,9 @@ def _replace_block(path: Path, new_block: str) -> None:
             f"В {path} нет маркеров {BEGIN!r} … {END!r}. "
             "Добавьте их вокруг секции фьючерсов (см. репозиторий после --write)."
         )
+    # Съедаем пробелы перед маркером BEGIN (после замены не остаётся «висячего» отступа).
     pattern = re.compile(
-        re.escape(BEGIN) + r".*?" + re.escape(END),
+        r"\s*" + re.escape(BEGIN) + r".*?" + re.escape(END),
         re.DOTALL,
     )
     if not pattern.search(text):
@@ -236,7 +237,7 @@ def main() -> int:
         fut_resp = client.instruments.futures()
         futures = list(fut_resp.instruments)
 
-    resolved: list[tuple[str, str, str]] = []
+    resolved: list[tuple[str, str]] = []
     for spec in SPECS:
         f = _pick_nearest(futures, spec)
         if f is None:

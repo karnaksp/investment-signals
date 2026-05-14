@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
-from psycopg import connect
+from psycopg import OperationalError, connect
 from psycopg.rows import dict_row
 
 from .config import RuntimeSettings
@@ -35,22 +36,66 @@ class PostgresSignalStore:
     def __init__(self, settings: RuntimeSettings):
         self._table_name = _safe_identifier(settings.postgres_table)
         self._feedback_table = _ADMIN_FEEDBACK_TABLE
+        self._settings = settings
+        self._open_connection()
+
+    def _open_connection(self) -> None:
         self._connection = connect(
-            host=settings.postgres_host,
-            port=settings.postgres_port,
-            dbname=settings.postgres_database,
-            user=settings.postgres_username,
-            password=settings.postgres_password,
+            host=self._settings.postgres_host,
+            port=self._settings.postgres_port,
+            dbname=self._settings.postgres_database,
+            user=self._settings.postgres_username,
+            password=self._settings.postgres_password,
             autocommit=True,
         )
 
+    def _reconnect(self) -> None:
+        try:
+            self._connection.close()
+        except Exception:
+            pass
+        self._open_connection()
+
+    def _ensure_connection(self) -> None:
+        if self._connection.closed:
+            logger.warning(
+                "Postgres connection was closed; reconnecting to %s:%s",
+                self._settings.postgres_host,
+                self._settings.postgres_port,
+            )
+            self._reconnect()
+
+    @contextmanager
+    def _cursor(self, *, row_factory=None):
+        """Курсор с одним повтором при обрыве (рестарт Postgres, idle timeout)."""
+        for attempt in range(2):
+            self._ensure_connection()
+            try:
+                with self._connection.cursor(row_factory=row_factory) as cur:
+                    yield cur
+                return
+            except OperationalError as e:
+                if attempt == 0:
+                    logger.warning(
+                        "Postgres OperationalError; reconnecting (%s:%s): %s",
+                        self._settings.postgres_host,
+                        self._settings.postgres_port,
+                        e,
+                    )
+                    self._reconnect()
+                    continue
+                raise
+
     def ping(self) -> bool:
-        with self._connection.cursor() as cursor:
+        with self._cursor() as cursor:
             cursor.execute("SELECT 1")
             return cursor.fetchone() is not None
 
     def close(self) -> None:
-        self._connection.close()
+        try:
+            self._connection.close()
+        except Exception:
+            pass
 
     def insert_signal(self, signal: TriggerSignal) -> None:
         query = f"""
@@ -88,7 +133,7 @@ class PostgresSignalStore:
                 %(payload_json)s::jsonb
             )
         """
-        with self._connection.cursor() as cursor:
+        with self._cursor() as cursor:
             cursor.execute(
                 query,
                 {
@@ -141,7 +186,7 @@ class PostgresSignalStore:
             ORDER BY detected_at DESC
             LIMIT %(limit)s
         """
-        with self._connection.cursor(row_factory=dict_row) as cursor:
+        with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, params)
             rows = cursor.fetchall()
         return [
@@ -176,7 +221,7 @@ class PostgresSignalStore:
             GROUP BY signal_type
             ORDER BY signal_count DESC, signal_type ASC
         """
-        with self._connection.cursor(row_factory=dict_row) as cursor:
+        with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, {"minutes": safe_minutes})
             rows = cursor.fetchall()
         return [
@@ -205,7 +250,7 @@ class PostgresSignalStore:
         """
         time_sql, time_params, all_time = self._admin_time_sql(minutes)
         tbl = self._table_name
-        with self._connection.cursor(row_factory=dict_row) as cursor:
+        with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 f"""
                 SELECT
@@ -425,7 +470,7 @@ class PostgresSignalStore:
             f"LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id "
             f"WHERE {where_sql}"
         )
-        with self._connection.cursor(row_factory=dict_row) as cursor:
+        with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(f"SELECT count(*)::bigint AS c {base}", params)
             total = int((cursor.fetchone() or {}).get("c") or 0)
             cursor.execute(
@@ -496,7 +541,7 @@ class PostgresSignalStore:
                 note = EXCLUDED.note,
                 updated_at = NOW()
         """
-        with self._connection.cursor() as cursor:
+        with self._cursor() as cursor:
             cursor.execute(
                 q,
                 {
@@ -531,7 +576,7 @@ class PostgresSignalStore:
             LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id
             WHERE ms.signal_id = %(sid)s::uuid
         """
-        with self._connection.cursor(row_factory=dict_row) as cursor:
+        with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(q, {"sid": signal_id.strip()})
             row = cursor.fetchone()
         if row is None:
@@ -579,7 +624,7 @@ class PostgresSignalStore:
             AND detected_at < NOW() - (%(m)s * INTERVAL '1 minute')
         """
         params = {"m": m, "m2": m * 2}
-        with self._connection.cursor(row_factory=dict_row) as cursor:
+        with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(agg, {"m": m})
             cur = dict(cursor.fetchone() or {})
             cursor.execute(
@@ -611,7 +656,7 @@ class PostgresSignalStore:
         """Доп. разрезы: heatmap день×час UTC, быстрые повторы по инструменту."""
         time_sql, time_params, _all_time = self._admin_time_sql(minutes)
         tbl = self._table_name
-        with self._connection.cursor(row_factory=dict_row) as cursor:
+        with self._cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 f"""
                 SELECT
@@ -825,14 +870,18 @@ def create_postgres_signal_store_with_retry(
                 attempt,
             )
             return store
-        except Exception as last_error:
+        except Exception as exc:
+            # Не использовать ``except ... as last_error``: в конце suite Python
+            # удаляет это имя — тогда ``from last_error`` после цикла даёт
+            # UnboundLocalError при исчерпании таймаута.
+            last_error = exc
             logger.warning(
                 "%s is waiting for Postgres at %s:%s (attempt %s): %s",
                 service_name,
                 settings.postgres_host,
                 settings.postgres_port,
                 attempt,
-                last_error,
+                exc,
             )
             time.sleep(check_interval)
 

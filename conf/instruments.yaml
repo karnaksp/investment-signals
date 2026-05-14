@@ -54,7 +54,7 @@ instruments:
       candles: false
       candle_interval: 1m
 
-      # >>> FUTURES_NEAREST_BEGIN (python scripts/resolve_nearest_futures.py --write)
+  # >>> FUTURES_NEAREST_BEGIN (python scripts/resolve_nearest_futures.py --write)
   # Ближайшие контракты по дате экспирации (см. скрипт).
   - ticker: BRM6
     class_code: SPBFUT

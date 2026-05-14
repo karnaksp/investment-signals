@@ -40,7 +40,7 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(toDate(source_time))
 ORDER BY (event_type, toDate(source_time), instrument_id, source_time, event_id)
 -- CH 24.8+: TTL must be Date/DateTime, not DateTime64 (BAD_TTL_EXPRESSION).
-TTL toDateTime(source_time) + toIntervalDay(400)
+TTL toDateTime(source_time) + toIntervalDay(7)
 SETTINGS index_granularity = 8192;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS signal_engine.market_raw_consumer

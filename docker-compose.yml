@@ -19,9 +19,12 @@
 # ============================================================================
 
 services:
-  # Kafka-совместимый брокер; хранение ограничено (~100MB на топик через init).
+  # Kafka-совместимый брокер; лимиты диска см. redpanda-init (сырьё коротко, сигналы дольше).
+  # Память: --memory — куча Seastar; mmap сегментов логов живёт вне неё → нужен mem_limit > --memory (см. .env.example).
   redpanda:
     image: ${REDPANDA_IMAGE:-redpandadata/redpanda:latest}
+    mem_limit: "${REDPANDA_CONTAINER_MEM_LIMIT:-2560m}"
+    restart: unless-stopped
     command:
       - redpanda
       - start
@@ -29,7 +32,7 @@ services:
       - --smp
       - "1"
       - --memory
-      - 1G
+      - "${REDPANDA_SEASTAR_MEMORY:-1G}"
       - --reserve-memory
       - 0M
       - --node-id
@@ -38,9 +41,16 @@ services:
       - --set
       - redpanda.auto_create_topics_enabled=false
       - --set
-      - redpanda.log_retention_bytes=104857600
+      - redpanda.log_retention_bytes=${REDPANDA_LOG_RETENTION_BYTES:-1073741824}
       - --set
-      - redpanda.retention_bytes=104857600
+      - redpanda.retention_bytes=${REDPANDA_DEFAULT_RETENTION_BYTES:-1073741824}
+      # Меньше «залипания» кэшей чтения/фетча при малом RAM (см. cluster properties в доке Redpanda).
+      - --set
+      - redpanda.release_cache_on_segment_roll=true
+      - --set
+      - redpanda.readers_cache_target_max_size=${REDPANDA_READERS_CACHE_TARGET_MAX_SIZE:-32}
+      - --set
+      - redpanda.kafka_memory_share_for_fetch=${REDPANDA_KAFKA_MEMORY_SHARE_FOR_FETCH:-0.35}
       - --kafka-addr
       - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:${HOST_KAFKA_PORT:-39092}
       - --advertise-kafka-addr
@@ -57,8 +67,18 @@ services:
       - "${HOST_SCHEMA_REGISTRY_PORT:-18081}:8081"
     volumes:
       - ./redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "rpk -X brokers=127.0.0.1:9092 cluster info >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
 
-  # Одноразовый контейнер: создаёт топики и выставляет retention.
+  # При каждом up: создаёт топики и выставляет retention (сырые события — коротко; сигналы — дольше).
   redpanda-init:
     image: ${REDPANDA_IMAGE:-redpandadata/redpanda:latest}
     depends_on:
@@ -76,9 +96,24 @@ services:
         rpk -X brokers=redpanda:9092 topic create marketdata.raw -p 1 -r 1 --if-not-exists
         rpk -X brokers=redpanda:9092 topic create marketdata.raw.unary -p 1 -r 1 --if-not-exists
         rpk -X brokers=redpanda:9092 topic create marketdata.signals -p 1 -r 1 --if-not-exists
-        rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
-        rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw.unary --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
-        rpk -X brokers=redpanda:9092 topic alter-config marketdata.signals --set retention.bytes=104857600 --set segment.bytes=16777216 --no-confirm
+        rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw \
+          --set retention.ms=${KAFKA_RAW_RETENTION_MS:-21600000} \
+          --set retention.bytes=${KAFKA_RAW_RETENTION_BYTES:-33554432} \
+          --set segment.bytes=8388608 \
+          --no-confirm
+        rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw.unary \
+          --set retention.ms=${KAFKA_RAW_UNARY_RETENTION_MS:-21600000} \
+          --set retention.bytes=${KAFKA_RAW_UNARY_RETENTION_BYTES:-16777216} \
+          --set segment.bytes=8388608 \
+          --no-confirm
+        rpk -X brokers=redpanda:9092 topic alter-config marketdata.signals \
+          --set retention.ms=${KAFKA_SIGNAL_RETENTION_MS:-2592000000} \
+          --set retention.bytes=${KAFKA_SIGNAL_RETENTION_BYTES:-268435456} \
+          --set segment.bytes=16777216 \
+          --no-confirm
+        # Дублируем «лёгкие» для RAM настройки без рестарта (на случай уже существующего кластера в volume).
+        rpk -X brokers=redpanda:9092 cluster config set release_cache_on_segment_roll true
+        rpk -X brokers=redpanda:9092 cluster config set readers_cache_target_max_size ${REDPANDA_READERS_CACHE_TARGET_MAX_SIZE:-32}
 
   # Веб-консоль для просмотра топиков и сообщений (опционально).
   redpanda-console:
@@ -102,6 +137,16 @@ services:
     volumes:
       - ./postgres:/var/lib/postgresql/data
       - ./sql/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h 127.0.0.1 -p 5432",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
 
   # Поток T-Invest → Kafka (сырые события); читает conf/instruments.yaml.
   ingestor:
@@ -131,7 +176,7 @@ services:
       redpanda-init:
         condition: service_completed_successfully
       postgres:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_started
     env_file:
@@ -141,6 +186,8 @@ services:
       PROTO_DIR: /app/proto
     volumes:
       - ./conf:/app/conf:ro
+      # Тот же пакет, что в образе — правки в ./src без пересборки detector.
+      - ./src/tinvest_signal_engine:/usr/local/lib/python3.12/site-packages/tinvest_signal_engine:ro
     command: ["tinvest-detector"]
     restart: unless-stopped
     expose:
@@ -363,7 +410,7 @@ services:
       context: .
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       clickhouse-init:
         condition: service_completed_successfully
     env_file:
