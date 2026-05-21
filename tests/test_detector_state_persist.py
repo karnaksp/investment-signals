@@ -31,3 +31,20 @@ class DetectorStatePersistTest(unittest.TestCase):
         d = SignalDetector(DetectorSettings())
         hydrate_window_state(d, {})
         self.assertEqual(len(d._states), 0)
+
+    def test_export_hydrate_preserves_vpin_and_trade_sizes(self) -> None:
+        d1 = SignalDetector(DetectorSettings(alert_cooldown_seconds=0))
+        st = d1._states["SBER_TQBR"]
+        st.vpin_current_bucket_buy = 3.0
+        st.vpin_current_bucket_sell = 1.0
+        st.vpin_history.append(0.42)
+        st.trade_size_history.append(99.0)
+
+        blob = export_window_state(d1)
+        d2 = SignalDetector(DetectorSettings(alert_cooldown_seconds=0))
+        hydrate_window_state(d2, blob)
+        st2 = d2._states["SBER_TQBR"]
+        self.assertEqual(st2.vpin_current_bucket_buy, 3.0)
+        self.assertEqual(st2.vpin_current_bucket_sell, 1.0)
+        self.assertEqual(list(st2.vpin_history), [0.42])
+        self.assertEqual(list(st2.trade_size_history), [99.0])

@@ -11,6 +11,7 @@ from kafka import KafkaConsumer, KafkaProducer
 from ..config import RuntimeSettings, load_detector_config
 from ..data_quality import log_validation_failure, validate_normalized_event_dict
 from ..detector_core import SignalDetector
+from ..historical_baselines import HistoricalBaselineStore
 from ..kafka_proto import (
     build_raw_value_deserializer,
     build_signal_value_serializer,
@@ -25,6 +26,7 @@ from ..metrics import (
 )
 from ..models import NormalizedEvent, TriggerSignal
 from ..redis_detector_state import flush_detector_to_redis, hydrate_detector_from_redis
+from ..signal_delivery import record_delivered_signal, should_deliver_signal
 from ..signal_enrichment import enrich_signal_for_delivery
 from ..schema_registry import register_protobuf_schema, schema_subject_for_topic
 from ..sinks import (
@@ -100,10 +102,23 @@ def main() -> None:
     loaded = load_detector_config(
         settings.detector_path, settings.detector_overrides_path
     )
+    historical_store = HistoricalBaselineStore(
+        base_url=settings.clickhouse_http_url,
+        username=settings.clickhouse_http_username,
+        password=settings.clickhouse_http_password,
+        refresh_seconds=float(settings.historical_baseline_refresh_seconds),
+    )
+    if historical_store.enabled:
+        try:
+            historical_store.maybe_refresh(force=True)
+        except Exception:
+            logger.exception("Initial historical baseline refresh failed")
+
     detector = SignalDetector(
         loaded.default,
         loaded.per_instrument,
         lead_lag_pairs=loaded.lead_lag_pairs,
+        historical_store=historical_store,
     )
     hydrate_detector_from_redis(detector, settings.redis_url)
     detector_mtime = settings.detector_path.stat().st_mtime
@@ -142,6 +157,7 @@ def main() -> None:
 
     try:
         for message in consumer:
+            historical_store.maybe_refresh()
             if reload_iv > 0:
                 now = time.monotonic()
                 if now - last_config_poll >= reload_iv:
@@ -167,6 +183,7 @@ def main() -> None:
                                 loaded.default,
                                 loaded.per_instrument,
                                 lead_lag_pairs=loaded.lead_lag_pairs,
+                                historical_store=historical_store,
                             )
                             hydrate_detector_from_redis(detector, settings.redis_url)
                             detector_mtime = mtime
@@ -201,19 +218,18 @@ def main() -> None:
                     delivered: list[TriggerSignal] = []
                     for signal in signals:
                         signal = enrich_signal_for_delivery(signal)
-                        min_q = settings.signal_min_quality_score
-                        if min_q is not None:
+                        if not should_deliver_signal(signal, settings):
                             qs = signal.payload.get("quality_score")
-                            if isinstance(qs, int) and qs < min_q:
-                                logger.info(
-                                    "Skip signal below quality floor: %s "
-                                    "quality_score=%s min=%s",
-                                    signal.signal_type,
-                                    qs,
-                                    min_q,
-                                )
-                                continue
+                            logger.info(
+                                "Skip signal (delivery filter): %s "
+                                "quality_score=%s z=%.2f",
+                                signal.signal_type,
+                                qs,
+                                signal.z_score,
+                            )
+                            continue
                         delivered.append(signal)
+                        record_delivered_signal()
                     for signal in delivered:
                         signal_store.insert_signal(signal)
                         out_val: Any = (

@@ -26,6 +26,7 @@ from dagster import (
 )
 
 from .logging_utils import configure_logging
+from .services.historical_baseline_job import run_once as run_historical_baseline_once
 from .services.threshold_cron import run_recalc_once
 
 
@@ -71,6 +72,23 @@ def unary_kafka_poll_once_op(context) -> None:
     subprocess.run(cmd, check=True, env=env)
 
 
+@op(name="historical_baseline_recalc_op", tags={"component": "historical_baseline"})
+def historical_baseline_recalc_op(context) -> None:
+    """Пересчёт trade_slot_daily + historical_baseline_slot_stats в ClickHouse."""
+    from .config import RuntimeSettings
+
+    settings = RuntimeSettings.from_env()
+    configure_logging(settings.log_level)
+    url = (settings.clickhouse_http_url or "").strip()
+    if not url:
+        raise Failure("CLICKHOUSE_HTTP_URL не задан: historical baseline job пропущен")
+    context.log.info(
+        "Historical baseline: lookback_days=%s",
+        settings.historical_baseline_lookback_days,
+    )
+    run_historical_baseline_once(settings)
+
+
 @job(name="threshold_recalc_job")
 def threshold_recalc_job() -> None:
     threshold_recalc_op()
@@ -81,8 +99,14 @@ def unary_kafka_poll_once_job() -> None:
     unary_kafka_poll_once_op()
 
 
+@job(name="historical_baseline_recalc_job")
+def historical_baseline_recalc_job() -> None:
+    historical_baseline_recalc_op()
+
+
 _DEFAULT_THRESHOLD_CRON: Final[str] = "0 2 * * *"
 _DEFAULT_UNARY_CRON: Final[str] = "*/15 * * * *"
+_DEFAULT_HISTORICAL_BASELINE_CRON: Final[str] = "0 3 * * *"
 
 
 def _threshold_cron_schedule() -> str:
@@ -93,6 +117,11 @@ def _threshold_cron_schedule() -> str:
 def _unary_cron_schedule() -> str:
     raw = (os.getenv("DAGSTER_UNARY_CRON") or "").strip()
     return raw or _DEFAULT_UNARY_CRON
+
+
+def _historical_baseline_cron_schedule() -> str:
+    raw = (os.getenv("DAGSTER_HISTORICAL_BASELINE_CRON") or "").strip()
+    return raw or _DEFAULT_HISTORICAL_BASELINE_CRON
 
 
 daily_threshold_schedule = ScheduleDefinition(
@@ -109,7 +138,22 @@ quarter_hourly_unary_schedule = ScheduleDefinition(
     default_status=DefaultScheduleStatus.RUNNING,
 )
 
+daily_historical_baseline_schedule = ScheduleDefinition(
+    name="daily_historical_baseline_recalc",
+    job=historical_baseline_recalc_job,
+    cron_schedule=_historical_baseline_cron_schedule(),
+    default_status=DefaultScheduleStatus.RUNNING,
+)
+
 defs = Definitions(
-    jobs=[threshold_recalc_job, unary_kafka_poll_once_job],
-    schedules=[daily_threshold_schedule, quarter_hourly_unary_schedule],
+    jobs=[
+        threshold_recalc_job,
+        unary_kafka_poll_once_job,
+        historical_baseline_recalc_job,
+    ],
+    schedules=[
+        daily_threshold_schedule,
+        quarter_hourly_unary_schedule,
+        daily_historical_baseline_schedule,
+    ],
 )

@@ -6,13 +6,27 @@ import math
 from collections import defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import fmean
 from typing import Any, Iterable
 from uuid import uuid4
 
 from .config import DetectorSettings
+from .historical_baselines import HistoricalBaselineStore, SlotBaseline
 from .models import NormalizedEvent, TriggerSignal
+from .orderflow_signals import (
+    IcebergWatch,
+    OrderflowSignalCandidate,
+    TouchSnapshot,
+    evaluate_absorption,
+    evaluate_iceberg_refill,
+    evaluate_spread_imbalance_regime,
+    evaluate_vpin_spike,
+    evaluate_whale_print,
+    feed_vpin_trade,
+    severity_from_z_score,
+    update_iceberg_on_trade,
+)
 from .serialization import quotation_to_float, utc_now
 
 
@@ -43,6 +57,25 @@ class OrderBookDepthSnapshot:
     mid: float
     best_bid: float
     best_ask: float
+    best_bid_qty: float = 0.0
+    best_ask_qty: float = 0.0
+
+
+@dataclass
+class HistBarAccumulator:
+    """Closed-bar OHLC/VWAP parts for historical seasonal comparison (UTC buckets)."""
+
+    bucket_start: datetime | None = None
+    sum_qty: float = 0.0
+    n_trades: int = 0
+    sum_pv: float = 0.0
+    open_px: float | None = None
+    high_px: float | None = None
+    low_px: float | None = None
+
+
+def _default_hist_bars() -> dict[str, HistBarAccumulator]:
+    return {k: HistBarAccumulator() for k in ("1m", "5m", "15m")}
 
 
 @dataclass
@@ -57,6 +90,8 @@ class InstrumentState:
     imbalance_history: deque[float] = field(default_factory=deque)
     last_sample_at: dict[str, datetime] = field(default_factory=dict)
     last_alert_at: dict[str, datetime] = field(default_factory=dict)
+    # Любой алерт по инструменту (для alert_global_cooldown_seconds).
+    last_any_alert_at: datetime | None = None
     last_active_at: dict[str, datetime] = field(default_factory=dict)
     last_trading_status: str | None = None
     last_orderbook_imbalance_ratio: float | None = None
@@ -72,6 +107,20 @@ class InstrumentState:
     candle_range_history: deque[float] = field(default_factory=deque)
     last_limit_order_available: bool | None = None
     last_market_order_available: bool | None = None
+    hist_bars: dict[str, HistBarAccumulator] = field(
+        default_factory=_default_hist_bars
+    )
+    vpin_current_bucket_buy: float = 0.0
+    vpin_current_bucket_sell: float = 0.0
+    vpin_bucket_imbalances: deque[float] = field(default_factory=deque)
+    vpin_history: deque[float] = field(default_factory=deque)
+    trade_size_history: deque[float] = field(default_factory=deque)
+    iceberg_watch_bid: IcebergWatch | None = None
+    iceberg_watch_ask: IcebergWatch | None = None
+    last_touch_snapshot: TouchSnapshot | None = None
+
+
+_GLOBAL_ALERT_STATE_KEY = "__global__"
 
 
 class SignalDetector:
@@ -83,11 +132,13 @@ class SignalDetector:
         per_instrument: dict[str, DetectorSettings] | None = None,
         *,
         lead_lag_pairs: tuple[tuple[str, str], ...] = (),
+        historical_store: HistoricalBaselineStore | None = None,
     ):
         self._default_settings = settings
         self._per_instrument = per_instrument or {}
         self._states: dict[str, InstrumentState] = defaultdict(InstrumentState)
         self._lead_lag_pairs = lead_lag_pairs
+        self._historical_store = historical_store
         self._mid_track: dict[str, deque[tuple[datetime, float]]] = defaultdict(
             lambda: deque(maxlen=4000)
         )
@@ -171,8 +222,15 @@ class SignalDetector:
         """Сериализует ``last_alert_at`` по инструментам (ISO 8601) для Redis/файла."""
         out: dict[str, dict[str, str]] = {}
         for iid, st in self._states.items():
-            if st.last_alert_at:
-                out[iid] = {k: v.isoformat() for k, v in st.last_alert_at.items()}
+            if st.last_alert_at or st.last_any_alert_at is not None:
+                payload = {
+                    k: v.isoformat() for k, v in st.last_alert_at.items()
+                }
+                if st.last_any_alert_at is not None:
+                    payload[_GLOBAL_ALERT_STATE_KEY] = (
+                        st.last_any_alert_at.isoformat()
+                    )
+                out[iid] = payload
         return out
 
     def hydrate_alert_state(self, data: dict[str, dict[str, str]]) -> None:
@@ -184,9 +242,23 @@ class SignalDetector:
                     dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
                 except (ValueError, TypeError):
                     continue
+                if sig_type == _GLOBAL_ALERT_STATE_KEY:
+                    prev_any = state.last_any_alert_at
+                    if prev_any is None or dt > prev_any:
+                        state.last_any_alert_at = dt
+                    continue
                 prev = state.last_alert_at.get(sig_type)
                 if prev is None or dt > prev:
                     state.last_alert_at[sig_type] = dt
+
+    @staticmethod
+    def _record_alert_sent(
+        state: InstrumentState, signal_type: str, now: datetime
+    ) -> None:
+        state.last_alert_at[signal_type] = now
+        prev_any = state.last_any_alert_at
+        if prev_any is None or now > prev_any:
+            state.last_any_alert_at = now
 
     def _process_trade_event(
         self,
@@ -230,10 +302,19 @@ class SignalDetector:
                 )
             )
 
+        signals.extend(self._process_orderflow_on_trade(event, state, cfg, price, quantity, signed_qty))
         signals.extend(self._sample_trade_windows(event, state, cfg))
         signals.extend(
             self._sample_price_move(event, state, cfg, current_price=price)
         )
+        if (
+            cfg.historical_baseline_enabled
+            and self._historical_store is not None
+            and self._historical_store.enabled
+        ):
+            signals.extend(
+                self._process_historical_trade_buckets(event, state, cfg)
+            )
         return signals
 
     def _process_last_price_event(
@@ -269,12 +350,22 @@ class SignalDetector:
         depth = max(1, min(20, cfg.order_book_depth_levels))
         top_bids_qty = _sum_orderbook_depth(bids, depth)
         top_asks_qty = _sum_orderbook_depth(asks, depth)
+        best_bid_qty = float((bids[0] or {}).get("quantity", 0.0) or 0.0)
+        best_ask_qty = float((asks[0] or {}).get("quantity", 0.0) or 0.0)
         total_qty = top_bids_qty + top_asks_qty
         if total_qty <= 0:
             return []
 
         mid = (best_bid + best_ask) / 2.0
         self._push_mid(event.instrument_id, event.source_time, mid, cfg)
+        state.last_touch_snapshot = TouchSnapshot(
+            ts=event.source_time,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            best_bid_qty=best_bid_qty,
+            best_ask_qty=best_ask_qty,
+            mid=mid,
+        )
         self._record_orderbook_snapshot(
             state,
             OrderBookDepthSnapshot(
@@ -284,6 +375,8 @@ class SignalDetector:
                 mid=mid,
                 best_bid=best_bid,
                 best_ask=best_ask,
+                best_bid_qty=best_bid_qty,
+                best_ask_qty=best_ask_qty,
             ),
             cfg,
         )
@@ -304,6 +397,16 @@ class SignalDetector:
                     event, state, cfg, mid=mid
                 )
             )
+
+        signals.extend(
+            self._process_iceberg_on_orderbook(
+                event,
+                state,
+                cfg,
+                best_bid_qty=best_bid_qty,
+                best_ask_qty=best_ask_qty,
+            )
+        )
 
         if not self._should_sample(state, "orderbook", event.source_time, cfg):
             return signals
@@ -386,6 +489,16 @@ class SignalDetector:
 
         state.last_sample_at["orderbook"] = event.source_time
         self._trim_histories(state, cfg)
+        signals.extend(
+            self._process_regime_on_orderbook(
+                event,
+                state,
+                cfg,
+                spread_bps=spread_bps,
+                imbalance_abs=imbalance_abs,
+                imbalance_ratio=imbalance_ratio,
+            )
+        )
         signals.extend(self._evaluate_combo(event, state, cfg))
         return signals
 
@@ -412,7 +525,9 @@ class SignalDetector:
             state, "trading_status_changed", event.source_time, cfg
         ):
             return signals
-        state.last_alert_at["trading_status_changed"] = event.source_time
+        self._record_alert_sent(
+            state, "trading_status_changed", event.source_time
+        )
         signals.append(
             TriggerSignal(
                 signal_id=str(uuid4()),
@@ -610,6 +725,7 @@ class SignalDetector:
         )
         delta_long_ok = signed_delta_qty >= cfg.combo_delta_min_abs_qty
         delta_short_ok = signed_delta_qty <= -cfg.combo_delta_min_abs_qty
+        min_score_eff = self._effective_combo_min_score(cfg)
         combo_detail = {
             "freshness_seconds": cfg.combo_freshness_seconds,
             "flags": {
@@ -632,6 +748,8 @@ class SignalDetector:
             "scores": {"long": long_score, "short": short_score},
             "thresholds": {
                 "min_score": cfg.combo_min_score,
+                "effective_min_score": min_score_eff,
+                "microstructure_secondary_mode": cfg.microstructure_secondary_mode,
                 "imbalance_long_ge": cfg.combo_imbalance_long_threshold,
                 "imbalance_short_le": cfg.combo_imbalance_short_threshold,
                 "delta_min_abs_qty": cfg.combo_delta_min_abs_qty,
@@ -641,13 +759,16 @@ class SignalDetector:
         }
 
         signals: list[TriggerSignal] = []
-        if long_score >= cfg.combo_min_score and self._is_alert_ready_for(
+        if long_score >= min_score_eff and self._is_alert_ready_for(
             state=state,
             signal_type="microstructure_combo_long",
             now=event.source_time,
             cooldown_seconds=cfg.combo_alert_cooldown_seconds,
+            cfg=cfg,
         ):
-            state.last_alert_at["microstructure_combo_long"] = event.source_time
+            self._record_alert_sent(
+                state, "microstructure_combo_long", event.source_time
+            )
             signals.append(
                 TriggerSignal(
                     signal_id=str(uuid4()),
@@ -658,9 +779,9 @@ class SignalDetector:
                     alias=event.alias,
                     source_event_type=event.event_type,
                     signal_type="microstructure_combo_long",
-                    severity=3 if long_score >= cfg.combo_min_score + 2 else 2,
+                    severity=3 if long_score >= min_score_eff + 2 else 2,
                     metric_value=float(long_score),
-                    baseline_value=float(cfg.combo_min_score),
+                    baseline_value=float(min_score_eff),
                     z_score=0.0,
                     window_seconds=cfg.combo_freshness_seconds,
                     summary=(
@@ -671,6 +792,7 @@ class SignalDetector:
                     payload={
                         "score": long_score,
                         "min_score": cfg.combo_min_score,
+                        "effective_min_score": min_score_eff,
                         "spread_active": spread_active,
                         "tick_rate_active": tick_rate_active,
                         "imbalance_ratio": imbalance_ratio,
@@ -679,13 +801,16 @@ class SignalDetector:
                     },
                 )
             )
-        if short_score >= cfg.combo_min_score and self._is_alert_ready_for(
+        if short_score >= min_score_eff and self._is_alert_ready_for(
             state=state,
             signal_type="microstructure_combo_short",
             now=event.source_time,
             cooldown_seconds=cfg.combo_alert_cooldown_seconds,
+            cfg=cfg,
         ):
-            state.last_alert_at["microstructure_combo_short"] = event.source_time
+            self._record_alert_sent(
+                state, "microstructure_combo_short", event.source_time
+            )
             signals.append(
                 TriggerSignal(
                     signal_id=str(uuid4()),
@@ -696,9 +821,9 @@ class SignalDetector:
                     alias=event.alias,
                     source_event_type=event.event_type,
                     signal_type="microstructure_combo_short",
-                    severity=3 if short_score >= cfg.combo_min_score + 2 else 2,
+                    severity=3 if short_score >= min_score_eff + 2 else 2,
                     metric_value=float(short_score),
-                    baseline_value=float(cfg.combo_min_score),
+                    baseline_value=float(min_score_eff),
                     z_score=0.0,
                     window_seconds=cfg.combo_freshness_seconds,
                     summary=(
@@ -709,6 +834,7 @@ class SignalDetector:
                     payload={
                         "score": short_score,
                         "min_score": cfg.combo_min_score,
+                        "effective_min_score": min_score_eff,
                         "spread_active": spread_active,
                         "tick_rate_active": tick_rate_active,
                         "imbalance_ratio": imbalance_ratio,
@@ -808,7 +934,7 @@ class SignalDetector:
             return []
         if not self._is_alert_ready(state, signal_type, event.source_time, cfg):
             return []
-        state.last_alert_at[signal_type] = event.source_time
+        self._record_alert_sent(state, signal_type, event.source_time)
         return [
             TriggerSignal(
                 signal_id=str(uuid4()),
@@ -862,7 +988,8 @@ class SignalDetector:
         if len(history) < cfg.min_baseline_points:
             return []
         baseline, z_score = _z_score(history, value)
-        if z_score < threshold:
+        eff_threshold = float(threshold) * self._micro_threshold_multiplier(cfg)
+        if z_score < eff_threshold:
             return []
         if cfg.min_relative_metric_excursion > 0.0:
             b = float(baseline)
@@ -873,7 +1000,7 @@ class SignalDetector:
         state.last_active_at[signal_type] = event.source_time
         if not self._is_alert_ready(state, signal_type, event.source_time, cfg):
             return []
-        state.last_alert_at[signal_type] = event.source_time
+        self._record_alert_sent(state, signal_type, event.source_time)
         return [
             TriggerSignal(
                 signal_id=str(uuid4()),
@@ -932,6 +1059,17 @@ class SignalDetector:
         elapsed = (now - last_sample_at).total_seconds()
         return elapsed >= cfg.sample_every_seconds
 
+    def _global_cooldown_blocks(
+        self, state: InstrumentState, now: datetime, cfg: DetectorSettings
+    ) -> bool:
+        global_cd = int(cfg.alert_global_cooldown_seconds)
+        if global_cd <= 0:
+            return False
+        last_any = state.last_any_alert_at
+        if last_any is None:
+            return False
+        return (now - last_any).total_seconds() < global_cd
+
     def _is_alert_ready(
         self,
         state: InstrumentState,
@@ -939,6 +1077,8 @@ class SignalDetector:
         now: datetime,
         cfg: DetectorSettings,
     ) -> bool:
+        if self._global_cooldown_blocks(state, now, cfg):
+            return False
         last_alert_at = state.last_alert_at.get(signal_type)
         if last_alert_at is None:
             return True
@@ -952,7 +1092,10 @@ class SignalDetector:
         signal_type: str,
         now: datetime,
         cooldown_seconds: int,
+        cfg: DetectorSettings,
     ) -> bool:
+        if self._global_cooldown_blocks(state, now, cfg):
+            return False
         last_alert_at = state.last_alert_at.get(signal_type)
         if last_alert_at is None:
             return True
@@ -970,6 +1113,9 @@ class SignalDetector:
             state.obi_delta_history,
             state.open_interest_history,
             state.candle_range_history,
+            state.vpin_history,
+            state.trade_size_history,
+            state.vpin_bucket_imbalances,
         ):
             while len(history) > maxlen:
                 history.popleft()
@@ -988,6 +1134,242 @@ class SignalDetector:
         cutoff = ts - timedelta(seconds=max(5, cfg.lead_lag_window_seconds))
         while dq and dq[0][0] < cutoff:
             dq.popleft()
+
+    def _emit_orderflow_candidates(
+        self,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+        candidates: Iterable[OrderflowSignalCandidate],
+        *,
+        source_event_type: str,
+        cooldown_seconds: int | None = None,
+    ) -> list[TriggerSignal]:
+        signals: list[TriggerSignal] = []
+        for cand in candidates:
+            cooldown = (
+                cfg.alert_cooldown_seconds
+                if cooldown_seconds is None
+                else cooldown_seconds
+            )
+            if not self._is_alert_ready_for(
+                state=state,
+                signal_type=cand.signal_type,
+                now=event.source_time,
+                cooldown_seconds=cooldown,
+                cfg=cfg,
+            ):
+                continue
+            self._record_alert_sent(
+                state, cand.signal_type, event.source_time
+            )
+            state.last_active_at[cand.signal_type] = event.source_time
+            z = float(cand.z_score)
+            severity = (
+                cand.severity
+                if cand.severity is not None
+                else (severity_from_z_score(z) if z > 0 else 2)
+            )
+            summary = cand.summary.format(
+                ticker=event.ticker,
+                metric=cand.metric_value,
+                baseline=cand.baseline_value,
+                z_score=z,
+                window=cand.window_seconds,
+            )
+            signals.append(
+                TriggerSignal(
+                    signal_id=str(uuid4()),
+                    detected_at=utc_now(),
+                    instrument_id=event.instrument_id,
+                    ticker=event.ticker,
+                    class_code=event.class_code,
+                    alias=event.alias,
+                    source_event_type=source_event_type,
+                    signal_type=cand.signal_type,
+                    severity=severity,
+                    metric_value=cand.metric_value,
+                    baseline_value=cand.baseline_value,
+                    z_score=z,
+                    window_seconds=cand.window_seconds,
+                    summary=summary,
+                    payload={**cand.payload, "event_payload": event.payload},
+                )
+            )
+        return signals
+
+    def _process_orderflow_on_trade(
+        self,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+        price: float,
+        quantity: float,
+        signed_qty: float,
+    ) -> list[TriggerSignal]:
+        signals: list[TriggerSignal] = []
+        buy_qty = quantity if signed_qty > 0 else 0.0
+        sell_qty = quantity if signed_qty < 0 else 0.0
+        if signed_qty == 0 and quantity > 0:
+            raw = event.payload.get("direction")
+            if isinstance(raw, str) and raw.strip().upper() in {
+                "TRADE_DIRECTION_BUY",
+                "BUY",
+            }:
+                buy_qty = quantity
+            elif isinstance(raw, str) and raw.strip().upper() in {
+                "TRADE_DIRECTION_SELL",
+                "SELL",
+            }:
+                sell_qty = quantity
+
+        bucket_buy, bucket_sell, closed_buckets, current_vpin = feed_vpin_trade(
+            buy_qty=buy_qty,
+            sell_qty=sell_qty,
+            bucket_buy=state.vpin_current_bucket_buy,
+            bucket_sell=state.vpin_current_bucket_sell,
+            bucket_target=cfg.vpin_bucket_volume_lots,
+            bucket_imbalances=state.vpin_bucket_imbalances,
+            lookback_buckets=cfg.vpin_lookback_buckets,
+        )
+        state.vpin_current_bucket_buy = bucket_buy
+        state.vpin_current_bucket_sell = bucket_sell
+        if closed_buckets and current_vpin is not None:
+            vpin_cand = evaluate_vpin_spike(
+                vpin_history=state.vpin_history,
+                current_vpin=current_vpin,
+                cfg=cfg,
+                min_buckets=cfg.vpin_min_buckets_before_emit,
+            )
+            if vpin_cand is not None:
+                vpin_cand.summary = (
+                    f"{event.ticker} VPIN {current_vpin:.4f} vs baseline "
+                    f"{{baseline:.4f}} (z={{z_score:.2f}})."
+                )
+                signals.extend(
+                    self._emit_orderflow_candidates(
+                        event, state, cfg, [vpin_cand], source_event_type="trade"
+                    )
+                )
+            state.vpin_history.append(current_vpin)
+
+        whale_cand = evaluate_whale_print(
+            trade_size=quantity,
+            trade_size_history=state.trade_size_history,
+            cfg=cfg,
+        )
+        if whale_cand is not None:
+            whale_cand.summary = (
+                f"{event.ticker} large print {{metric:.2f}} lots "
+                f"vs baseline {{baseline:.2f}} (z={{z_score:.2f}})."
+            )
+            signals.extend(
+                self._emit_orderflow_candidates(
+                    event, state, cfg, [whale_cand], source_event_type="trade"
+                )
+            )
+        state.trade_size_history.append(quantity)
+
+        mid_ring = self._mid_track[event.instrument_id]
+        signed_iter = ((p.ts, p.signed_quantity) for p in state.signed_trade_points)
+        absorption = evaluate_absorption(
+            signed_points=signed_iter,
+            mid_ring=mid_ring,
+            now=event.source_time,
+            cfg=cfg,
+        )
+        for cand in absorption:
+            cand.summary = cand.summary.replace(
+                "Bid absorption", f"{event.ticker} bid absorption"
+            ).replace("Ask absorption", f"{event.ticker} ask absorption")
+        signals.extend(
+            self._emit_orderflow_candidates(
+                event, state, cfg, absorption, source_event_type="trade"
+            )
+        )
+
+        if signed_qty != 0:
+            watch_bid, watch_ask = update_iceberg_on_trade(
+                trade_price=price,
+                signed_qty=signed_qty,
+                trade_ts=event.source_time,
+                touch=state.last_touch_snapshot,
+                watch_bid=state.iceberg_watch_bid,
+                watch_ask=state.iceberg_watch_ask,
+                cfg=cfg,
+            )
+            state.iceberg_watch_bid = watch_bid
+            state.iceberg_watch_ask = watch_ask
+
+        self._trim_histories(state, cfg)
+        return signals
+
+    def _process_iceberg_on_orderbook(
+        self,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+        *,
+        best_bid_qty: float,
+        best_ask_qty: float,
+    ) -> list[TriggerSignal]:
+        bid_cand, state.iceberg_watch_bid = evaluate_iceberg_refill(
+            watch=state.iceberg_watch_bid,
+            cur_touch_qty=best_bid_qty,
+            cur_ts=event.source_time,
+            side="bid",
+            cfg=cfg,
+        )
+        ask_cand, state.iceberg_watch_ask = evaluate_iceberg_refill(
+            watch=state.iceberg_watch_ask,
+            cur_touch_qty=best_ask_qty,
+            cur_ts=event.source_time,
+            side="ask",
+            cfg=cfg,
+        )
+        iceberg: list[OrderflowSignalCandidate] = []
+        if bid_cand is not None:
+            bid_cand.summary = (
+                f"{event.ticker} iceberg refill (bid): +{bid_cand.metric_value:.2f} lots."
+            )
+            iceberg.append(bid_cand)
+        if ask_cand is not None:
+            ask_cand.summary = (
+                f"{event.ticker} iceberg refill (ask): +{ask_cand.metric_value:.2f} lots."
+            )
+            iceberg.append(ask_cand)
+        return self._emit_orderflow_candidates(
+            event, state, cfg, iceberg, source_event_type="orderbook"
+        )
+
+    def _process_regime_on_orderbook(
+        self,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+        *,
+        spread_bps: float,
+        imbalance_abs: float,
+        imbalance_ratio: float,
+    ) -> list[TriggerSignal]:
+        regime = evaluate_spread_imbalance_regime(
+            spread_bps=spread_bps,
+            imbalance_abs=imbalance_abs,
+            imbalance_ratio=imbalance_ratio,
+            cfg=cfg,
+        )
+        for cand in regime:
+            cand.summary = cand.summary.replace(
+                "Tight spread", f"{event.ticker} tight spread"
+            )
+        return self._emit_orderflow_candidates(
+            event,
+            state,
+            cfg,
+            regime,
+            source_event_type="orderbook",
+            cooldown_seconds=cfg.regime_alert_cooldown_seconds,
+        )
 
     def _maybe_emit_trade_burst(
         self,
@@ -1019,7 +1401,9 @@ class SignalDetector:
             state, "aggressive_trade_burst", event.source_time, cfg
         ):
             return []
-        state.last_alert_at["aggressive_trade_burst"] = event.source_time
+        self._record_alert_sent(
+            state, "aggressive_trade_burst", event.source_time
+        )
         direction = "buy" if signs[0] > 0 else "sell"
         return [
             TriggerSignal(
@@ -1062,7 +1446,9 @@ class SignalDetector:
             state, "orderbook_snapshot_inconsistent", event.source_time, cfg
         ):
             return []
-        state.last_alert_at["orderbook_snapshot_inconsistent"] = event.source_time
+        self._record_alert_sent(
+            state, "orderbook_snapshot_inconsistent", event.source_time
+        )
         return [
             TriggerSignal(
                 signal_id=str(uuid4()),
@@ -1113,7 +1499,9 @@ class SignalDetector:
             state, "price_near_limit_band", event.source_time, cfg
         ):
             return []
-        state.last_alert_at["price_near_limit_band"] = event.source_time
+        self._record_alert_sent(
+            state, "price_near_limit_band", event.source_time
+        )
         return [
             TriggerSignal(
                 signal_id=str(uuid4()),
@@ -1170,7 +1558,9 @@ class SignalDetector:
             state, "market_access_changed", event.source_time, cfg
         ):
             return []
-        state.last_alert_at["market_access_changed"] = event.source_time
+        self._record_alert_sent(
+            state, "market_access_changed", event.source_time
+        )
         detail = "; ".join(parts)
         return [
             TriggerSignal(
@@ -1301,7 +1691,7 @@ class SignalDetector:
             ):
                 continue
             st = self._states[follower_id]
-            st.last_alert_at["lead_lag_divergence"] = now
+            self._record_alert_sent(st, "lead_lag_divergence", now)
             signals.append(
                 TriggerSignal(
                     signal_id=str(uuid4()),
@@ -1331,6 +1721,304 @@ class SignalDetector:
                 )
             )
         return signals
+
+    def _ensure_utc_ts(self, ts: datetime) -> datetime:
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+
+    def _floor_bucket_utc(self, ts: datetime, minutes: int) -> datetime:
+        t = self._ensure_utc_ts(ts).replace(second=0, microsecond=0)
+        if minutes <= 1:
+            return t
+        m = (t.minute // minutes) * minutes
+        return t.replace(minute=m)
+
+    def _slot_minute_from_dt(self, ts: datetime) -> int:
+        t = self._ensure_utc_ts(ts)
+        return int(t.hour * 60 + t.minute)
+
+    def _micro_threshold_multiplier(self, cfg: DetectorSettings) -> float:
+        if cfg.microstructure_secondary_mode:
+            return max(1.0, float(cfg.microstructure_secondary_threshold_multiplier))
+        return 1.0
+
+    def _effective_combo_min_score(self, cfg: DetectorSettings) -> float:
+        return float(cfg.combo_min_score) * self._micro_threshold_multiplier(cfg)
+
+    def _historical_timeframe_set(self, cfg: DetectorSettings) -> set[str]:
+        raw = (cfg.historical_timeframes_csv or "1m,5m,15m").lower()
+        return {x.strip() for x in raw.split(",") if x.strip()}
+
+    def _baseline_percentile_value(
+        self, bl: SlotBaseline, cfg: DetectorSettings
+    ) -> float:
+        key = (cfg.historical_compare_percentile or "p95").strip().lower()
+        if key in {"p99", "99"}:
+            return float(bl.p99)
+        if key in {"p90", "90"}:
+            return float(bl.p90)
+        if key in {"median", "p50", "50"}:
+            return float(bl.median)
+        return float(bl.p95)
+
+    def _hist_touch_bar(self, acc: HistBarAccumulator, px: float, qty: float) -> None:
+        acc.sum_qty += float(qty)
+        acc.n_trades += 1
+        acc.sum_pv += float(px) * float(qty)
+        if acc.open_px is None:
+            acc.open_px = float(px)
+        if acc.high_px is None:
+            acc.high_px = float(px)
+        else:
+            acc.high_px = max(float(acc.high_px), float(px))
+        if acc.low_px is None:
+            acc.low_px = float(px)
+        else:
+            acc.low_px = min(float(acc.low_px), float(px))
+
+    def _hist_reset_bar(self, acc: HistBarAccumulator, px: float, qty: float) -> None:
+        acc.sum_qty = float(qty)
+        acc.n_trades = 1
+        acc.sum_pv = float(px) * float(qty)
+        acc.open_px = float(px)
+        acc.high_px = float(px)
+        acc.low_px = float(px)
+
+    def _emit_closed_hist_bar(
+        self,
+        *,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+        store: HistoricalBaselineStore,
+        tf: str,
+        window_seconds: int,
+        acc: HistBarAccumulator,
+    ) -> list[TriggerSignal]:
+        if acc.bucket_start is None or acc.sum_qty <= 0:
+            return []
+        slot = self._slot_minute_from_dt(acc.bucket_start)
+        vwap = acc.sum_pv / acc.sum_qty
+        n = int(acc.n_trades)
+        vol = float(acc.sum_qty)
+        rate = float(n) / float(window_seconds)
+        sigs: list[TriggerSignal] = []
+        sigs.extend(
+            self._try_emit_historical(
+                event=event,
+                state=state,
+                cfg=cfg,
+                store=store,
+                signal_type=f"historical_volume_anomaly_{tf}",
+                metric="volume_qty",
+                timeframe=tf,
+                slot_minute=slot,
+                current_value=vol,
+                window_seconds=window_seconds,
+                summary_en=(
+                    f"{event.ticker} {tf} volume {vol:.6g} vs seasonal slot "
+                    f"UTC {slot // 60:02d}:{slot % 60:02d} (ClickHouse baseline)."
+                ),
+                extra={"vwap": float(vwap)},
+            )
+        )
+        sigs.extend(
+            self._try_emit_historical(
+                event=event,
+                state=state,
+                cfg=cfg,
+                store=store,
+                signal_type=f"historical_trade_rate_anomaly_{tf}",
+                metric="trade_rate",
+                timeframe=tf,
+                slot_minute=slot,
+                current_value=rate,
+                window_seconds=window_seconds,
+                summary_en=(
+                    f"{event.ticker} {tf} trade rate {rate:.4f} trades/s vs seasonal "
+                    f"slot UTC {slot // 60:02d}:{slot % 60:02d}."
+                ),
+                extra={"trades_in_bucket": n},
+            )
+        )
+        if tf in {"5m", "15m"} and acc.open_px is not None and float(acc.open_px) > 0:
+            ret_bps = (
+                (vwap - float(acc.open_px)) / float(acc.open_px)
+            ) * 10_000.0
+            sigs.extend(
+                self._try_emit_historical(
+                    event=event,
+                    state=state,
+                    cfg=cfg,
+                    store=store,
+                    signal_type=f"historical_return_anomaly_{tf}",
+                    metric="return_bps_abs",
+                    timeframe=tf,
+                    slot_minute=slot,
+                    current_value=float(abs(ret_bps)),
+                    window_seconds=window_seconds,
+                    summary_en=(
+                        f"{event.ticker} {tf} |open→VWAP return|={abs(ret_bps):.2f} bps "
+                        f"vs seasonal slot."
+                    ),
+                    extra={"signed_return_bps": float(ret_bps)},
+                )
+            )
+        if (
+            tf in {"5m", "15m"}
+            and acc.high_px is not None
+            and acc.low_px is not None
+            and float(acc.high_px) > float(acc.low_px)
+        ):
+            hi = float(acc.high_px)
+            lo = float(acc.low_px)
+            mid = (hi + lo) / 2.0
+            if mid > 0:
+                rng = (hi - lo) / mid * 10_000.0
+                sigs.extend(
+                    self._try_emit_historical(
+                        event=event,
+                        state=state,
+                        cfg=cfg,
+                        store=store,
+                        signal_type=f"historical_range_anomaly_{tf}",
+                        metric="range_abs_bps",
+                        timeframe=tf,
+                        slot_minute=slot,
+                        current_value=float(rng),
+                        window_seconds=window_seconds,
+                        summary_en=(
+                            f"{event.ticker} {tf} range {rng:.2f} bps (H-L vs mid) "
+                            f"vs seasonal slot."
+                        ),
+                        extra={"high_px": hi, "low_px": lo},
+                    )
+                )
+        return sigs
+
+    def _try_emit_historical(
+        self,
+        *,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+        store: HistoricalBaselineStore,
+        signal_type: str,
+        metric: str,
+        timeframe: str,
+        slot_minute: int,
+        current_value: float,
+        window_seconds: int,
+        summary_en: str,
+        extra: dict[str, Any],
+    ) -> list[TriggerSignal]:
+        if not math.isfinite(current_value) or current_value < 0:
+            return []
+        bl = store.lookup(event.instrument_id, timeframe, metric, slot_minute)
+        if bl is None or int(bl.sample_days) < int(cfg.historical_min_sample_days):
+            return []
+        ref = self._baseline_percentile_value(bl, cfg)
+        thr = float(ref) * max(1.0, float(cfg.historical_exceed_multiplier))
+        if thr <= 0:
+            return []
+        if current_value < thr:
+            return []
+        if not self._is_alert_ready_for(
+            state=state,
+            signal_type=signal_type,
+            now=event.source_time,
+            cooldown_seconds=int(cfg.historical_alert_cooldown_seconds),
+            cfg=cfg,
+        ):
+            return []
+        self._record_alert_sent(state, signal_type, event.source_time)
+        ratio = current_value / thr
+        z_score = max(0.0, (ratio - 1.0) * 4.0)
+        severity = _severity_from_z_score(z_score)
+        pl: dict[str, Any] = {
+            "historical": True,
+            "timeframe": timeframe,
+            "metric": metric,
+            "slot_minute": int(slot_minute),
+            "current_value": float(current_value),
+            "expected_median": float(bl.median),
+            "p90": float(bl.p90),
+            "p95": float(bl.p95),
+            "p99": float(bl.p99),
+            "compare_percentile": cfg.historical_compare_percentile,
+            "compare_threshold": float(thr),
+            "lookback_days": int(cfg.historical_lookback_days),
+            "sample_days": int(bl.sample_days),
+            "event_payload": event.payload,
+            **extra,
+        }
+        if cfg.historical_primary_signals_enabled:
+            pl["signal_family"] = "historical_primary"
+        return [
+            TriggerSignal(
+                signal_id=str(uuid4()),
+                detected_at=utc_now(),
+                instrument_id=event.instrument_id,
+                ticker=event.ticker,
+                class_code=event.class_code,
+                alias=event.alias,
+                source_event_type="trade",
+                signal_type=signal_type,
+                severity=severity,
+                metric_value=float(current_value),
+                baseline_value=float(ref),
+                z_score=float(z_score),
+                window_seconds=window_seconds,
+                summary=summary_en,
+                payload=pl,
+            )
+        ]
+
+    def _process_historical_trade_buckets(
+        self,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+    ) -> list[TriggerSignal]:
+        store = self._historical_store
+        if store is None or not store.enabled:
+            return []
+        px = quotation_to_float(event.payload.get("price"))
+        qty = float(event.payload.get("quantity", 0.0))
+        if px is None or px <= 0 or not math.isfinite(qty) or qty <= 0:
+            return []
+        ts = event.source_time
+        tfs = self._historical_timeframe_set(cfg)
+        divs = {"1m": 1, "5m": 5, "15m": 15}
+        wins = {"1m": 60, "5m": 300, "15m": 900}
+        out: list[TriggerSignal] = []
+        for tf in ("1m", "5m", "15m"):
+            if tf not in tfs:
+                continue
+            div = divs[tf]
+            m0 = self._floor_bucket_utc(ts, div)
+            acc = state.hist_bars[tf]
+            if acc.bucket_start is None:
+                acc.bucket_start = m0
+                self._hist_reset_bar(acc, float(px), float(qty))
+            elif m0 > acc.bucket_start:
+                out.extend(
+                    self._emit_closed_hist_bar(
+                        event=event,
+                        state=state,
+                        cfg=cfg,
+                        store=store,
+                        tf=tf,
+                        window_seconds=wins[tf],
+                        acc=acc,
+                    )
+                )
+                acc.bucket_start = m0
+                self._hist_reset_bar(acc, float(px), float(qty))
+            else:
+                self._hist_touch_bar(acc, float(px), float(qty))
+        return out
 
 
 def _sum_orderbook_depth(levels: list, n: int) -> float:

@@ -78,11 +78,20 @@ def _serialize_instrument_state(st: Any) -> dict[str, Any] | None:
             st.last_orderbook_imbalance_ratio is not None,
             st.last_limit_order_available is not None,
             st.last_market_order_available is not None,
+            st.vpin_current_bucket_buy > 0,
+            st.vpin_current_bucket_sell > 0,
+            st.vpin_bucket_imbalances,
+            st.vpin_history,
+            st.trade_size_history,
+            st.iceberg_watch_bid is not None,
+            st.iceberg_watch_ask is not None,
+            st.last_touch_snapshot is not None,
         ]
     ):
         return None
 
     out: dict[str, Any] = {
+        "state_schema_version": 2,
         "trade_points": [
             {"ts": p.ts.isoformat(), "quantity": p.quantity, "notional": p.notional}
             for p in st.trade_points
@@ -111,9 +120,16 @@ def _serialize_instrument_state(st: Any) -> dict[str, Any] | None:
                 "mid": snap.mid,
                 "best_bid": snap.best_bid,
                 "best_ask": snap.best_ask,
+                "best_bid_qty": snap.best_bid_qty,
+                "best_ask_qty": snap.best_ask_qty,
             }
             for snap in st.orderbook_depth_snapshots
         ],
+        "vpin_current_bucket_buy": st.vpin_current_bucket_buy,
+        "vpin_current_bucket_sell": st.vpin_current_bucket_sell,
+        "vpin_bucket_imbalances": list(st.vpin_bucket_imbalances),
+        "vpin_history": list(st.vpin_history),
+        "trade_size_history": list(st.trade_size_history),
         "microburst_ticks": [
             {"ts": t.isoformat(), "v": float(v)} for t, v in st.microburst_ticks
         ],
@@ -124,6 +140,34 @@ def _serialize_instrument_state(st: Any) -> dict[str, Any] | None:
         "last_limit_order_available": st.last_limit_order_available,
         "last_market_order_available": st.last_market_order_available,
     }
+    if st.iceberg_watch_bid is not None:
+        w = st.iceberg_watch_bid
+        out["iceberg_watch_bid"] = {
+            "touch_price": w.touch_price,
+            "qty_before_hits": w.qty_before_hits,
+            "accumulated_hit_qty": w.accumulated_hit_qty,
+            "first_hit_ts": w.first_hit_ts.isoformat(),
+            "last_hit_ts": w.last_hit_ts.isoformat(),
+        }
+    if st.iceberg_watch_ask is not None:
+        w = st.iceberg_watch_ask
+        out["iceberg_watch_ask"] = {
+            "touch_price": w.touch_price,
+            "qty_before_hits": w.qty_before_hits,
+            "accumulated_hit_qty": w.accumulated_hit_qty,
+            "first_hit_ts": w.first_hit_ts.isoformat(),
+            "last_hit_ts": w.last_hit_ts.isoformat(),
+        }
+    if st.last_touch_snapshot is not None:
+        t = st.last_touch_snapshot
+        out["last_touch_snapshot"] = {
+            "ts": t.ts.isoformat(),
+            "best_bid": t.best_bid,
+            "best_ask": t.best_ask,
+            "best_bid_qty": t.best_bid_qty,
+            "best_ask_qty": t.best_ask_qty,
+            "mid": t.mid,
+        }
     return out
 
 
@@ -135,6 +179,7 @@ def _deserialize_instrument_state(blob: dict[str, Any]) -> InstrumentState:
         SignedTradePoint,
         TradePoint,
     )
+    from .orderflow_signals import IcebergWatch, TouchSnapshot
 
     st = InstrumentState()
     for row in blob.get("trade_points") or []:
@@ -229,6 +274,8 @@ def _deserialize_instrument_state(blob: dict[str, Any]) -> InstrumentState:
                     mid=float(row.get("mid", 0.0)),
                     best_bid=float(row.get("best_bid", 0.0)),
                     best_ask=float(row.get("best_ask", 0.0)),
+                    best_bid_qty=float(row.get("best_bid_qty", 0.0)),
+                    best_ask_qty=float(row.get("best_ask_qty", 0.0)),
                 )
             )
         except (TypeError, ValueError, KeyError):
@@ -267,4 +314,55 @@ def _deserialize_instrument_state(blob: dict[str, Any]) -> InstrumentState:
         st.last_limit_order_available = blob["last_limit_order_available"]
     if isinstance(blob.get("last_market_order_available"), bool):
         st.last_market_order_available = blob["last_market_order_available"]
+    try:
+        st.vpin_current_bucket_buy = float(blob.get("vpin_current_bucket_buy", 0.0))
+        st.vpin_current_bucket_sell = float(blob.get("vpin_current_bucket_sell", 0.0))
+    except (TypeError, ValueError):
+        pass
+    for v in blob.get("vpin_bucket_imbalances") or []:
+        try:
+            st.vpin_bucket_imbalances.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    for v in blob.get("vpin_history") or []:
+        try:
+            st.vpin_history.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    for v in blob.get("trade_size_history") or []:
+        try:
+            st.trade_size_history.append(float(v))
+        except (TypeError, ValueError):
+            continue
+
+    def _load_iceberg_watch(key: str) -> IcebergWatch | None:
+        row = blob.get(key)
+        if not isinstance(row, dict):
+            return None
+        try:
+            return IcebergWatch(
+                touch_price=float(row["touch_price"]),
+                qty_before_hits=float(row["qty_before_hits"]),
+                accumulated_hit_qty=float(row["accumulated_hit_qty"]),
+                first_hit_ts=parse_timestamp(str(row["first_hit_ts"])),
+                last_hit_ts=parse_timestamp(str(row["last_hit_ts"])),
+            )
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    st.iceberg_watch_bid = _load_iceberg_watch("iceberg_watch_bid")
+    st.iceberg_watch_ask = _load_iceberg_watch("iceberg_watch_ask")
+    touch = blob.get("last_touch_snapshot")
+    if isinstance(touch, dict):
+        try:
+            st.last_touch_snapshot = TouchSnapshot(
+                ts=parse_timestamp(str(touch["ts"])),
+                best_bid=float(touch["best_bid"]),
+                best_ask=float(touch["best_ask"]),
+                best_bid_qty=float(touch.get("best_bid_qty", 0.0)),
+                best_ask_qty=float(touch.get("best_ask_qty", 0.0)),
+                mid=float(touch["mid"]),
+            )
+        except (TypeError, ValueError, KeyError):
+            pass
     return st

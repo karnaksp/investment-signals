@@ -34,8 +34,10 @@ detector:
   # Окно для спреда и имбаланса стакана (сек).
   orderbook_window_seconds: 180
 
-  # Пауза между любыми двумя алертами одного типа (сек), кроме combo сигналов.
-  alert_cooldown_seconds: 300
+  # Пауза между двумя алертами одного типа по инструменту (сек).
+  alert_cooldown_seconds: 900
+  # После любого алерта по инструменту — тишина по всем типам (сек). Главный анти-спам.
+  alert_global_cooldown_seconds: 3600
 
   # Дополнительно к z-score: относительное отклонение метрики от baseline (доля).
   # При почти нулевом std z-score раздувается — этот порог отсекает «микроскопические» выбросы.
@@ -54,13 +56,30 @@ detector:
   # Прикладывать к payload сигнала последние unary-снимки (Kafka: market_values / tech_analysis).
   attach_unary_context_to_signals: true
 
+  # --- Исторические аномалии (baseline по минуте дня UTC в ClickHouse, см. sql/clickhouse/init/004*) ---
+  # Долгая история: trade_slot_daily (TTL ~200 д) наполняется Dagster job из сырья за последние N дней
+  # и при первом запуске — из features_trade_bar_*; см. .env HISTORICAL_BASELINE_*.
+  # Пока job не отработал и детектор не подхватил кэш — оставьте false.
+  historical_baseline_enabled: false
+  historical_lookback_days: 35
+  historical_min_sample_days: 10
+  historical_compare_percentile: p95
+  historical_exceed_multiplier: 1.0
+  historical_primary_signals_enabled: true
+  historical_alert_cooldown_seconds: 900
+  historical_timeframes_csv: "1m,5m,15m"
+
+  # Микроструктура: «вторичный» режим — умножает z-score пороги _maybe_emit_from_history и combo_min_score.
+  microstructure_secondary_mode: false
+  microstructure_secondary_threshold_multiplier: 1.5
+
   # --- Пороги z-score по типам сигналов ---
   # Чем выше — тем реже срабатывание (нужен более «редкий» выброс относительно базы).
-  volume_zscore_threshold: 4.5
-  trade_count_zscore_threshold: 4.5
-  price_return_zscore_threshold: 4.0
-  spread_zscore_threshold: 3.5
-  imbalance_zscore_threshold: 3.5
+  volume_zscore_threshold: 10
+  trade_count_zscore_threshold: 10
+  price_return_zscore_threshold: 8.0
+  spread_zscore_threshold: 7.5
+  imbalance_zscore_threshold: 7.5
 
   # Дополнительный порог по модулю имбаланса (0..1): ниже этого абсолютного
   # отклонения от 50/50 не считаем «аномальным» даже при высоком z-score.
@@ -74,7 +93,7 @@ detector:
   # --- Комбинированный сигнал «микроструктура» (long / short) ---
   # Включает совместную оценку: расширение спреда, имбаланс стакана,
   # всплеск частоты сделок, накопленная дельта по направлению сделок.
-  combo_enabled: true
+  combo_enabled: false
 
   # За сколько секунд «назад» считать компоненты combo актуальными (свежесть).
   combo_freshness_seconds: 45
@@ -121,6 +140,39 @@ detector:
   # lead_lag_window_seconds: 30
   # lead_lag_leader_move_bps: 8.0
   # lead_lag_follower_max_bps: 2.0
+
+  # --- Order flow (VPIN, whale, absorption, iceberg) — шумные эвристики выключены ---
+  vpin_enabled: false
+  vpin_bucket_volume_lots: 5000
+  vpin_lookback_buckets: 50
+  vpin_zscore_threshold: 4.0
+  vpin_min_buckets_before_emit: 20
+
+  whale_print_enabled: true
+  whale_print_zscore_threshold: 10.0
+  whale_min_absolute_qty: 600
+
+  absorption_enabled: false
+  absorption_window_ms: 800
+  absorption_min_aggressive_qty: 120
+  absorption_max_mid_move_bps: 2.0
+  absorption_aggression_ratio: 4.0
+
+  iceberg_enabled: false
+  iceberg_hit_window_ms: 2000
+  iceberg_min_hit_qty: 80
+  iceberg_min_refill_qty: 50
+  iceberg_min_refill_ratio: 0.5
+  iceberg_max_gap_seconds: 3.0
+  iceberg_price_tolerance_bps: 1.0
+
+  # Режим «узкий спред + перевес» — частый фоновый шум; выключен.
+  spread_imbalance_regime_enabled: false
+  regime_max_spread_bps: 8.0
+  regime_min_imbalance_abs: 0.78
+  regime_long_threshold: 0.80
+  regime_short_threshold: 0.20
+  regime_alert_cooldown_seconds: 900
 
 # lead_lag:
 #   pairs:

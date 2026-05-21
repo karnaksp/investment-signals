@@ -20,6 +20,7 @@ import uvicorn
 from ..admin_http_guard import AdminApiRateLimiter, admin_client_ip
 from ..clickhouse_context import fetch_raw_events_window
 from ..config import RuntimeSettings
+from ..historical_baselines import fetch_slot_baselines_for_admin
 from ..market_unary import (
     RequestError as TinvestRequestError,
     fetch_market_values,
@@ -378,6 +379,51 @@ def create_app() -> FastAPI:
         ] = 0,
     ) -> dict[str, Any]:
         return fastapi_app.state.signal_store.fetch_admin_overview(minutes=minutes)
+
+    @fastapi_app.get(
+        "/admin/api/historical-baseline",
+        tags=["admin"],
+        summary="Сезонный baseline по слоту дня (ClickHouse)",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_historical_baseline(
+        request: Request,
+        instrument_id: Annotated[
+            str,
+            Query(
+                min_length=2,
+                description="instrument_id как в потоке (например SBER_TQBR).",
+            ),
+        ],
+        timeframe: Annotated[
+            str,
+            Query(description="1m | 5m | 15m"),
+        ] = "5m",
+        slot_minute: Annotated[
+            int,
+            Query(
+                ge=0,
+                le=1439,
+                description="Минута дня UTC 0..1439 (как в детекторе).",
+            ),
+        ] = 0,
+    ) -> dict[str, Any]:
+        """Последний батч ``historical_baseline_slot_stats`` для слота."""
+        s = request.app.state.settings
+        url = (s.clickhouse_http_url or "").strip()
+        if not url:
+            raise HTTPException(
+                status_code=503,
+                detail="clickhouse_not_configured",
+            )
+        return fetch_slot_baselines_for_admin(
+            base_url=url,
+            username=s.clickhouse_http_username,
+            password=s.clickhouse_http_password,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            slot_minute=slot_minute,
+        )
 
     @fastapi_app.get(
         "/admin/api/signals",

@@ -111,9 +111,11 @@ services:
           --set retention.bytes=${KAFKA_SIGNAL_RETENTION_BYTES:-268435456} \
           --set segment.bytes=16777216 \
           --no-confirm
-        # Дублируем «лёгкие» для RAM настройки без рестарта (на случай уже существующего кластера в volume).
-        rpk -X brokers=redpanda:9092 cluster config set release_cache_on_segment_roll true
-        rpk -X brokers=redpanda:9092 cluster config set readers_cache_target_max_size ${REDPANDA_READERS_CACHE_TARGET_MAX_SIZE:-32}
+        # Опционально: дублируем RAM-настройки (уже в command redpanda). Admin API — на хосте redpanda:9644, не localhost.
+        rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set release_cache_on_segment_roll true \
+          || true
+        rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set readers_cache_target_max_size ${REDPANDA_READERS_CACHE_TARGET_MAX_SIZE:-32} \
+          || true
 
   # Веб-консоль для просмотра топиков и сообщений (опционально).
   redpanda-console:

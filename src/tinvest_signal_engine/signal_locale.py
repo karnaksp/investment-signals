@@ -32,12 +32,32 @@ _SIGNAL_TYPE_RU: dict[str, str] = {
     "price_near_limit_band": "Близко к лимиту цены дня",
     "open_interest_spike": "Всплеск открытого интереса",
     "candle_range_spike": "Широкий диапазон свечи",
+    "vpin_spike": "Всплеск VPIN",
+    "large_trade_print": "Крупный принт (whale)",
+    "trade_absorption_bid": "Поглощение на биде",
+    "trade_absorption_ask": "Поглощение на аске",
+    "iceberg_refill_bid": "Айсберг: пополнение бида",
+    "iceberg_refill_ask": "Айсберг: пополнение аска",
+    "spread_imbalance_regime_long": "Режим: узкий спред + перевес bid",
+    "spread_imbalance_regime_short": "Режим: узкий спред + перевес ask",
 }
 
 
 def signal_type_ru(signal_type: str) -> str:
     if signal_type in _SIGNAL_TYPE_RU:
         return _SIGNAL_TYPE_RU[signal_type]
+    if signal_type.startswith("historical_volume_anomaly_"):
+        tf = signal_type.rsplit("_", 1)[-1]
+        return f"Историческая аномалия объёма ({tf})"
+    if signal_type.startswith("historical_trade_rate_anomaly_"):
+        tf = signal_type.rsplit("_", 1)[-1]
+        return f"Историческая аномалия частоты сделок ({tf})"
+    if signal_type.startswith("historical_return_anomaly_"):
+        tf = signal_type.rsplit("_", 1)[-1]
+        return f"Историческая аномалия доходности ({tf})"
+    if signal_type.startswith("historical_range_anomaly_"):
+        tf = signal_type.rsplit("_", 1)[-1]
+        return f"Историческая аномалия диапазона ({tf})"
     human = signal_type.replace("_", " ").strip()
     return human or signal_type
 
@@ -103,10 +123,8 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
             f"Индикатор OBI (дисбаланс верхних уровней) резко изменился за ~{win} с "
             f"(|z|≈{z:.1f}): быстрый сдвиг давления в стакане."
         )
-    if st == "orderbook_spoofing_bid_pull":
-        side = "бида"
-    elif st == "orderbook_spoofing_ask_pull":
-        side = "аска"
+    if st in {"orderbook_spoofing_bid_pull", "orderbook_spoofing_ask_pull"}:
+        side = "бида" if st.endswith("bid_pull") else "аска"
         return (
             f"Крупная «стена» на стороне {side} заметно истончилась за короткое время "
             "при относительно малом движении mid — типичный признак спуфинга/снятия ликвидности "
@@ -146,6 +164,23 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
             "в том же окне — возможное запаздывание или расхождение корреляции."
             + suf
         )
+    if p.get("historical") is True:
+        tf = str(p.get("timeframe", "?"))
+        met = str(p.get("metric", ""))
+        slot = p.get("slot_minute")
+        cur = p.get("current_value")
+        med = p.get("expected_median")
+        thr = p.get("compare_threshold")
+        sd = p.get("sample_days")
+        lb = p.get("lookback_days")
+        pct = str(p.get("compare_percentile", "p95"))
+        slot_h = int(slot) // 60 if slot is not None else 0
+        slot_m = int(slot) % 60 if slot is not None else 0
+        return (
+            f"Для слота UTC {slot_h:02d}:{slot_m:02d} ({tf}) метрика «{met}» сейчас {cur}, "
+            f"обычно median≈{med}, порог {pct}≈{thr} "
+            f"(≈{sd} торговых дней в выборке, lookback≈{lb} дн.)."
+        )
     # Универсальный fallback
     return (
         f"Сработал детектор «{signal_type_ru(st)}»: метрика заметно отклонилась от базы "
@@ -172,6 +207,31 @@ def build_summary_ru(signal: TriggerSignal, quality: dict) -> str:
     return "\n".join(lines)
 
 
+def build_delivery_details_ru(
+    signal: TriggerSignal, quality: dict[str, object] | None = None
+) -> str:
+    """Короткий хвост для Telegram/plain fallback без дублирования шапки."""
+    lines = [
+        (
+            f"Серьёзность: {_severity_ru(int(signal.severity))} "
+            f"(уровень {signal.severity}). |z|={abs(signal.z_score):.2f}, "
+            f"метрика={signal.metric_value:.4g}, "
+            f"база={signal.baseline_value:.4g}, "
+            f"окно {signal.window_seconds} с."
+        )
+    ]
+    if quality:
+        score = quality.get("quality_score")
+        tier = quality.get("quality_tier_ru")
+        hint = quality.get("quality_hint_ru")
+        if score is not None and tier is not None:
+            tail = f" ({tier})."
+            if hint:
+                tail = f"{tail} {hint}"
+            lines.append(f"Оценка полезности: {score}/100{tail}")
+    return "\n".join(lines)
+
+
 def _telegram_br_lines(text: str) -> str:
     """Telegram HTML: перенос строки — символ ``\\n``; теги ``<br>`` / ``<br/>`` в HTML mode не поддерживаются."""
     return text
@@ -188,8 +248,8 @@ def build_telegram_html(
     t_esc = html.escape(signal.ticker)
     type_ru = html.escape(signal_type_ru(signal.signal_type))
     type_raw = html.escape(signal.signal_type)
-    summ_plain = build_summary_ru(signal, quality)
-    summ = _telegram_br_lines(html.escape(summ_plain))
+    detail_plain = build_delivery_details_ru(signal, quality)
+    detail = _telegram_br_lines(html.escape(detail_plain))
     term_href = html.escape(ticker_terminal_url, quote=True)
     inv_href = html.escape(instrument_page_url, quote=True)
     wterm = html.escape(t_invest_web_terminal_url())
@@ -207,7 +267,7 @@ def build_telegram_html(
         f"Оценка: <b>{score}</b>/100 ({tier})\n"
         f"Терминал: <a href=\"{wterm}\">tbank.ru/terminal</a> · "
         f"<a href=\"{inv_href}\">карточка инструмента</a>\n\n"
-        f"{summ}"
+        f"{detail}"
     )
 
 
@@ -230,4 +290,4 @@ def format_plain_alert_ru(
     )
     if score != "":
         head += f"Оценка: {score}/100 ({tier})\n"
-    return head + "\n" + signal.summary
+    return head + "\n" + build_delivery_details_ru(signal, q)

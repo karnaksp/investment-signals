@@ -108,7 +108,8 @@ flowchart LR
 |--------------|-----------------|------------------|
 | `trade` | объём, число сделок, окно цен | `volume_spike`, `trade_rate_spike`, `price_jump`, combo |
 | `last_price` | движение цены в окне | `price_jump` |
-| `orderbook` | спред bps, дисбаланс верхних уровней, снапшоты L3 | `spread_widening`, `orderbook_imbalance`, `orderbook_spoofing_*`, combo |
+| `orderbook` | спред bps, дисбаланс верхних уровней, снапшоты L3 | `spread_widening`, `orderbook_imbalance`, `orderbook_spoofing_*`, `iceberg_refill_*`, `spread_imbalance_regime_*`, combo |
+| `trade` (order flow) | VPIN buckets, whale size, absorption, iceberg hits | `vpin_spike`, `large_trade_print`, `trade_absorption_*` |
 | `trading_status` | смена статуса | `trading_status_changed` |
 | `open_interest` | открытый интерес (фьючерсы) | `open_interest_spike` (если порог > 0) |
 | `candle` | закрытая свеча | `candle_range_spike` (если порог > 0) |
@@ -170,7 +171,7 @@ flowchart LR
 
 ### Feature store (инкрементальные витрины)
 
-По `market_raw_events` для сделок (`event_type = 'trade'`) строятся **materialized views** в `SummingMergeTree` (агрегация на insert, без полного скана истории при каждом запросе — см. `query-mv-incremental` в ClickHouse best practices):
+По `market_raw_events` для сделок (`event_type = 'trade'`) строятся **materialized views** в `SummingMergeTree` (агрегация на insert, без полного скана истории при каждом запросе — см. `query-mv-incremental` в ClickHouse best practices). Сырые события в `market_raw_events` держатся с **коротким TTL** (буфер для OLAP); долгая сезонная история для детектора накапливается в **`trade_slot_daily`** (сид из `features_trade_bar_*` при первом запуске job, ежедневное обновление последних дней из raw) и в **`historical_baseline_slot_stats`**.
 
 | Таблица | Окно | Поля | Представление |
 |---------|------|------|----------------|

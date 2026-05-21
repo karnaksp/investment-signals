@@ -37,6 +37,22 @@ def _env_optional_int(name: str) -> int | None:
     return int(value) if value else None
 
 
+def _env_optional_float(name: str) -> float | None:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return None
+    value = raw_value.strip()
+    return float(value) if value else None
+
+
+def _env_csv_frozenset(name: str) -> frozenset[str] | None:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return None
+    parts = tuple(p.strip() for p in raw_value.split(",") if p.strip())
+    return frozenset(parts) if parts else None
+
+
 def _parse_admin_ip_allowlist(raw: str) -> frozenset[str] | None:
     parts = tuple(p.strip() for p in (raw or "").split(",") if p.strip())
     return frozenset(parts) if parts else None
@@ -85,6 +101,8 @@ class DetectorSettings:
     price_window_seconds: int = 90
     orderbook_window_seconds: int = 120
     alert_cooldown_seconds: int = 120
+    # Пауза после любого алерта по инструменту (все типы). 0 = выключено.
+    alert_global_cooldown_seconds: int = 0
     volume_zscore_threshold: float = 4.0
     trade_count_zscore_threshold: float = 4.0
     price_return_zscore_threshold: float = 3.5
@@ -137,6 +155,44 @@ class DetectorSettings:
     track_market_access_flags: bool = True
     # Добавлять в payload сигнала последний unary-снимок (market_values / tech_analysis), если есть.
     attach_unary_context_to_signals: bool = True
+    # --- Исторические аномалии (baseline по slot-of-day в ClickHouse) ---
+    historical_baseline_enabled: bool = False
+    historical_lookback_days: int = 35
+    historical_min_sample_days: int = 10
+    historical_compare_percentile: str = "p95"
+    historical_exceed_multiplier: float = 1.0
+    historical_primary_signals_enabled: bool = True
+    historical_alert_cooldown_seconds: int = 900
+    historical_timeframes_csv: str = "1m,5m,15m"
+    # Микроструктура: при secondary режиме пороги z-score умножаются на множитель (реже срабатывания).
+    microstructure_secondary_mode: bool = False
+    microstructure_secondary_threshold_multiplier: float = 1.5
+    vpin_enabled: bool = True
+    vpin_bucket_volume_lots: float = 5000.0
+    vpin_lookback_buckets: int = 50
+    vpin_zscore_threshold: float = 4.0
+    vpin_min_buckets_before_emit: int = 20
+    whale_print_enabled: bool = True
+    whale_print_zscore_threshold: float = 5.0
+    whale_min_absolute_qty: float = 100.0
+    absorption_enabled: bool = True
+    absorption_window_ms: int = 800
+    absorption_min_aggressive_qty: float = 50.0
+    absorption_max_mid_move_bps: float = 2.0
+    absorption_aggression_ratio: float = 3.0
+    iceberg_enabled: bool = True
+    iceberg_hit_window_ms: int = 2000
+    iceberg_min_hit_qty: float = 30.0
+    iceberg_min_refill_qty: float = 20.0
+    iceberg_min_refill_ratio: float = 0.5
+    iceberg_max_gap_seconds: float = 3.0
+    iceberg_price_tolerance_bps: float = 1.0
+    spread_imbalance_regime_enabled: bool = True
+    regime_max_spread_bps: float = 8.0
+    regime_min_imbalance_abs: float = 0.70
+    regime_long_threshold: float = 0.80
+    regime_short_threshold: float = 0.20
+    regime_alert_cooldown_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -194,8 +250,24 @@ class RuntimeSettings:
     clickhouse_http_url: str | None
     clickhouse_http_username: str | None
     clickhouse_http_password: str | None
+    historical_baseline_lookback_days: int
+    historical_baseline_refresh_seconds: int
+    historical_baseline_incremental_days: int
+    historical_baseline_seed_if_empty: bool
     # Не публиковать сигналы с quality_score ниже порога (после enrich). None = выключено.
     signal_min_quality_score: int | None
+    # Минимум |z| для доставки (кроме типов с z=0 по смыслу). None = выключено.
+    signal_delivery_min_abs_z: float | None
+    # Если задано — доставлять только перечисленные signal_type (через запятую в env).
+    signal_delivery_allowlist: frozenset[str] | None
+    # large_trade_print: минимум лотов в сделке для Telegram/Kafka.
+    signal_delivery_min_whale_lots: float | None
+    # large_trade_print: минимум |z| (отдельно от общего min_abs_z).
+    signal_delivery_min_whale_z: float | None
+    # large_trade_print: metric / baseline не ниже (отсекает «z на пустой базе»).
+    signal_delivery_min_whale_baseline_ratio: float | None
+    # Макс. доставок в час суммарно по всем инструментам. None/0 = без лимита.
+    signal_delivery_max_per_hour: int | None
     # Периодический unary-эмиттер → Kafka raw (см. tinvest-market-unary-emitter). 0 = выключено.
     market_unary_poll_seconds: int
     # Один цикл опроса и выход (Dagster / ручной прогон); иначе бесконечный цикл как сервис.
@@ -344,8 +416,38 @@ class RuntimeSettings:
             clickhouse_http_password=(
                 (os.getenv("CLICKHOUSE_PASSWORD") or "").strip() or None
             ),
+            historical_baseline_lookback_days=int(
+                os.getenv("HISTORICAL_BASELINE_LOOKBACK_DAYS", "35")
+            ),
+            historical_baseline_refresh_seconds=int(
+                os.getenv("HISTORICAL_BASELINE_REFRESH_SECONDS", "300")
+            ),
+            historical_baseline_incremental_days=int(
+                os.getenv("HISTORICAL_BASELINE_INCREMENTAL_DAYS", "2")
+            ),
+            historical_baseline_seed_if_empty=_env_bool(
+                "HISTORICAL_BASELINE_SEED_IF_EMPTY", default=True
+            ),
             signal_min_quality_score=_env_optional_int(
                 "SIGNAL_MIN_QUALITY_SCORE"
+            ),
+            signal_delivery_min_abs_z=_env_optional_float(
+                "SIGNAL_DELIVERY_MIN_ABS_Z"
+            ),
+            signal_delivery_allowlist=_env_csv_frozenset(
+                "SIGNAL_DELIVERY_ALLOWLIST"
+            ),
+            signal_delivery_min_whale_lots=_env_optional_float(
+                "SIGNAL_DELIVERY_MIN_WHALE_LOTS"
+            ),
+            signal_delivery_min_whale_z=_env_optional_float(
+                "SIGNAL_DELIVERY_MIN_WHALE_Z"
+            ),
+            signal_delivery_min_whale_baseline_ratio=_env_optional_float(
+                "SIGNAL_DELIVERY_MIN_WHALE_BASELINE_RATIO"
+            ),
+            signal_delivery_max_per_hour=_env_optional_int(
+                "SIGNAL_DELIVERY_MAX_PER_HOUR"
             ),
             market_unary_poll_seconds=int(
                 os.getenv("MARKET_UNARY_POLL_SECONDS", "0")
@@ -412,6 +514,9 @@ def _detector_settings_from_mapping(
         ),
         alert_cooldown_seconds=int(
             detector.get("alert_cooldown_seconds", 120)
+        ),
+        alert_global_cooldown_seconds=int(
+            detector.get("alert_global_cooldown_seconds", 0)
         ),
         volume_zscore_threshold=float(
             detector.get("volume_zscore_threshold", 4.0)
@@ -520,6 +625,92 @@ def _detector_settings_from_mapping(
         ),
         attach_unary_context_to_signals=bool(
             detector.get("attach_unary_context_to_signals", True)
+        ),
+        historical_baseline_enabled=bool(
+            detector.get("historical_baseline_enabled", False)
+        ),
+        historical_lookback_days=int(
+            detector.get("historical_lookback_days", 35)
+        ),
+        historical_min_sample_days=int(
+            detector.get("historical_min_sample_days", 10)
+        ),
+        historical_compare_percentile=(
+            str(detector.get("historical_compare_percentile", "p95")).strip()
+            or "p95"
+        ),
+        historical_exceed_multiplier=float(
+            detector.get("historical_exceed_multiplier", 1.0)
+        ),
+        historical_primary_signals_enabled=bool(
+            detector.get("historical_primary_signals_enabled", True)
+        ),
+        historical_alert_cooldown_seconds=int(
+            detector.get("historical_alert_cooldown_seconds", 900)
+        ),
+        historical_timeframes_csv=(
+            str(detector.get("historical_timeframes_csv", "1m,5m,15m")).strip()
+            or "1m,5m,15m"
+        ),
+        microstructure_secondary_mode=bool(
+            detector.get("microstructure_secondary_mode", False)
+        ),
+        microstructure_secondary_threshold_multiplier=float(
+            detector.get("microstructure_secondary_threshold_multiplier", 1.5)
+        ),
+        vpin_enabled=bool(detector.get("vpin_enabled", True)),
+        vpin_bucket_volume_lots=float(
+            detector.get("vpin_bucket_volume_lots", 5000.0)
+        ),
+        vpin_lookback_buckets=int(detector.get("vpin_lookback_buckets", 50)),
+        vpin_zscore_threshold=float(detector.get("vpin_zscore_threshold", 4.0)),
+        vpin_min_buckets_before_emit=int(
+            detector.get("vpin_min_buckets_before_emit", 20)
+        ),
+        whale_print_enabled=bool(detector.get("whale_print_enabled", True)),
+        whale_print_zscore_threshold=float(
+            detector.get("whale_print_zscore_threshold", 5.0)
+        ),
+        whale_min_absolute_qty=float(
+            detector.get("whale_min_absolute_qty", 100.0)
+        ),
+        absorption_enabled=bool(detector.get("absorption_enabled", True)),
+        absorption_window_ms=int(detector.get("absorption_window_ms", 800)),
+        absorption_min_aggressive_qty=float(
+            detector.get("absorption_min_aggressive_qty", 50.0)
+        ),
+        absorption_max_mid_move_bps=float(
+            detector.get("absorption_max_mid_move_bps", 2.0)
+        ),
+        absorption_aggression_ratio=float(
+            detector.get("absorption_aggression_ratio", 3.0)
+        ),
+        iceberg_enabled=bool(detector.get("iceberg_enabled", True)),
+        iceberg_hit_window_ms=int(detector.get("iceberg_hit_window_ms", 2000)),
+        iceberg_min_hit_qty=float(detector.get("iceberg_min_hit_qty", 30.0)),
+        iceberg_min_refill_qty=float(detector.get("iceberg_min_refill_qty", 20.0)),
+        iceberg_min_refill_ratio=float(
+            detector.get("iceberg_min_refill_ratio", 0.5)
+        ),
+        iceberg_max_gap_seconds=float(
+            detector.get("iceberg_max_gap_seconds", 3.0)
+        ),
+        iceberg_price_tolerance_bps=float(
+            detector.get("iceberg_price_tolerance_bps", 1.0)
+        ),
+        spread_imbalance_regime_enabled=bool(
+            detector.get("spread_imbalance_regime_enabled", True)
+        ),
+        regime_max_spread_bps=float(detector.get("regime_max_spread_bps", 8.0)),
+        regime_min_imbalance_abs=float(
+            detector.get("regime_min_imbalance_abs", 0.70)
+        ),
+        regime_long_threshold=float(detector.get("regime_long_threshold", 0.80)),
+        regime_short_threshold=float(
+            detector.get("regime_short_threshold", 0.20)
+        ),
+        regime_alert_cooldown_seconds=int(
+            detector.get("regime_alert_cooldown_seconds", 300)
         ),
     )
 

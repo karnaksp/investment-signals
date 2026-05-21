@@ -31,8 +31,15 @@
 | **Нужен оффлайн «accuracy» без Grafana-базы** | Добавлен `scripts/duckdb_label_signals.py`: join сигналов с экспортом `vw_trade_bar_1m_vwap`, hit/miss для directional типов, JSON summary. Тест `tests/test_duckdb_label_signals.py` (skip без `duckdb`). |
 | **Исследование сигналов** | В лог добавлены ссылки на OFI/Hawkes/LOB (см. ниже в литературе цикла 2 + [Deep LOB guide](https://arxiv.org/pdf/2403.09267), [conditional order imbalance](https://www.tandfonline.com/doi/full/10.1080/14697688.2024.2358963)). |
 
+## 2026-05-15 — order-flow сигналы (VPIN, absorption, whale, iceberg, regime)
+
+| Реализовано | Модуль |
+|-------------|--------|
+| `vpin_spike`, `large_trade_print`, `trade_absorption_*`, `iceberg_refill_*`, `spread_imbalance_regime_*` | `orderflow_signals.py` + hooks в `detector_core.py` |
+| Пороги в `conf/detectors.yaml` (включены по умолчанию, консервативные) | `DetectorSettings` |
+
 ## Идеи на следующие циклы
 
 - **Consumer lag в Prometheus**: либо `kafka.Consumer` метрики через JMX/Exporter, либо лёгкий sidecar с `rpk group describe`.
 - **RocksDB state store**: один файл на инструмент + периодический flush + версия схемы в ключе.
-- **VPIN / OBI**: расширить `orderbook` payload (глубина >3) и вынести фичи в отдельный модуль фиче-инжиниринга перед z-score.
+- **VPIN в ClickHouse / combo**: вынести bucket-VPIN в feature-store; опционально баллы в `microstructure_combo_*`.

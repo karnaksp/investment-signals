@@ -30,6 +30,23 @@ python scripts/push_synthetic_trading_status.py
 
 Проверьте порт **`HOST_DAGSTER_PORT`** (по умолчанию **30300**) и что подняты **`dagster-webserver`** и **`dagster-daemon`**. Подробности — [orchestration.md](orchestration.md).
 
+## `redpanda-init` exit 1 → detector не стартует
+
+Compose ждёт успешного завершения **`redpanda-init`**. В логах частая причина:
+
+```text
+unable to query config schema: Get "http://127.0.0.1:9644/...": connection refused
+```
+
+Init-контейнер вызывал `rpk cluster config set` без **`admin.hosts=redpanda:9644`** (Admin API на сервисе `redpanda`, не на localhost). В актуальном `docker-compose.yml` это исправлено; опциональные `cluster config` помечены `|| true`.
+
+```bash
+docker compose logs redpanda-init --tail 30
+docker compose run --rm redpanda-init
+docker compose up -d detector
+docker compose ps detector
+```
+
 ## Redis: `ModuleNotFoundError: redis` в детекторе
 
 Пакет **`redis`** входит в зависимости основного `pyproject.toml`; пересоберите образ: `docker compose build detector && docker compose up -d detector`.

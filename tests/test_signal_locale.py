@@ -9,6 +9,7 @@ from tinvest_signal_engine.models import TriggerSignal
 from tinvest_signal_engine.signal_enrichment import enrich_signal_for_delivery
 from tinvest_signal_engine.signal_locale import (
     build_plain_explanation_ru,
+    build_delivery_details_ru,
     signal_type_ru,
 )
 from tinvest_signal_engine.terminal_links import (
@@ -76,6 +77,9 @@ def test_enrich_preserves_summary_en_on_repeat() -> None:
     assert s1.payload.get("summary_en") == s0.summary
     assert "tbank.ru/terminal" in s1.payload.get("telegram_html", "")
     assert "<a href=" in s1.payload.get("telegram_html", "")
+    assert "Всплеск объёма —" not in s1.payload.get("telegram_html", "")
+    assert "Суммарный объём сделок" not in s1.payload.get("telegram_html", "")
+    assert "Серьёзность:" in s1.payload.get("telegram_html", "")
     s2 = enrich_signal_for_delivery(s1)
     assert s2.payload.get("summary_en") == s0.summary
 
@@ -118,6 +122,22 @@ def test_spoofing_explanation_ask_not_bid() -> None:
     text = build_plain_explanation_ru(s)
     assert "аска" in text
     assert "бида" not in text
+
+
+def test_delivery_details_keep_metrics_without_full_explanation() -> None:
+    s = _signal()
+    details = build_delivery_details_ru(
+        s,
+        {
+            "quality_score": 64,
+            "quality_tier_ru": "средняя",
+            "quality_hint_ru": "Умеренная аномалия.",
+        },
+    )
+    assert "Серьёзность:" in details
+    assert "Оценка полезности:" in details
+    assert "Суммарный объём сделок" not in details
+    assert "Всплеск объёма —" not in details
 
 
 def test_instrument_url_tqbr() -> None:

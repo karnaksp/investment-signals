@@ -16,7 +16,19 @@
 
 Отдельно: сигнал **комбо** использует свои интервалы свежести и cooldown (`combo_*`), см. ниже.
 
-Опционально в рантайме детектора: переменная окружения **`SIGNAL_MIN_QUALITY_SCORE`** — не публиковать сигнал в Postgres/Kafka и не отправлять webhook/Telegram, если после обогащения **`quality_score`** ниже порога (эвристика в `signal_quality.py`).
+Фильтры **доставки** (detector → Postgres/Kafka/Telegram), переменные в `.env`:
+
+| Переменная | Смысл |
+|------------|--------|
+| **`SIGNAL_MIN_QUALITY_SCORE`** | Не публиковать, если `quality_score` (после enrich) ниже порога (`signal_quality.py`). |
+| **`SIGNAL_DELIVERY_MIN_ABS_Z`** | Для z-score сигналов: не публиковать при \|z\| ниже порога (киты и эвристики с z=0 — исключения). |
+| **`SIGNAL_DELIVERY_ALLOWLIST`** | Список `signal_type` через запятую; пусто — все типы, прошедшие остальные фильтры. |
+| **`SIGNAL_DELIVERY_MIN_WHALE_LOTS`** | Для `large_trade_print`: минимум лотов в сделке (отсекает «китов» ~150 лот при z≈13). |
+| **`SIGNAL_DELIVERY_MIN_WHALE_Z`** | Для `large_trade_print`: минимум \|z\| на доставку. |
+| **`SIGNAL_DELIVERY_MIN_WHALE_BASELINE_RATIO`** | Для `large_trade_print`: metric/baseline ≥ порога. |
+| **`SIGNAL_DELIVERY_MAX_PER_HOUR`** | Не больше N доставок в час **суммарно** по всем тикерам. |
+
+В **`conf/detectors.yaml`**: **`alert_global_cooldown_seconds`** — после любого алерта по инструменту пауза по **всем** типам (главный лимит при многих тикерах).
 
 ## Источники данных (типы событий потока)
 
@@ -188,6 +200,64 @@
 ### 5i. `market_access_changed`
 
 Смена флагов `limit_order_available_flag` / `market_order_available_flag` в событии `trading_status` (если `track_market_access_flags: true`).
+
+---
+
+### 5j. `vpin_spike` — всплеск VPIN (volume buckets)
+
+**Источник:** лента сделок с направлением агрессора.
+
+**Метрика:** классический bucket-VPIN: сделки накапливаются в корзины объёма `vpin_bucket_volume_lots`; при закрытии корзины \(I_k = |V^{buy}_k - V^{sell}_k| / V_k\). Текущий VPIN — среднее последних `vpin_lookback_buckets` значений \(I_k\).
+
+**Порог:** z-score по истории VPIN ≥ `vpin_zscore_threshold`; не раньше `vpin_min_buckets_before_emit` закрытых корзин.
+
+**Включение:** `vpin_enabled: true` (дефолт в YAML).
+
+---
+
+### 5k. `large_trade_print` — крупный принт (whale tick)
+
+**Источник:** одна сделка в ленте.
+
+**Метрика:** `quantity` сделки vs история размеров отдельных сделок (`trade_size_history`).
+
+**Порог:** z-score ≥ `whale_print_zscore_threshold` и `quantity` ≥ `whale_min_absolute_qty`.
+
+**Включение:** `whale_print_enabled: true`.
+
+---
+
+### 5l. `trade_absorption_bid` / `trade_absorption_ask` — поглощение
+
+**Источник:** лента + mid-track за окно `absorption_window_ms`.
+
+**Bid absorption:** суммарная sell-агрессия ≥ `absorption_min_aggressive_qty`, mid почти не движется (`mid_move_bps` ≤ `absorption_max_mid_move_bps`), доминирование sell vs buy по `absorption_aggression_ratio`.
+
+**Ask absorption:** зеркально для buy-агрессии.
+
+**Включение:** `absorption_enabled: true`.
+
+---
+
+### 5m. `iceberg_refill_bid` / `iceberg_refill_ask` — эвристика айсберга
+
+**Источник:** сделки у touch + следующий снимок стакана.
+
+**Паттерн:** агрессивные удары по лучшей цене (`iceberg_min_hit_qty`), затем на снапшоте объём touch **восстанавливается** (refill ≥ `iceberg_min_refill_qty` и доля от hits).
+
+**Включение:** `iceberg_enabled: true`. Без L3 — только эвристика.
+
+---
+
+### 5n. `spread_imbalance_regime_long` / `spread_imbalance_regime_short`
+
+**Источник:** снимок стакана (на шаге `sample_every_seconds`).
+
+**Условие:** `spread_bps` ≤ `regime_max_spread_bps`, `imbalance_abs` ≥ `regime_min_imbalance_abs`, и доля bid \(B/T\) в зоне long/short (`regime_long_threshold` / `regime_short_threshold`).
+
+**Cooldown:** `regime_alert_cooldown_seconds` (отдельный от общего).
+
+**Включение:** `spread_imbalance_regime_enabled: true`.
 
 ---
 

@@ -32,6 +32,7 @@ tinvest-detector = "tinvest_signal_engine.services.detector_service:main"
 tinvest-api = "tinvest_signal_engine.services.api:main"
 tinvest-local-notifier = "tinvest_signal_engine.services.local_notifier:main"
 tinvest-threshold-cron = "tinvest_signal_engine.services.threshold_cron:main"
+tinvest-historical-baseline = "tinvest_signal_engine.services.historical_baseline_job:main"
 tinvest-accuracy-metrics = "tinvest_signal_engine.services.accuracy_metrics:main"
 tinvest-market-unary-emitter = "tinvest_signal_engine.services.market_unary_emitter:main"
 

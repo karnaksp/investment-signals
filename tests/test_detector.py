@@ -365,6 +365,248 @@ class SignalDetectorTest(unittest.TestCase):
         types = {s.signal_type for s in emitted}
         self.assertIn("orderbook_spoofing_bid_pull", types)
 
+    def test_vpin_spike_emitted_after_bucket_closes(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                alert_cooldown_seconds=0,
+                min_baseline_points=3,
+                baseline_points=50,
+                vpin_enabled=True,
+                vpin_bucket_volume_lots=10.0,
+                vpin_lookback_buckets=5,
+                vpin_zscore_threshold=1.5,
+                vpin_min_buckets_before_emit=3,
+                whale_print_enabled=False,
+                absorption_enabled=False,
+                iceberg_enabled=False,
+                spread_imbalance_regime_enabled=False,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        emitted: list = []
+        for i in range(12):
+            direction = (
+                "TRADE_DIRECTION_BUY"
+                if i % 2 == 0
+                else "TRADE_DIRECTION_SELL"
+            )
+            emitted.extend(
+                detector.process(
+                    _trade_event(
+                        ts=start + timedelta(milliseconds=i * 50),
+                        quantity=5,
+                        price=100.0,
+                        direction=direction,
+                    )
+                )
+            )
+        for i in range(12, 30):
+            emitted.extend(
+                detector.process(
+                    _trade_event(
+                        ts=start + timedelta(milliseconds=i * 50),
+                        quantity=10,
+                        price=100.0,
+                        direction="TRADE_DIRECTION_BUY",
+                    )
+                )
+            )
+        types = {s.signal_type for s in emitted}
+        self.assertIn("vpin_spike", types)
+
+    def test_large_trade_print_emitted(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                alert_cooldown_seconds=0,
+                min_baseline_points=5,
+                baseline_points=30,
+                whale_print_enabled=True,
+                whale_print_zscore_threshold=2.0,
+                whale_min_absolute_qty=10.0,
+                vpin_enabled=False,
+                absorption_enabled=False,
+                iceberg_enabled=False,
+                spread_imbalance_regime_enabled=False,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(8):
+            detector.process(
+                _trade_event(
+                    ts=start + timedelta(seconds=i),
+                    quantity=1,
+                    price=100.0,
+                )
+            )
+        emitted = detector.process(
+            _trade_event(
+                ts=start + timedelta(seconds=10),
+                quantity=500,
+                price=100.0,
+            )
+        )
+        self.assertIn(
+            "large_trade_print",
+            {s.signal_type for s in emitted},
+        )
+
+    def test_trade_absorption_bid_emitted(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                alert_cooldown_seconds=0,
+                trade_window_seconds=5,
+                absorption_enabled=True,
+                absorption_window_ms=2000,
+                absorption_min_aggressive_qty=20.0,
+                absorption_max_mid_move_bps=5.0,
+                absorption_aggression_ratio=2.0,
+                vpin_enabled=False,
+                whale_print_enabled=False,
+                iceberg_enabled=False,
+                spread_imbalance_regime_enabled=False,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        detector.process(
+            _orderbook_event(
+                ts=start,
+                best_bid=100.0,
+                best_ask=100.02,
+                bid_qty=200.0,
+                ask_qty=200.0,
+            )
+        )
+        emitted = []
+        for ms in (0, 100, 200, 300, 400):
+            emitted.extend(
+                detector.process(
+                    _trade_event(
+                        ts=start + timedelta(milliseconds=ms),
+                        quantity=15,
+                        price=100.0,
+                        direction="TRADE_DIRECTION_SELL",
+                    )
+                )
+            )
+        self.assertIn(
+            "trade_absorption_bid",
+            {s.signal_type for s in emitted},
+        )
+
+    def test_iceberg_refill_bid_emitted(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                alert_cooldown_seconds=0,
+                iceberg_enabled=True,
+                iceberg_hit_window_ms=5000,
+                iceberg_min_hit_qty=10.0,
+                iceberg_min_refill_qty=15.0,
+                iceberg_min_refill_ratio=0.3,
+                iceberg_max_gap_seconds=2.0,
+                vpin_enabled=False,
+                whale_print_enabled=False,
+                absorption_enabled=False,
+                spread_imbalance_regime_enabled=False,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        detector.process(
+            _orderbook_event(
+                ts=start,
+                best_bid=100.0,
+                best_ask=100.1,
+                bid_qty=100.0,
+                ask_qty=50.0,
+            )
+        )
+        detector.process(
+            _trade_event(
+                ts=start + timedelta(milliseconds=100),
+                quantity=40,
+                price=100.0,
+                direction="TRADE_DIRECTION_SELL",
+            )
+        )
+        emitted = detector.process(
+            _orderbook_event(
+                ts=start + timedelta(milliseconds=300),
+                best_bid=100.0,
+                best_ask=100.1,
+                bid_qty=90.0,
+                ask_qty=50.0,
+            )
+        )
+        self.assertIn(
+            "iceberg_refill_bid",
+            {s.signal_type for s in emitted},
+        )
+
+    def test_spread_imbalance_regime_long_emitted(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                sample_every_seconds=0,
+                alert_cooldown_seconds=0,
+                spread_imbalance_regime_enabled=True,
+                regime_max_spread_bps=20.0,
+                regime_min_imbalance_abs=0.5,
+                regime_long_threshold=0.75,
+                vpin_enabled=False,
+                whale_print_enabled=False,
+                absorption_enabled=False,
+                iceberg_enabled=False,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        emitted = detector.process(
+            _orderbook_event(
+                ts=start,
+                best_bid=100.0,
+                best_ask=100.05,
+                bid_qty=900.0,
+                ask_qty=100.0,
+            )
+        )
+        self.assertIn(
+            "spread_imbalance_regime_long",
+            {s.signal_type for s in emitted},
+        )
+
+    def test_vpin_disabled_emits_nothing(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                alert_cooldown_seconds=0,
+                vpin_enabled=False,
+                whale_print_enabled=False,
+                absorption_enabled=False,
+                iceberg_enabled=False,
+                spread_imbalance_regime_enabled=False,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        emitted = []
+        for i in range(20):
+            emitted.extend(
+                detector.process(
+                    _trade_event(
+                        ts=start + timedelta(seconds=i),
+                        quantity=100,
+                        price=100.0,
+                        direction="TRADE_DIRECTION_BUY",
+                    )
+                )
+            )
+        orderflow_types = {
+            "vpin_spike",
+            "large_trade_print",
+            "trade_absorption_bid",
+            "trade_absorption_ask",
+            "iceberg_refill_bid",
+            "iceberg_refill_ask",
+            "spread_imbalance_regime_long",
+            "spread_imbalance_regime_short",
+        }
+        self.assertFalse(orderflow_types & {s.signal_type for s in emitted})
+
 
 class AlertStateExportHydrateTest(unittest.TestCase):
     def test_export_roundtrip_and_merge_policy(self) -> None:

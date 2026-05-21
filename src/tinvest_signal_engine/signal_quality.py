@@ -38,6 +38,14 @@ _SIGNAL_TYPE_WEIGHT: dict[str, float] = {
     "price_near_limit_band": 0.74,
     "open_interest_spike": 0.7,
     "candle_range_spike": 0.68,
+    "vpin_spike": 0.85,
+    "large_trade_print": 0.85,
+    "trade_absorption_bid": 0.88,
+    "trade_absorption_ask": 0.88,
+    "iceberg_refill_bid": 0.88,
+    "iceberg_refill_ask": 0.88,
+    "spread_imbalance_regime_long": 0.75,
+    "spread_imbalance_regime_short": 0.75,
 }
 
 
@@ -53,7 +61,11 @@ def compute_signal_quality(signal: TriggerSignal) -> dict[str, Any]:
     sev = int(signal.severity)
     sev_norm = max(1, min(3, sev)) / 3.0
 
-    w = _SIGNAL_TYPE_WEIGHT.get(signal.signal_type, 0.65)
+    st = signal.signal_type
+    if st.startswith("historical_"):
+        w = 0.92
+    else:
+        w = _SIGNAL_TYPE_WEIGHT.get(st, 0.65)
 
     raw = (
         100.0
