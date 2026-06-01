@@ -223,8 +223,8 @@ python -m mkdocs serve
 Сборка в каталог `site/`: `python -m mkdocs build` (или `mkdocs build`, если скрипт в `PATH`).
 
 Публичная документация публикуется через GitHub Pages: `https://karnaksp.github.io/investment-signals/`.
-Workflow `.github/workflows/docs.yml` автоматически собирает MkDocs при каждом push в `main` и публикует результат в ветку `gh-pages`.
-В GitHub Pages оставьте branch-based deploy: `Settings -> Pages -> Build and deployment -> Source: Deploy from a branch`, ветка `gh-pages`, папка `/ (root)`.
+Workflow `.github/workflows/docs.yml` автоматически собирает MkDocs и обновляет Pages при каждом push в `main`.
+В GitHub Pages должен быть выбран source `GitHub Actions`.
 
 - **Интерактивное описание REST** при запущенном API: Swagger UI `http://localhost:38000/docs`, ReDoc `http://localhost:38000/redoc`, схема OpenAPI `http://localhost:38000/openapi.json`.
 
