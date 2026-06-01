@@ -1,6 +1,27 @@
 # Signal Cockpit
 
-Signal Cockpit — статическая админка для triage сигналов, delivery policy и калибровки порогов. Она живёт без frontend build step: HTML/CSS/JS лежат в `src/tinvest_signal_engine/static`, а данные берутся из `/admin/api/*`.
+<section class="doc-hero">
+  <p class="hero-kicker">Static v2 admin</p>
+  <h1>Trading cockpit для triage сигналов</h1>
+  <p>
+    Signal Cockpit показывает не только то, что ушло в Telegram, но и всё, что detector сохранил
+    в Postgres/Kafka: suppressed, unknown, delivered, причины фильтрации, качество и контекст по инструменту.
+  </p>
+  <div class="hero-actions">
+    <a class="md-button md-button--primary" href="#screens">Смотреть экраны</a>
+    <a class="md-button" href="#delivery-v2">Delivery V2</a>
+    <a class="md-button" href="#api">Admin API</a>
+  </div>
+</section>
+
+<div class="metric-strip">
+  <div class="metric"><strong>Static v2</strong><span>без React/Vite и build pipeline</span></div>
+  <div class="metric"><strong>Storage-first</strong><span>низкое качество не теряется</span></div>
+  <div class="metric"><strong>Delivery-aware</strong><span>видны причины Telegram-фильтра</span></div>
+  <div class="metric"><strong>Calibration</strong><span>type x quality x feedback</span></div>
+</div>
+
+Signal Cockpit — статическая админка для triage сигналов, delivery policy и калибровки порогов. HTML/CSS/JS лежат в `src/tinvest_signal_engine/static`, а данные берутся из `/admin/api/*`.
 
 Админка не заменяет detector. Detector продолжает генерировать и сохранять все enriched-сигналы в Postgres/Kafka, а Cockpit показывает, что было доставлено в Telegram, что было подавлено и почему.
 
@@ -52,43 +73,40 @@ Rate-limit и instrument cooldown проверяются не только в п
 | Accuracy | `#/accuracy` | JSON-метрики accuracy, если подготовлен `SIGNAL_ACCURACY_JSON_PATH`. |
 | Settings | `#/settings` | Read-only runtime config без секретов. |
 
-## Примеры Экранов
+<a id="screens"></a>
 
-### Triage
+## Примеры экранов
 
-Главный экран для быстрого разбора: сверху delivery funnel и последние значения, ниже очередь внимания и причины suppressed.
+<div class="screenshot-grid">
+  <figure class="screenshot-card">
+    <img src="../assets/admin/signal-cockpit-triage.png" alt="Signal Cockpit triage dashboard" />
+    <figcaption><strong>Triage.</strong> Delivery funnel, очередь внимания, причины suppressed и hot tickers на первом экране.</figcaption>
+  </figure>
+  <figure class="screenshot-card">
+    <img src="../assets/admin/signal-cockpit-signals.png" alt="Signal Cockpit signals table" />
+    <figcaption><strong>Signals.</strong> Плотная таблица всех сохранённых сигналов с фильтрами по status, type, quality, ticker и feedback.</figcaption>
+  </figure>
+  <figure class="screenshot-card">
+    <img src="../assets/admin/signal-cockpit-signal-detail.png" alt="Signal Cockpit signal detail drawer" />
+    <figcaption><strong>Signal detail.</strong> Summary, delivery decision, quality factors, payload и контекст для ручной разметки.</figcaption>
+  </figure>
+  <figure class="screenshot-card">
+    <img src="../assets/admin/signal-cockpit-delivery.png" alt="Signal Cockpit delivery analytics" />
+    <figcaption><strong>Delivery.</strong> Быстрая проверка rate-limit, cooldown, недостаточного качества и отсутствия подтверждающего контекста.</figcaption>
+  </figure>
+  <figure class="screenshot-card">
+    <img src="../assets/admin/signal-cockpit-calibration.png" alt="Signal Cockpit calibration matrix" />
+    <figcaption><strong>Calibration.</strong> Матрица помогает увидеть, какие типы шумят, какие недопущены фильтром и где нужна feedback-разметка.</figcaption>
+  </figure>
+  <figure class="screenshot-card">
+    <img src="../assets/admin/signal-cockpit-instruments.png" alt="Signal Cockpit instruments universe" />
+    <figcaption><strong>Instruments.</strong> Полный universe из `conf/instruments.yaml`; тикеры с нулём сигналов тоже остаются видимыми.</figcaption>
+  </figure>
+</div>
 
-![Signal Cockpit triage](assets/admin/signal-cockpit-triage.png)
-
-### Signals
-
-Плотная таблица всех сохранённых сигналов. Важно: suppressed-события тоже видны, потому что storage больше не зависит от Telegram delivery.
-
-![Signal Cockpit signals table](assets/admin/signal-cockpit-signals.png)
-
-### Signal Detail
-
-Карточка сигнала показывает summary, delivery decision, quality factors, payload и контекст для ручной разметки.
-
-![Signal Cockpit signal detail](assets/admin/signal-cockpit-signal-detail.png)
-
-### Delivery
-
-Экран для проверки, почему сигналы не доходят в Telegram: rate-limit, cooldown, недостаточное качество или отсутствие контекста.
-
-![Signal Cockpit delivery](assets/admin/signal-cockpit-delivery.png)
-
-### Calibration
-
-Матрица калибровки помогает увидеть, какие типы шумят, какие недопущены фильтром и где нужна ручная разметка feedback.
-
-![Signal Cockpit calibration](assets/admin/signal-cockpit-calibration.png)
-
-### Instruments
-
-Полный universe инструментов берётся из `conf/instruments.yaml`. Строки с `0` сигналов всё равно отображаются, чтобы было видно, что тикер подключён, но пока не сработал.
-
-![Signal Cockpit instruments](assets/admin/signal-cockpit-instruments.png)
+<p class="docs-note">
+  Старые записи без delivery metadata отображаются как <code>delivery_status=unknown</code>, поэтому исторические данные не ломают таблицы и графики.
+</p>
 
 ## API
 
@@ -103,5 +121,3 @@ Rate-limit и instrument cooldown проверяются не только в п
 | `/admin/api/calibration` | Матрица калибровки по type/quality/feedback. |
 | `/admin/api/instruments` | Configured universe + activity stats. |
 | `/admin/api/settings` | Read-only runtime settings для Cockpit. |
-
-Старые записи без delivery metadata отображаются как `delivery_status=unknown`.
