@@ -201,6 +201,22 @@
   padding: 0.3rem 0 0.3rem 0.85rem;
 }
 
+.md-typeset .mermaid {
+  background: var(--is-surface-soft);
+  border: 1px solid var(--is-border);
+  border-radius: 8px;
+  margin: 1rem 0 1.4rem;
+  overflow-x: auto;
+  padding: 1rem;
+  text-align: center;
+}
+
+.md-typeset .mermaid svg {
+  display: inline-block;
+  height: auto;
+  max-width: 100%;
+}
+
 .md-typeset .status-ok {
   color: var(--is-accent);
   font-weight: 700;
