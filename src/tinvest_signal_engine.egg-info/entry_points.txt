@@ -1,0 +1,8 @@
+[console_scripts]
+tinvest-accuracy-metrics = tinvest_signal_engine.services.accuracy_metrics:main
+tinvest-api = tinvest_signal_engine.services.api:main
+tinvest-detector = tinvest_signal_engine.services.detector_service:main
+tinvest-local-notifier = tinvest_signal_engine.services.local_notifier:main
+tinvest-market-unary-emitter = tinvest_signal_engine.services.market_unary_emitter:main
+tinvest-raw-stream = tinvest_signal_engine.services.ingestor:main
+tinvest-threshold-cron = tinvest_signal_engine.services.threshold_cron:main

@@ -1,0 +1,1602 @@
+
+<!doctype html>
+<html lang="ru" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Конвейер обнаружения рыночных аномалий по данным T-Invest">
+      
+      
+      
+        <link rel="canonical" href="https://karnaksp.github.io/investment-signals/detectors/">
+      
+      
+        <link rel="prev" href="../architecture/">
+      
+      
+        <link rel="next" href="../orchestration/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Детекторы и паттерны - T-Invest Signal Engine</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          Перейти к содержанию
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Верхний колонтитул">
+    <a href=".." title="T-Invest Signal Engine" class="md-header__button md-logo" aria-label="T-Invest Signal Engine" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            T-Invest Signal Engine
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Детекторы и паттерны
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Тёмная тема"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Тёмная тема" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Светлая тема"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Светлая тема" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Поиск" placeholder="Поиск" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Поиск">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Очистить" aria-label="Очистить" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Инициализация поиска
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Навигация" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="T-Invest Signal Engine" class="md-nav__button md-logo" aria-label="T-Invest Signal Engine" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    T-Invest Signal Engine
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Главная
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Архитектура
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Детекторы и паттерны
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Детекторы и паттерны
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Содержание">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Содержание
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Общая логика
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Источники данных (типы событий потока)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signal_type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Список сигналов (signal_type)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Список сигналов (signal_type)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-volume_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. volume_spike — всплеск объёма в ленте
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-trade_rate_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. trade_rate_spike — всплеск частоты сделок
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-price_jump" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. price_jump — резкое ценовое движение в окне
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-spread_widening" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. spread_widening — расширение спреда
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-orderbook_imbalance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. orderbook_imbalance — дисбаланс верхних уровней стакана
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5a-obi_dynamics-obi-l2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5a. obi_dynamics — скачок OBI на глубине L2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5b-orderbook_spoofing_bid_pull-orderbook_spoofing_ask_pull" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5b. orderbook_spoofing_bid_pull / orderbook_spoofing_ask_pull — эвристика «снятой стены»
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5c-aggressive_trade_burst" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5c. aggressive_trade_burst — пачка мелких принтов как один агрессор
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5d-lead_lag_divergence-vs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5d. lead_lag_divergence — лидер vs ведомый
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5e-open_interest_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5e. open_interest_spike — всплеск открытого интереса (фьючерсы)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5f-candle_range_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5f. candle_range_spike — необычно широкая свеча
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5g-price_near_limit_band-mid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5g. price_near_limit_band — близость mid к лимиту дня
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5h-orderbook_snapshot_inconsistent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5h. orderbook_snapshot_inconsistent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5i-market_access_changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5i. market_access_changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-trading_status_changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. trading_status_changed — смена торгового статуса
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-microstructure_combo_long-microstructure_combo_short" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. microstructure_combo_long / microstructure_combo_short
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#severity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Серьёзность (severity)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cron" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Связь с конфигом и cron
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ограничения (важно для трейдинга)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../orchestration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Оркестрация (Dagster)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../signal_analytics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Аналитика сигналов (SQL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Решение проблем
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../admin_cockpit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Signal Cockpit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../research_log/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research log
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP API (Swagger)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_10" >
+        
+          
+          <label class="md-nav__link" for="__nav_10" id="__nav_10_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Код (автодок)
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Код (автодок)
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Обзор модулей
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    config
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    models и serialization
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/detector_core/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    detector_core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/instruments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    instruments
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/sinks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    sinks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Сервисы CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Содержание">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Содержание
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Общая логика
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Источники данных (типы событий потока)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signal_type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Список сигналов (signal_type)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Список сигналов (signal_type)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-volume_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. volume_spike — всплеск объёма в ленте
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-trade_rate_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. trade_rate_spike — всплеск частоты сделок
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-price_jump" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. price_jump — резкое ценовое движение в окне
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-spread_widening" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. spread_widening — расширение спреда
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-orderbook_imbalance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. orderbook_imbalance — дисбаланс верхних уровней стакана
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5a-obi_dynamics-obi-l2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5a. obi_dynamics — скачок OBI на глубине L2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5b-orderbook_spoofing_bid_pull-orderbook_spoofing_ask_pull" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5b. orderbook_spoofing_bid_pull / orderbook_spoofing_ask_pull — эвристика «снятой стены»
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5c-aggressive_trade_burst" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5c. aggressive_trade_burst — пачка мелких принтов как один агрессор
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5d-lead_lag_divergence-vs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5d. lead_lag_divergence — лидер vs ведомый
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5e-open_interest_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5e. open_interest_spike — всплеск открытого интереса (фьючерсы)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5f-candle_range_spike" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5f. candle_range_spike — необычно широкая свеча
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5g-price_near_limit_band-mid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5g. price_near_limit_band — близость mid к лимиту дня
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5h-orderbook_snapshot_inconsistent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5h. orderbook_snapshot_inconsistent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5i-market_access_changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5i. market_access_changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-trading_status_changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. trading_status_changed — смена торгового статуса
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-microstructure_combo_long-microstructure_combo_short" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. microstructure_combo_long / microstructure_combo_short
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#severity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Серьёзность (severity)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cron" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Связь с конфигом и cron
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ограничения (важно для трейдинга)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="_1">Детекторы и торговые паттерны<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h1>
+<p>Здесь описано <strong>что именно считается аномалией</strong> с точки зрения рыночной микроструктуры: какие метрики, окна времени и пороги участвуют. Реализация — класс <code>SignalDetector</code> в модуле <code>detector_core.py</code>; числовые дефолты — в <code>conf/detectors.yaml</code> (плюс <code>per_instrument</code> и автоматические overrides).</p>
+<h2 id="_2">Общая логика<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<p>Почти все «числовые» сигналы строятся одинаково:</p>
+<ol>
+<li>На каждый инструмент ведётся <strong>скользящая история</strong> последних значений метрики (размер буфера — <code>baseline_points</code>, актуальные числа — в <code>conf/detectors.yaml</code>).</li>
+<li>Раз в <code>sample_every_seconds</code> секунд (если пришло событие нужного типа) в историю добавляется <strong>новая точка</strong> — текущее значение метрики за окно.</li>
+<li>Пока в истории меньше <code>min_baseline_points</code> точек, <strong>сигнал не выдаётся</strong> (нужна хоть какая-то база для сравнения).</li>
+<li>Базовое значение и «выбросность» считаются так: берётся <strong>среднее</strong> <code>baseline</code> по истории и <strong>стандартное отклонение</strong> по тем же точкам; <strong>z-score</strong> = <code>(текущее значение − baseline) / std</code>. Если std пренебрежимо мал, используется защита от деления на ноль (в коде большое или нулевое z в зависимости от сравнения с baseline).</li>
+<li>Срабатывание: <strong>z-score ≥ порога</strong> из YAML для данного типа сигнала (<code>*_zscore_threshold</code>).</li>
+<li>Если в YAML задано <strong><code>min_relative_metric_excursion</code> &gt; 0</strong> и модуль <code>baseline</code> не меньше <code>1e-9</code>, дополнительно требуется <strong>относительное отклонение</strong> <code>|metric − baseline| / |baseline|</code> не ниже этого порога. Это отсекает ситуации «огромный z при почти нулевом std», когда метрика лишь чуть выше плоской базы.</li>
+<li><strong>Cooldown</strong> <code>alert_cooldown_seconds</code>: между двумя алертами <strong>одного и того же</strong> <code>signal_type</code> для того же инструмента должно пройти не меньше заданного времени (чтобы не спамить при застрявшем выбросе).</li>
+</ol>
+<p>Отдельно: сигнал <strong>комбо</strong> использует свои интервалы свежести и cooldown (<code>combo_*</code>), см. ниже.</p>
+<p>Опционально в рантайме детектора: delivery policy (<code>SIGNAL_DELIVERY_*</code>) решает, отправлять ли сигнал во внешний webhook/Telegram. В Postgres/Kafka записываются все обогащённые сигналы; в payload добавляются <code>delivery_status</code>, <code>delivery_reason</code> и <code>delivery_rule</code>.</p>
+<p>Текущий Telegram-gate намеренно строже записи в хранилище: <code>volume_spike</code> и <code>trade_rate_spike</code> требуют качества и z-score одновременно, <code>price_jump</code> требует extreme quality/z или подтверждения nearby trade activity, а standalone liquidity-сигналы подавляются без соседнего volume/trade/combo. <code>SIGNAL_DELIVERY_MAX_PER_HOUR</code> и <code>SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS</code> проверяются по Postgres history и in-memory state, поэтому рестарт detector не сбрасывает throttle.</p>
+<h2 id="_3">Источники данных (типы событий потока)<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Тип события (<code>event_type</code>)</th>
+<th>Торговый смысл</th>
+<th>Что обновляет детектор</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>trade</code></td>
+<td>Лента сделок</td>
+<td>Окно сделок, цены, объёмы; частота дискретизации для объёма/числа сделок; дельта по направлению (buy/sell) для combo</td>
+</tr>
+<tr>
+<td><code>last_price</code></td>
+<td>Последняя цена без полной ленты</td>
+<td>Только траектория цены в <code>price_window</code> → движение в bps</td>
+</tr>
+<tr>
+<td><code>orderbook</code></td>
+<td>Снимок стакана</td>
+<td>Лучший bid/ask, объёмы на верхних уровнях → спред и имбаланс</td>
+</tr>
+<tr>
+<td><code>trading_status</code></td>
+<td>Режим торгов инструмента</td>
+<td>Дискретное изменение статуса (аукцион, остановка и т.п. — в терминах API)</td>
+</tr>
+<tr>
+<td><code>open_interest</code></td>
+<td>ОИ по инструменту</td>
+<td>История OI → <code>open_interest_spike</code> при ненулевом пороге</td>
+</tr>
+<tr>
+<td><code>candle</code></td>
+<td>Закрытая свеча</td>
+<td>Диапазон свечи в bps → <code>candle_range_spike</code> при ненулевом пороге</td>
+</tr>
+<tr>
+<td><code>market_values</code></td>
+<td>Unary <code>GetMarketValues</code> (эмиттер / тот же raw-топик)</td>
+<td>Не даёт сигналов; обновляет последний снимок для <code>unary_context</code> в payload сигнала, если <code>attach_unary_context_to_signals: true</code></td>
+</tr>
+<tr>
+<td><code>tech_analysis</code></td>
+<td>Unary <code>GetTechAnalysis</code></td>
+<td>То же, что <code>market_values</code></td>
+</tr>
+</tbody>
+</table>
+<p>Свечи из <strong>стрима</strong> (<code>candle</code>) участвуют в детекторе при включённой подписке; unary-снимки не заменяют стрим, а дополняют контекст при записи в общий raw-топик.</p>
+<hr />
+<h2 id="signal_type">Список сигналов (<code>signal_type</code>)<a class="headerlink" href="#signal_type" title="Permanent link">&para;</a></h2>
+<h3 id="1-volume_spike">1. <code>volume_spike</code> — всплеск объёма в ленте<a class="headerlink" href="#1-volume_spike" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> за короткий интервал наблюдается <strong>аномально высокий суммарный объём сделок</strong> в лотах относительно «обычного» поведения этого же инструмента на этом горизонте.</p>
+<p><strong>Метрика:</strong> сумма полей <code>quantity</code> по всем сделкам в окне <strong><code>trade_window_seconds</code></strong> (горизонт задаётся в YAML).</p>
+<p><strong>Порог:</strong> z-score ≥ <code>volume_zscore_threshold</code> (значение в YAML) и при необходимости условие <strong><code>min_relative_metric_excursion</code></strong>.</p>
+<p><strong>Интерпретация:</strong> часто связано с <strong>пробоем уровня</strong>, крупным участником, новостным импульсом или ликвидациями; само по себе не указывает направление — только на необычную активность.</p>
+<hr />
+<h3 id="2-trade_rate_spike">2. <code>trade_rate_spike</code> — всплеск частоты сделок<a class="headerlink" href="#2-trade_rate_spike" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> за то же окно <strong><code>trade_window_seconds</code></strong> проходит <strong>необычно много отдельных сделок</strong> (высокая «тиковая» активность), даже если суммарный объём в штуках других метрик умеренный.</p>
+<p><strong>Метрика:</strong> число записей сделок в окне (float для единообразия с историей).</p>
+<p><strong>Порог:</strong> z-score ≥ <code>trade_count_zscore_threshold</code> (значение в YAML).</p>
+<p><strong>Интерпретация:</strong> характерно для <strong>HFT/алгоритмической перестрелки</strong>, аукционной фазы, резкого сужения спреда с активным квотированием. В паре с объёмом помогает отличить «много мелких сделок» от «мало крупных».</p>
+<hr />
+<h3 id="3-price_jump">3. <code>price_jump</code> — резкое ценовое движение в окне<a class="headerlink" href="#3-price_jump" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> цена <strong>сдвинулась на необычно большую величину</strong> за горизонт <strong><code>price_window_seconds</code></strong> по сравнению с историей таких же движений.</p>
+<p><strong>Метрика:</strong> пусть (p_0) — самая ранняя цена в окне (первая точка в очереди <code>price_points</code>), (p_t) — текущая цена (из сделки или last_price). Тогда движение в базисных пунктах:</p>
+<p>[
+\text{move_bps} = \left| \frac{p_t - p_0}{p_0} \right| \times 10\,000
+]</p>
+<p><strong>Дополнительный фильтр:</strong> если задано <strong><code>price_move_absolute_threshold_bps</code> &gt; 0</strong>, то пока движение меньше этого порога, сигнал <strong>не рассматривается</strong> (отсекает шум до «экономически значимого» шага). Нуль в YAML — фильтр выключен. Автоматически порог часто подставляет <strong>Dagster</strong> (<code>threshold_recalc_job</code>, см. <code>orchestration_defs.py</code>) или legacy-<strong><code>tinvest-threshold-cron</code></strong> в <code>detectors.overrides.yaml</code> из средней почасовой волатильности.</p>
+<p><strong>Порог:</strong> z-score по истории значений <code>move_bps</code> ≥ <code>price_return_zscore_threshold</code> (значение в YAML).</p>
+<p><strong>Интерпретация:</strong> классический <strong>импульс / гэп внутри сессии / резкий рерайт котировок</strong>. Направление в summary не разводится отдельно — метрика симметрична по модулю.</p>
+<hr />
+<h3 id="4-spread_widening">4. <code>spread_widening</code> — расширение спреда<a class="headerlink" href="#4-spread_widening" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> <strong>разрыв между лучшим bid и ask</strong> (относительно середины котировки) стал <strong>статистически шире</strong>, чем в недавней истории для этого инструмента.</p>
+<p><strong>Метрика:</strong> по стакану берутся лучшие цены bid/ask; середина (mid = (bid+ask)/2). Спред в bps:</p>
+<p>[
+\text{spread_bps} = \frac{ask - bid}{mid} \times 10\,000
+]</p>
+<p>Дискретизация — не на каждый тик стакана, а с шагом <code>sample_every_seconds</code> для канала orderbook.</p>
+<p><strong>Порог:</strong> z-score ≥ <code>spread_zscore_threshold</code> (значение в YAML).</p>
+<p><strong>Интерпретация:</strong> часто <strong>падает ликвидность</strong>, участники убирают лимитки перед новостью, повышается неопределённость, возможен <strong>рыночный стресс</strong>. Для отдельных инструментов широкий спред может быть нормой — поэтому используется именно <strong>относительный</strong> z-score к своей истории.</p>
+<hr />
+<h3 id="5-orderbook_imbalance">5. <code>orderbook_imbalance</code> — дисбаланс верхних уровней стакана<a class="headerlink" href="#5-orderbook_imbalance" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> на <strong>первых N уровнях</strong> bid и ask (<code>order_book_depth_levels</code>, по умолчанию 5) суммарный объём с одной стороны <strong>заметно перевешивает</strong> другую; дополнительно проверяется, что модуль дисбаланса <strong>достаточно велик по модулю</strong> до входа в z-score.</p>
+<p><strong>Метрика:</strong> суммируются количества на первых N bid и первых N ask; (B) и (A) — эти суммы, (T = B+A). Тогда:</p>
+<p>[
+\text{imbalance_abs} = \left| \frac{B - A}{T} \right|
+]</p>
+<p>(доля перевеса bid или ask от общего объёма на вершине книги). Отдельно в состоянии хранится доля (B/T) для combo.</p>
+<p><strong>Условие «аномальности»:</strong> сначала <strong><code>imbalance_abs</code> ≥ <code>imbalance_absolute_threshold</code></strong> (дефолт 0.65) — иначе даже большой z-score не считается торгово значимым.</p>
+<p><strong>Порог:</strong> z-score по истории <code>imbalance_abs</code> ≥ <code>imbalance_zscore_threshold</code> (значение в YAML).</p>
+<p><strong>Интерпретация:</strong> <strong>давление на цену со стороны лимитной ликвидности</strong> — перекос заявок у края книги; часто читают как краткосрочный <strong>бычий/медвежий</strong> уклон <strong>до</strong> исполнения противоположным потоком агрессоров. Это не ордерфлоу по сделкам, а именно <strong>снимок стакана</strong>.</p>
+<hr />
+<h3 id="5a-obi_dynamics-obi-l2">5a. <code>obi_dynamics</code> — скачок OBI на глубине L2<a class="headerlink" href="#5a-obi_dynamics-obi-l2" title="Permanent link">&para;</a></h3>
+<p><strong>Смысл:</strong> по <strong>первым N уровням</strong> стакана (<code>order_book_depth_levels</code>, по умолчанию 5) считается (OBI = (B-A)/(B+A)). Между <strong>дискретными</strong> сэмплами orderbook (как и для спреда/имбаланса — <code>sample_every_seconds</code>) измеряется <strong>(\Delta OBI)</strong>; при (|\Delta|) выше <code>obi_delta_absolute_threshold</code> значение (|\Delta|) попадает в z-score историю.</p>
+<p><strong>Включение:</strong> <code>obi_dynamics_enabled: true</code>.</p>
+<p><strong>Замечание:</strong> сырой OBI зашумлён (отмены, мигание лимиток); в литературе 2024–2025 часто предлагают <strong>фильтрацию стакана</strong> и модели типа Hawkes/OFI — см. <code>docs/research_log.md</code>.</p>
+<hr />
+<h3 id="5b-orderbook_spoofing_bid_pull-orderbook_spoofing_ask_pull">5b. <code>orderbook_spoofing_bid_pull</code> / <code>orderbook_spoofing_ask_pull</code> — эвристика «снятой стены»<a class="headerlink" href="#5b-orderbook_spoofing_bid_pull-orderbook_spoofing_ask_pull" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> на двух <strong>последовательных</strong> снимках стакана (разница по времени ≤ <code>spoofing_max_gap_seconds</code>) с одной стороны была <strong>крупная стена</strong> относительно противоположной стороны (отношение объёмов L3 ≥ <code>spoofing_wall_ratio</code> и абсолют ≥ <code>spoofing_min_wall_qty</code>), затем объём этой стороны <strong>резко упал</strong> (доля снятия ≥ <code>spoofing_qty_drop_ratio</code>), при этом <strong>mid</strong> почти не сдвинулся (≤ <code>spoofing_max_mid_move_bps</code>).</p>
+<p><strong>Включение:</strong> <code>spoofing_enabled: true</code> в <code>detectors.yaml</code> (по умолчанию выключено).</p>
+<p><strong>Интерпретация:</strong> грубая подсказка на <strong>отмену крупных лимиток</strong> у лучшей цены (часто обсуждаемый сценарий «спуфинга» в широком смысле). Не детектирует направление сделки и не заменяет полноценный анализ L2/L3 с идентификаторами заявок — только эвристика по суммарным количествам трёх уровней.</p>
+<hr />
+<h3 id="5c-aggressive_trade_burst">5c. <code>aggressive_trade_burst</code> — пачка мелких принтов как один агрессор<a class="headerlink" href="#5c-aggressive_trade_burst" title="Permanent link">&para;</a></h3>
+<p><strong>Смысл:</strong> за окно <strong><code>trade_burst_window_ms</code></strong> (по умолчанию 100 мс) накапливаются <strong>направленные</strong> сделки (buy или sell по полю <code>direction</code>). Если число принтов ≥ <code>trade_burst_min_trades</code> и суммарный |qty| ≥ <code>trade_burst_min_abs_qty</code>, считаем, что прошёл <strong>синтетический агрессивный блок</strong>.</p>
+<p><strong>Включение:</strong> <code>trade_burst_enabled: true</code> (осторожно на шумных тикерах).</p>
+<hr />
+<h3 id="5d-lead_lag_divergence-vs">5d. <code>lead_lag_divergence</code> — лидер vs ведомый<a class="headerlink" href="#5d-lead_lag_divergence-vs" title="Permanent link">&para;</a></h3>
+<p><strong>Смысл:</strong> для пары <code>(leader, follower)</code> из YAML (<code>lead_lag.pairs</code>) сравнивается <strong>диапазон mid в bps</strong> за <code>lead_lag_window_seconds</code>: если у лидера движение ≥ <code>lead_lag_leader_move_bps</code>, а у ведомого ≤ <code>lead_lag_follower_max_bps</code>, на событии ведомого генерируется сигнал <strong>отставания</strong>.</p>
+<p><strong>Включение:</strong> <code>lead_lag_enabled: true</code> + заполненный блок <code>lead_lag</code> в <code>detectors.yaml</code>.</p>
+<hr />
+<h3 id="5e-open_interest_spike">5e. <code>open_interest_spike</code> — всплеск открытого интереса (фьючерсы)<a class="headerlink" href="#5e-open_interest_spike" title="Permanent link">&para;</a></h3>
+<p><strong>Источник:</strong> поток <code>open_interest</code> в нормализованных событиях (если брокер отдаёт).</p>
+<p><strong>Порог:</strong> z-score ≥ <code>open_interest_zscore_threshold</code> в YAML; <strong>0</strong> — детектор не обрабатывает этот тип.</p>
+<hr />
+<h3 id="5f-candle_range_spike">5f. <code>candle_range_spike</code> — необычно широкая свеча<a class="headerlink" href="#5f-candle_range_spike" title="Permanent link">&para;</a></h3>
+<p><strong>Источник:</strong> <code>candle</code> с включёнными свечами в <code>instruments.yaml</code>.</p>
+<p><strong>Метрика:</strong> ((high - low) / open \times 10\,000) bps.</p>
+<p><strong>Порог:</strong> z-score ≥ <code>candle_range_zscore_threshold</code>; <strong>0</strong> — выключено.</p>
+<hr />
+<h3 id="5g-price_near_limit_band-mid">5g. <code>price_near_limit_band</code> — близость mid к лимиту дня<a class="headerlink" href="#5g-price_near_limit_band-mid" title="Permanent link">&para;</a></h3>
+<p><strong>Источник:</strong> поля <code>limit_up</code> / <code>limit_down</code> в payload стакана.</p>
+<p><strong>Условие:</strong> расстояние mid до ближайшего лимита в bps ≤ <code>limit_band_warning_bps</code> (<strong>0</strong> — выключено).</p>
+<hr />
+<h3 id="5h-orderbook_snapshot_inconsistent">5h. <code>orderbook_snapshot_inconsistent</code><a class="headerlink" href="#5h-orderbook_snapshot_inconsistent" title="Permanent link">&para;</a></h3>
+<p>Срабатывает при <code>is_consistent: false</code> в снимке стакана, если <code>signal_orderbook_inconsistent: true</code> в YAML.</p>
+<hr />
+<h3 id="5i-market_access_changed">5i. <code>market_access_changed</code><a class="headerlink" href="#5i-market_access_changed" title="Permanent link">&para;</a></h3>
+<p>Смена флагов <code>limit_order_available_flag</code> / <code>market_order_available_flag</code> в событии <code>trading_status</code> (если <code>track_market_access_flags: true</code>).</p>
+<hr />
+<h3 id="6-trading_status_changed">6. <code>trading_status_changed</code> — смена торгового статуса<a class="headerlink" href="#6-trading_status_changed" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> инструмент <strong>перешёл из одного режима торгов в другой</strong> (например, нормальные торги ↔ аукцион / ограничения — конкретные строки статуса приходят из API).</p>
+<p><strong>Метрика:</strong> дискретное событие (в сигнале <code>metric_value</code> условно 1.0, z-score 0).</p>
+<p><strong>Порог:</strong> нет z-score; действует обычный <strong>cooldown</strong> для этого типа сигнала.</p>
+<p><strong>Интерпретация:</strong> <strong>режимный риск</strong>, возможные гэпы после аукциона, ограничение маржинальной торговли и т.д. Полезно для фильтрации ложных ценовых/объёмных аномалий вокруг режимных переходов.</p>
+<hr />
+<h3 id="7-microstructure_combo_long-microstructure_combo_short">7. <code>microstructure_combo_long</code> / <code>microstructure_combo_short</code><a class="headerlink" href="#7-microstructure_combo_long-microstructure_combo_short" title="Permanent link">&para;</a></h3>
+<p><strong>Торговый паттерн:</strong> <strong>композитный</strong> признак «напряжённой» микроструктуры: одновременно (в окне <strong>свежести</strong> <code>combo_freshness_seconds</code>) участвуют несколько факторов — широкий спред, высокая частота сделок, перекос стакана в сторону long или short, накопленная <strong>агрессивная дельта</strong> по ленте.</p>
+<p>Включается флагом <strong><code>combo_enabled</code></strong> в YAML.</p>
+<p><strong>Компоненты и баллы (дефолты из <code>detectors.yaml</code>):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Условие</th>
+<th>Смысл</th>
+<th>Баллы long</th>
+<th>Баллы short</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Недавно был активен сигнал / состояние по <code>spread_widening</code></td>
+<td>Спред разошёлся</td>
+<td><code>combo_spread_points</code> (1)</td>
+<td>те же</td>
+</tr>
+<tr>
+<td>Недавно был активен <code>trade_rate_spike</code></td>
+<td>Высокая частота сделок</td>
+<td><code>combo_tick_rate_points</code> (2)</td>
+<td>те же</td>
+</tr>
+<tr>
+<td>Имбаланс активен и доля bid (B/T) ≥ <code>combo_imbalance_long_threshold</code> (0.80)</td>
+<td>Давление bid у верха книги</td>
+<td><code>combo_imbalance_points</code> (1)</td>
+<td>0</td>
+</tr>
+<tr>
+<td>Имбаланс активен и (B/T) ≤ <code>combo_imbalance_short_threshold</code> (0.20)</td>
+<td>Давление ask</td>
+<td>0</td>
+<td><code>combo_imbalance_points</code> (1)</td>
+</tr>
+<tr>
+<td>Сумма знаковых объёмов сделок в <strong><code>trade_window</code></strong> ≥ <code>combo_delta_min_abs_qty</code></td>
+<td>Преобладание покупок агрессором</td>
+<td><code>combo_delta_points</code> (2)</td>
+<td>0</td>
+</tr>
+<tr>
+<td>Та же сумма ≤ −<code>combo_delta_min_abs_qty</code></td>
+<td>Преобладание продаж агрессором</td>
+<td>0</td>
+<td><code>combo_delta_points</code> (2)</td>
+</tr>
+</tbody>
+</table>
+<p>«Недавно активен» для spread/tick_rate/imbalance означает: для соответствующего базового сигнала обновлялось <strong><code>last_active_at</code></strong> не позже чем <code>combo_freshness_seconds</code> назад от времени текущего события (не обязательно что был именно алерт — важно прохождение порога z-score на шаге вычисления).</p>
+<p><strong>Итог:</strong> если <strong>long_score ≥ <code>combo_min_score</code></strong> (дефолт 6) и прошёл <strong><code>combo_alert_cooldown_seconds</code></strong> с прошлого combo-long — выдаётся <code>microstructure_combo_long</code>; аналогично для short.</p>
+<p><strong>Payload:</strong> в <code>payload_json</code> есть структурированный блок <strong><code>combo_detail</code></strong>: <code>flags</code> (какие условия реально сработали), <strong><code>points_awarded</code></strong> (сколько баллов дал каждый компонент), <strong><code>scores</code></strong> (long/short на момент оценки), <strong><code>thresholds</code></strong> (пороги из конфига), плюс <code>imbalance_ratio</code>, <code>signed_delta_qty</code>, <code>freshness_seconds</code>. Поля верхнего уровня (<code>score</code>, <code>min_score</code>, <code>spread_active</code>, …) дублируют ключевые значения для обратной совместимости и быстрых фильтров.</p>
+<p><strong>Интерпретация:</strong> это <strong>не самостоятельная торговая модель</strong>, а <strong>флаг необычного совпадения</strong> микроструктурных стрессов; может предшествовать движению или наоборот — быстро схлопываться. Направление long/short в названии — по <strong>правилам комбинации</strong> (стакан + дельта), а не прогноз цены.</p>
+<hr />
+<h2 id="severity">Серьёзность (<code>severity</code>)<a class="headerlink" href="#severity" title="Permanent link">&para;</a></h2>
+<p>Для сигналов с ненулевым z-score глубина выброса мапится на целое <strong>severity</strong> (1–3): выше z → выше уровень (пороги в коде: примерно ≥6 → 3, ≥4 → 2, иначе 1). У дискретных событий (статус, combo с z=0) severity задаётся правилами конкретного типа.</p>
+<hr />
+<h2 id="cron">Связь с конфигом и cron<a class="headerlink" href="#cron" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Все окна и пороги — <strong><code>conf/detectors.yaml</code></strong>, точечные переопределения — <strong><code>per_instrument</code></strong> там же или в <strong><code>detectors.overrides.yaml</code></strong>.</li>
+<li><strong><code>price_move_absolute_threshold_bps</code></strong> типично поддерживает <strong>расписание Dagster</strong> (или legacy threshold-cron): под каждый инструмент подставляется масштаб волатильности по часовым свечам, чтобы <code>price_jump</code> не срабатывал на шум, типичный для данного тикера.</li>
+</ul>
+<hr />
+<h2 id="_4">Ограничения (важно для трейдинга)<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Состояние <strong>целиком в памяти</strong> процесса детектора; при рестарте база z-score «обнуляется».</li>
+<li>Нет учёта <strong>сессии</strong>, <strong>новостного календаря</strong>, <strong>корреляций между инструментами</strong> — каждый тикер отдельно.</li>
+<li>Имбаланс и спред считаются по <strong>верхушке стакана (3 уровня)</strong> и лучшим ценам; глубокая книга не моделируется.</li>
+<li>Направление сделки для дельты зависит от поля направления в payload сделки; при отсутствии/неизвестном значении дельта в combo может не давать баллов.</li>
+</ul>
+<p>Для правок формул и новых типов сигналов смотрите <strong><code>detector_core.py</code></strong> и тесты <strong><code>tests/test_detector.py</code></strong>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.expand", "navigation.instant", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u043e \u0432 \u0431\u0443\u0444\u0435\u0440", "clipboard.copy": "\u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0432 \u0431\u0443\u0444\u0435\u0440", "search.result.more.one": "\u0415\u0449\u0451 1 \u043d\u0430 \u044d\u0442\u043e\u0439 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0435", "search.result.more.other": "\u0415\u0449\u0451 # \u043d\u0430 \u044d\u0442\u043e\u0439 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0435", "search.result.none": "\u0421\u043e\u0432\u043f\u0430\u0434\u0435\u043d\u0438\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e", "search.result.one": "\u041d\u0430\u0439\u0434\u0435\u043d\u043e 1 \u0441\u043e\u0432\u043f\u0430\u0434\u0435\u043d\u0438\u0435", "search.result.other": "\u041d\u0430\u0439\u0434\u0435\u043d\u043e \u0441\u043e\u0432\u043f\u0430\u0434\u0435\u043d\u0438\u0439: #", "search.result.placeholder": "\u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u043f\u0435\u0447\u0430\u0442\u0430\u0442\u044c \u0434\u043b\u044f \u043f\u043e\u0438\u0441\u043a\u0430", "search.result.term.missing": "\u041e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442", "select.version": "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0432\u0435\u0440\u0441\u0438\u044e"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
