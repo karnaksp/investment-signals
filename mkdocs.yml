@@ -2,6 +2,7 @@
 # Просмотр: python -m mkdocs serve
 
 site_name: T-Invest Signal Engine
+site_url: https://karnaksp.github.io/investment-signals/
 site_description: Конвейер обнаружения рыночных аномалий по данным T-Invest
 
 theme:
