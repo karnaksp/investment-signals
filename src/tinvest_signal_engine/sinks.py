@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -30,6 +31,24 @@ def _safe_identifier(value: str) -> str:
 
 
 _ADMIN_FEEDBACK_TABLE = _safe_identifier("signal_admin_feedback")
+
+
+def _quality_sql(alias: str = "ms") -> str:
+    return f"nullif({alias}.payload_json->>'quality_score', '')::double precision"
+
+
+def _delivery_status_sql(alias: str = "ms") -> str:
+    return (
+        f"coalesce(nullif({alias}.payload_json->>'delivery_status', ''), "
+        "'unknown')"
+    )
+
+
+def _delivery_reason_sql(alias: str = "ms") -> str:
+    return (
+        f"coalesce(nullif({alias}.payload_json->>'delivery_reason', ''), "
+        "'unknown')"
+    )
 
 
 class PostgresSignalStore:
@@ -154,6 +173,34 @@ class PostgresSignalStore:
                     "payload_json": json_dumps(signal.payload),
                 },
             )
+
+    def count_delivered_since(
+        self,
+        *,
+        since: datetime,
+        instrument_id: str | None = None,
+        signal_type: str | None = None,
+    ) -> int:
+        conds = [
+            "detected_at >= %(since)s",
+            f"{_delivery_status_sql()} = 'delivered'",
+        ]
+        params: dict[str, Any] = {"since": since}
+        if instrument_id:
+            conds.append("instrument_id = %(instrument_id)s")
+            params["instrument_id"] = instrument_id
+        if signal_type:
+            conds.append("signal_type = %(signal_type)s")
+            params["signal_type"] = signal_type
+        query = f"""
+            SELECT count(*)::int AS cnt
+            FROM {self._table_name} ms
+            WHERE {" AND ".join(conds)}
+        """
+        with self._cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+        return int((row or {}).get("cnt") or 0)
 
     def fetch_recent(
         self, *, limit: int = 50, instrument_id: str | None = None
@@ -443,6 +490,11 @@ class PostgresSignalStore:
         instrument_id: str | None = None,
         signal_type: str | None = None,
         min_quality: float | None = None,
+        quality_min: float | None = None,
+        quality_max: float | None = None,
+        delivery_status: str | None = None,
+        feedback: str | None = None,
+        severity: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         lim = max(1, min(int(limit), 200))
         off = max(0, int(offset))
@@ -450,20 +502,33 @@ class PostgresSignalStore:
         params: dict[str, Any] = {"lim": lim, "off": off}
         if int(minutes) > 0:
             m = min(max(int(minutes), 1), 10_080)
-            conds.append("detected_at >= NOW() - (%(m)s * INTERVAL '1 minute')")
+            conds.append("ms.detected_at >= NOW() - (%(m)s * INTERVAL '1 minute')")
             params["m"] = m
         if instrument_id:
-            conds.append("instrument_id = %(instrument_id)s")
+            conds.append("ms.instrument_id = %(instrument_id)s")
             params["instrument_id"] = instrument_id.strip()
         if signal_type:
-            conds.append("signal_type = %(signal_type)s")
+            conds.append("ms.signal_type = %(signal_type)s")
             params["signal_type"] = signal_type.strip()
-        if min_quality is not None:
-            conds.append(
-                "nullif(payload_json->>'quality_score', '')::double precision "
-                ">= %(min_quality)s"
-            )
-            params["min_quality"] = float(min_quality)
+        q_min = quality_min if quality_min is not None else min_quality
+        if q_min is not None:
+            conds.append(f"{_quality_sql()} >= %(quality_min)s")
+            params["quality_min"] = float(q_min)
+        if quality_max is not None:
+            conds.append(f"{_quality_sql()} <= %(quality_max)s")
+            params["quality_max"] = float(quality_max)
+        if delivery_status:
+            conds.append(f"{_delivery_status_sql()} = %(delivery_status)s")
+            params["delivery_status"] = delivery_status.strip()
+        if feedback:
+            if feedback.strip() == "none":
+                conds.append("fb.label IS NULL")
+            else:
+                conds.append("fb.label = %(feedback)s")
+                params["feedback"] = feedback.strip()
+        if severity is not None:
+            conds.append("ms.severity = %(severity)s")
+            params["severity"] = int(severity)
         where_sql = " AND ".join(conds) if conds else "TRUE"
         base = (
             f"FROM {self._table_name} AS ms "
@@ -489,6 +554,8 @@ class PostgresSignalStore:
                     ms.window_seconds,
                     ms.summary,
                     ms.payload_json,
+                    {_delivery_status_sql()} AS delivery_status,
+                    {_delivery_reason_sql()} AS delivery_reason,
                     fb.label AS admin_feedback_label,
                     fb.note AS admin_feedback_note,
                     fb.updated_at AS admin_feedback_at
@@ -517,6 +584,8 @@ class PostgresSignalStore:
                     "window_seconds": row["window_seconds"],
                     "summary": row["summary"],
                     "payload": row["payload_json"],
+                    "delivery_status": row.get("delivery_status") or "unknown",
+                    "delivery_reason": row.get("delivery_reason") or "unknown",
                     "admin_feedback_label": row.get("admin_feedback_label"),
                     "admin_feedback_note": row.get("admin_feedback_note"),
                     "admin_feedback_at": (
@@ -569,6 +638,8 @@ class PostgresSignalStore:
                 ms.window_seconds,
                 ms.summary,
                 ms.payload_json,
+                {_delivery_status_sql()} AS delivery_status,
+                {_delivery_reason_sql()} AS delivery_reason,
                 fb.label AS admin_feedback_label,
                 fb.note AS admin_feedback_note,
                 fb.updated_at AS admin_feedback_at
@@ -598,6 +669,8 @@ class PostgresSignalStore:
             "window_seconds": row["window_seconds"],
             "summary": row["summary"],
             "payload": row["payload_json"],
+            "delivery_status": row.get("delivery_status") or "unknown",
+            "delivery_reason": row.get("delivery_reason") or "unknown",
             "admin_feedback_label": row.get("admin_feedback_label"),
             "admin_feedback_note": row.get("admin_feedback_note"),
             "admin_feedback_at": fb_at.isoformat() if fb_at is not None else None,
@@ -707,6 +780,243 @@ class PostgresSignalStore:
             "rapid_followups_within_5m": rf,
             "total_signals": total_s,
             "rapid_followup_rate": round(rate, 6),
+        }
+
+    def fetch_admin_instrument_activity(self, *, minutes: int) -> dict[str, dict[str, Any]]:
+        time_sql, time_params, _all_time = self._admin_time_sql(minutes)
+        time_sql = time_sql.replace("detected_at", "ms.detected_at")
+        status_sql = _delivery_status_sql()
+        tbl = self._table_name
+        with self._cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.instrument_id,
+                    ms.ticker,
+                    ms.class_code,
+                    count(*)::bigint AS total,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'delivered'
+                    )::bigint AS delivered,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'suppressed'
+                    )::bigint AS suppressed,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'unknown'
+                    )::bigint AS unknown,
+                    avg({_quality_sql()}) AS avg_quality,
+                    max(ms.detected_at) AS last_detected_at
+                FROM {tbl} AS ms
+                WHERE {time_sql}
+                GROUP BY ms.instrument_id, ms.ticker, ms.class_code
+                """,
+                time_params,
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            last = row.get("last_detected_at")
+            if last is not None:
+                row["last_detected_at"] = last.isoformat()
+            key = str(row.get("instrument_id") or "")
+            if key:
+                out[key] = row
+        return out
+
+    def fetch_admin_delivery_overview(self, *, minutes: int) -> dict[str, Any]:
+        time_sql, time_params, all_time = self._admin_time_sql(minutes)
+        time_sql = time_sql.replace("detected_at", "ms.detected_at")
+        tbl = self._table_name
+        status_sql = _delivery_status_sql()
+        reason_sql = _delivery_reason_sql()
+        with self._cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    {status_sql} AS delivery_status,
+                    count(*)::bigint AS signal_count,
+                    avg({_quality_sql()}) AS avg_quality
+                FROM {tbl} AS ms
+                WHERE {time_sql}
+                GROUP BY 1
+                ORDER BY signal_count DESC, delivery_status ASC
+                """,
+                time_params,
+            )
+            by_status = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    {reason_sql} AS delivery_reason,
+                    {status_sql} AS delivery_status,
+                    count(*)::bigint AS signal_count
+                FROM {tbl} AS ms
+                WHERE {time_sql}
+                GROUP BY 1, 2
+                ORDER BY signal_count DESC, delivery_reason ASC
+                LIMIT 20
+                """,
+                time_params,
+            )
+            reasons = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.signal_type,
+                    count(*)::bigint AS total,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'delivered'
+                    )::bigint AS delivered,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'suppressed'
+                    )::bigint AS suppressed,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'unknown'
+                    )::bigint AS unknown,
+                    avg({_quality_sql()}) AS avg_quality
+                FROM {tbl} AS ms
+                WHERE {time_sql}
+                GROUP BY ms.signal_type
+                ORDER BY total DESC, ms.signal_type ASC
+                LIMIT 40
+                """,
+                time_params,
+            )
+            by_type = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.ticker,
+                    count(*)::bigint AS total,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'delivered'
+                    )::bigint AS delivered,
+                    count(*) FILTER (
+                        WHERE {status_sql} = 'suppressed'
+                    )::bigint AS suppressed,
+                    avg({_quality_sql()}) AS avg_quality,
+                    max(ms.detected_at) AS last_detected_at
+                FROM {tbl} AS ms
+                WHERE {time_sql}
+                GROUP BY ms.ticker
+                ORDER BY total DESC, ms.ticker ASC
+                LIMIT 40
+                """,
+                time_params,
+            )
+            by_ticker = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.signal_id,
+                    ms.detected_at,
+                    ms.ticker,
+                    ms.instrument_id,
+                    ms.signal_type,
+                    ms.severity,
+                    ms.z_score,
+                    ms.summary,
+                    ms.payload_json
+                FROM {tbl} AS ms
+                WHERE {time_sql}
+                  AND {status_sql} = 'delivered'
+                ORDER BY ms.detected_at DESC
+                LIMIT 12
+                """,
+                time_params,
+            )
+            recent_delivered = [dict(r) for r in cursor.fetchall()]
+        totals = {str(r["delivery_status"]): int(r["signal_count"] or 0) for r in by_status}
+        total = sum(totals.values())
+        delivered = totals.get("delivered", 0)
+        for row in by_ticker:
+            last = row.get("last_detected_at")
+            if last is not None:
+                row["last_detected_at"] = last.isoformat()
+        for row in recent_delivered:
+            row["signal_id"] = str(row["signal_id"])
+            row["detected_at"] = row["detected_at"].isoformat()
+            row["payload"] = row.pop("payload_json")
+        return {
+            "minutes": 0 if all_time else int(time_params.get("m", 0)),
+            "all_time": all_time,
+            "totals": {
+                "total": total,
+                "delivered": delivered,
+                "suppressed": totals.get("suppressed", 0),
+                "unknown": totals.get("unknown", 0),
+                "delivery_rate": (delivered / total) if total else 0.0,
+            },
+            "by_status": by_status,
+            "reasons": reasons,
+            "by_type": by_type,
+            "by_ticker": by_ticker,
+            "recent_delivered": recent_delivered,
+        }
+
+    def fetch_admin_delivery_reasons(self, *, minutes: int) -> dict[str, Any]:
+        time_sql, time_params, all_time = self._admin_time_sql(minutes)
+        time_sql = time_sql.replace("detected_at", "ms.detected_at")
+        tbl = self._table_name
+        with self._cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    {_delivery_reason_sql()} AS delivery_reason,
+                    {_delivery_status_sql()} AS delivery_status,
+                    ms.signal_type,
+                    count(*)::bigint AS signal_count,
+                    avg({_quality_sql()}) AS avg_quality
+                FROM {tbl} AS ms
+                WHERE {time_sql}
+                GROUP BY 1, 2, 3
+                ORDER BY signal_count DESC, delivery_reason ASC, ms.signal_type ASC
+                LIMIT 200
+                """,
+                time_params,
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
+        return {
+            "minutes": 0 if all_time else int(time_params.get("m", 0)),
+            "all_time": all_time,
+            "items": rows,
+            "count": len(rows),
+        }
+
+    def fetch_admin_calibration(self, *, minutes: int) -> dict[str, Any]:
+        time_sql, time_params, all_time = self._admin_time_sql(minutes)
+        time_sql = time_sql.replace("detected_at", "ms.detected_at")
+        tbl = self._table_name
+        q_sql = _quality_sql()
+        with self._cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.signal_type,
+                    CASE
+                        WHEN {q_sql} IS NULL THEN 'unknown'
+                        WHEN {q_sql} < 48 THEN 'low'
+                        WHEN {q_sql} < 72 THEN 'medium'
+                        ELSE 'high'
+                    END AS quality_tier,
+                    {_delivery_status_sql()} AS delivery_status,
+                    coalesce(fb.label, 'none') AS feedback,
+                    count(*)::bigint AS signal_count,
+                    avg({q_sql}) AS avg_quality
+                FROM {tbl} AS ms
+                LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id
+                WHERE {time_sql}
+                GROUP BY 1, 2, 3, 4
+                ORDER BY ms.signal_type ASC, quality_tier ASC, delivery_status ASC
+                """,
+                time_params,
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
+        return {
+            "minutes": 0 if all_time else int(time_params.get("m", 0)),
+            "all_time": all_time,
+            "items": rows,
+            "count": len(rows),
         }
 
 

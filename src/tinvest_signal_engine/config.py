@@ -195,6 +195,13 @@ class RuntimeSettings:
     clickhouse_http_password: str | None
     # Не публиковать сигналы с quality_score ниже порога (после enrich). None = выключено.
     signal_min_quality_score: int | None
+    # Delivery policy: storage always keeps signals, these fields gate only outbound alerts.
+    signal_delivery_enabled: bool
+    signal_delivery_min_quality: int
+    signal_delivery_min_quality_raw: str | None
+    signal_delivery_max_per_hour: int
+    signal_delivery_instrument_cooldown_seconds: int
+    signal_delivery_type_rules_json: str
     # Периодический unary-эмиттер → Kafka raw (см. tinvest-market-unary-emitter). 0 = выключено.
     market_unary_poll_seconds: int
     # Один цикл опроса и выход (Dagster / ручной прогон); иначе бесконечный цикл как сервис.
@@ -345,6 +352,24 @@ class RuntimeSettings:
             ),
             signal_min_quality_score=_env_optional_int(
                 "SIGNAL_MIN_QUALITY_SCORE"
+            ),
+            signal_delivery_enabled=_env_bool(
+                "SIGNAL_DELIVERY_ENABLED", default=True
+            ),
+            signal_delivery_min_quality=int(
+                os.getenv("SIGNAL_DELIVERY_MIN_QUALITY", "80")
+            ),
+            signal_delivery_min_quality_raw=os.getenv(
+                "SIGNAL_DELIVERY_MIN_QUALITY"
+            ),
+            signal_delivery_max_per_hour=int(
+                os.getenv("SIGNAL_DELIVERY_MAX_PER_HOUR", "6")
+            ),
+            signal_delivery_instrument_cooldown_seconds=int(
+                os.getenv("SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS", "900")
+            ),
+            signal_delivery_type_rules_json=(
+                os.getenv("SIGNAL_DELIVERY_TYPE_RULES_JSON", "").strip()
             ),
             market_unary_poll_seconds=int(
                 os.getenv("MARKET_UNARY_POLL_SECONDS", "0")

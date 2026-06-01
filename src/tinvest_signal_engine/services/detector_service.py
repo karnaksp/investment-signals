@@ -10,6 +10,7 @@ from kafka import KafkaConsumer, KafkaProducer
 
 from ..config import RuntimeSettings, load_detector_config
 from ..data_quality import log_validation_failure, validate_normalized_event_dict
+from ..delivery_policy import DELIVERY_DELIVERED, DeliveryPolicy
 from ..detector_core import SignalDetector
 from ..kafka_proto import (
     build_raw_value_deserializer,
@@ -126,6 +127,16 @@ def main() -> None:
         chat_id=settings.telegram_chat_id,
         message_thread_id=settings.telegram_message_thread_id,
     )
+    delivery_policy = DeliveryPolicy(
+        settings,
+        delivered_count_since=lambda since, instrument_id, signal_type: (
+            signal_store.count_delivered_since(
+                since=since,
+                instrument_id=instrument_id,
+                signal_type=signal_type,
+            )
+        ),
+    )
 
     logger.info("Starting detector service")
     if settings.redis_url:
@@ -198,23 +209,15 @@ def main() -> None:
                     event = NormalizedEvent.from_dict(raw_value)
                     signals = detector.process(event)
                     signals = detector.enrich_signals_with_unary(signals)
-                    delivered: list[TriggerSignal] = []
+                    stored: list[TriggerSignal] = []
+                    outbound: list[TriggerSignal] = []
                     for signal in signals:
                         signal = enrich_signal_for_delivery(signal)
-                        min_q = settings.signal_min_quality_score
-                        if min_q is not None:
-                            qs = signal.payload.get("quality_score")
-                            if isinstance(qs, int) and qs < min_q:
-                                logger.info(
-                                    "Skip signal below quality floor: %s "
-                                    "quality_score=%s min=%s",
-                                    signal.signal_type,
-                                    qs,
-                                    min_q,
-                                )
-                                continue
-                        delivered.append(signal)
-                    for signal in delivered:
+                        signal = delivery_policy.apply(signal)
+                        stored.append(signal)
+                        if signal.payload.get("delivery_status") == DELIVERY_DELIVERED:
+                            outbound.append(signal)
+                    for signal in stored:
                         signal_store.insert_signal(signal)
                         out_val: Any = (
                             signal
@@ -227,6 +230,7 @@ def main() -> None:
                             value=out_val,
                         )
                         logger.info("%s", signal.summary)
+                    for signal in outbound:
                         if webhook_sink.enabled:
                             try:
                                 webhook_sink.send(signal)
@@ -238,9 +242,9 @@ def main() -> None:
                             except Exception:
                                 logger.exception("Failed to send Telegram alert")
                     observe_message(event_type=event.event_type, outcome="ok")
-                    if delivered:
+                    if stored:
                         observe_signals(
-                            [s.signal_type for s in delivered]
+                            [s.signal_type for s in stored]
                         )
                     if redis_flush_iv > 0 and settings.redis_url:
                         now_mono = time.monotonic()

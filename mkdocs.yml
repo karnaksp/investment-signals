@@ -58,6 +58,8 @@ nav:
   - Оркестрация (Dagster): orchestration.md
   - Аналитика сигналов (SQL): signal_analytics.md
   - Решение проблем: troubleshooting.md
+  - Signal Cockpit: admin_cockpit.md
+  - Research log: research_log.md
   - HTTP API (Swagger): openapi.md
   - Код (автодок):
       - Обзор модулей: reference/overview.md

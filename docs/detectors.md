@@ -16,7 +16,9 @@
 
 Отдельно: сигнал **комбо** использует свои интервалы свежести и cooldown (`combo_*`), см. ниже.
 
-Опционально в рантайме детектора: переменная окружения **`SIGNAL_MIN_QUALITY_SCORE`** — не публиковать сигнал в Postgres/Kafka и не отправлять webhook/Telegram, если после обогащения **`quality_score`** ниже порога (эвристика в `signal_quality.py`).
+Опционально в рантайме детектора: delivery policy (`SIGNAL_DELIVERY_*`) решает, отправлять ли сигнал во внешний webhook/Telegram. В Postgres/Kafka записываются все обогащённые сигналы; в payload добавляются `delivery_status`, `delivery_reason` и `delivery_rule`.
+
+Текущий Telegram-gate намеренно строже записи в хранилище: `volume_spike` и `trade_rate_spike` требуют качества и z-score одновременно, `price_jump` требует extreme quality/z или подтверждения nearby trade activity, а standalone liquidity-сигналы подавляются без соседнего volume/trade/combo. `SIGNAL_DELIVERY_MAX_PER_HOUR` и `SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS` проверяются по Postgres history и in-memory state, поэтому рестарт detector не сбрасывает throttle.
 
 ## Источники данных (типы событий потока)
 

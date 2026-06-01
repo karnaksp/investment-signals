@@ -112,8 +112,8 @@ services:
           --set segment.bytes=16777216 \
           --no-confirm
         # Дублируем «лёгкие» для RAM настройки без рестарта (на случай уже существующего кластера в volume).
-        rpk -X brokers=redpanda:9092 cluster config set release_cache_on_segment_roll true
-        rpk -X brokers=redpanda:9092 cluster config set readers_cache_target_max_size ${REDPANDA_READERS_CACHE_TARGET_MAX_SIZE:-32}
+        rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set release_cache_on_segment_roll true
+        rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set readers_cache_target_max_size ${REDPANDA_READERS_CACHE_TARGET_MAX_SIZE:-32}
 
   # Веб-консоль для просмотра топиков и сообщений (опционально).
   redpanda-console:
@@ -422,6 +422,7 @@ services:
       # Горячая перезагрузка Python при изменении смонтированного пакета.
       TINVEST_API_RELOAD: "1"
     volumes:
+      - ./conf:/app/conf:ro
       - ./var/accuracy:/app/var/accuracy:ro
       # Код и статика админки с хоста → без docker compose build после правок UI.
       - ./src/tinvest_signal_engine:/usr/local/lib/python3.12/site-packages/tinvest_signal_engine:ro

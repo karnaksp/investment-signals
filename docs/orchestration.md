@@ -1,6 +1,6 @@
 # Оркестрация: Dagster в Docker Compose
 
-Периодические задачи выполняет **Dagster** (веб-интерфейс + `dagster-daemon`), а не отдельный бесконечный `threshold-cron`. Код расположения: [`orchestration_defs.py`](../src/tinvest_signal_engine/orchestration_defs.py).
+Периодические задачи выполняет **Dagster** (веб-интерфейс + `dagster-daemon`), а не отдельный бесконечный `threshold-cron`. Код расположен в `src/tinvest_signal_engine/orchestration_defs.py`.
 
 ## Что запускается по умолчанию
 

@@ -2,982 +2,884 @@
   "use strict";
 
   const TOKEN_KEY = "tinvest_admin_token";
+  const app = document.getElementById("app");
   const state = {
-    minutes: 0,
-    minq: "",
-    signalType: "",
+    token: localStorage.getItem(TOKEN_KEY) || "",
+    minutes: localStorage.getItem("tinvest_admin_minutes") || "1440",
+    auto: localStorage.getItem("tinvest_admin_auto") !== "0",
     offset: 0,
-    limit: 40,
+    filters: {
+      instrument: "",
+      type: "",
+      delivery: "",
+      qmin: "",
+      qmax: "",
+      feedback: "",
+      severity: "",
+    },
   };
-  const charts = {};
 
-  function getToken() {
-    return (localStorage.getItem(TOKEN_KEY) || "").trim();
-  }
-  function setToken(v) {
-    localStorage.setItem(TOKEN_KEY, (v || "").trim());
-  }
+  const nav = [
+    ["triage", "Triage", "TR"],
+    ["signals", "Signals", "SG"],
+    ["delivery", "Delivery", "DL"],
+    ["calibration", "Calibration", "CL"],
+    ["instruments", "Instruments", "IN"],
+    ["accuracy", "Accuracy", "AC"],
+    ["settings", "Settings", "ST"],
+  ];
 
-  function parseHash() {
-    const raw = (location.hash || "#/overview").replace(/^#/, "");
-    const [pathPart, queryPart] = raw.split("?");
-    const name = (pathPart || "/overview").replace(/^\//, "") || "overview";
-    const q = new URLSearchParams(queryPart || "");
-    return { name, q };
-  }
-
-  function readUrlState() {
-    const u = new URL(location.href);
-    if (u.searchParams.has("minutes"))
-      state.minutes = parseInt(u.searchParams.get("minutes"), 10) || 0;
-    if (u.searchParams.has("minq")) state.minq = u.searchParams.get("minq") || "";
-    if (u.searchParams.has("type")) state.signalType = u.searchParams.get("type") || "";
-    if (u.searchParams.has("offset"))
-      state.offset = parseInt(u.searchParams.get("offset"), 10) || 0;
+  function route() {
+    const raw = (location.hash || "#/triage").replace(/^#/, "") || "/triage";
+    const u = new URL(raw, location.origin);
+    return {
+      name: (u.pathname.replace(/^\/+/, "") || "triage").toLowerCase(),
+      params: u.searchParams,
+    };
   }
 
-  function writeUrlState() {
-    const u = new URL(location.href);
-    u.searchParams.set("minutes", String(state.minutes));
-    if (state.minq) u.searchParams.set("minq", state.minq);
-    else u.searchParams.delete("minq");
-    if (state.signalType) u.searchParams.set("type", state.signalType);
-    else u.searchParams.delete("type");
-    if (state.offset) u.searchParams.set("offset", String(state.offset));
-    else u.searchParams.delete("offset");
-    history.replaceState(null, "", u.pathname + u.search + location.hash);
-  }
-
-  async function api(path, opts) {
-    const tok = getToken();
-    if (!tok) throw new Error("Нет токена: введите ADMIN_API_TOKEN в шапке и «Сохранить».");
-    const url = path.startsWith("http") ? path : new URL(path, location.origin).toString();
-    const headers = Object.assign(
-      { "X-Admin-Token": tok, Accept: "application/json" },
-      (opts && opts.headers) || {}
-    );
-    const r = await fetch(url, Object.assign({}, opts, { headers }));
-    if (!r.ok) {
-      let msg = r.statusText;
-      try {
-        const j = await r.json();
-        msg = j.detail || msg;
-      } catch (e) {}
-      throw new Error(msg);
-    }
-    if (opts && opts.parse === "blob") return r.blob();
-    const ct = r.headers.get("content-type") || "";
-    if (ct.includes("application/json")) return r.json();
-    return r.text();
-  }
-
-  function destroyCharts() {
-    Object.keys(charts).forEach((k) => {
-      if (charts[k]) {
-        charts[k].destroy();
-        charts[k] = null;
-      }
-    });
-  }
-
-  function esc(s) {
-    return String(s == null ? "" : s)
+  function esc(value) {
+    return String(value == null ? "" : value)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
 
-  /** Ссылки как в terminal_links.py (веб-терминал + каталог). */
-  function terminalSearchUrl(ticker) {
-    const t = String(ticker || "").trim().toUpperCase();
-    if (!t) return "https://www.tbank.ru/terminal/";
-    return "https://www.tbank.ru/terminal/?search=" + encodeURIComponent(t);
+  function n(value, digits) {
+    if (value == null || value === "") return "—";
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "—";
+    return num.toLocaleString("ru-RU", {
+      maximumFractionDigits: digits == null ? 1 : digits,
+    });
   }
 
-  function investInstrumentUrl(ticker, classCode) {
-    const t = String(ticker || "").trim().toUpperCase();
-    const cc = String(classCode || "").trim().toUpperCase();
-    const base = "https://www.tbank.ru/invest";
-    if (!t) return terminalSearchUrl("");
-    if (cc === "SPBFUT") return base + "/futures/" + encodeURIComponent(t) + "/";
-    if (
-      ["TQBR", "TQTF", "TQTD", "TQTE", "TQCB", "TQOB"].indexOf(cc) !== -1
-    ) {
-      if (cc === "TQTF") return base + "/etfs/" + encodeURIComponent(t) + "/";
-      return base + "/stocks/" + encodeURIComponent(t) + "/";
-    }
-    return terminalSearchUrl(ticker);
+  function pct(value) {
+    const num = Number(value || 0);
+    if (!Number.isFinite(num)) return "—";
+    return (num * 100).toFixed(1) + "%";
   }
 
-  function tickerCellHtml(ticker, classCode) {
-    const href = esc(investInstrumentUrl(ticker, classCode));
-    return (
-      '<a class="ticker-link" href="' +
-      href +
-      '" target="_blank" rel="noopener noreferrer" title="Открыть в Т‑Инвестиции / терминале"><code>' +
-      esc(ticker) +
-      "</code></a>"
-    );
+  function shortTime(value) {
+    if (!value) return "—";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   }
 
-  function createChart(canvas, config) {
-    if (!canvas || typeof window.Chart !== "function") return null;
+  function params(obj) {
+    const qs = new URLSearchParams();
+    Object.entries(obj).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && String(v).trim() !== "") {
+        qs.set(k, String(v).trim());
+      }
+    });
+    const s = qs.toString();
+    return s ? "?" + s : "";
+  }
+
+  async function api(path, options) {
+    const res = await fetch(path, {
+      ...(options || {}),
+      headers: {
+        "X-Admin-Token": state.token,
+        ...((options && options.headers) || {}),
+      },
+    });
+    const text = await res.text();
+    let body = null;
     try {
-      return new window.Chart(canvas, config);
-    } catch (e) {
-      console.error("Chart init failed", e);
-      return null;
+      body = text ? JSON.parse(text) : null;
+    } catch (_) {
+      body = text;
     }
+    if (!res.ok) {
+      const detail = body && body.detail ? body.detail : text || res.statusText;
+      throw new Error(detail);
+    }
+    return body;
   }
 
-  function qClass(q) {
-    if (q == null || isNaN(q)) return "";
-    if (q >= 70) return "q-high";
-    if (q >= 45) return "q-mid";
-    return "q-low";
+  function badge(text, cls) {
+    return `<span class="badge ${cls || ""}">${esc(text)}</span>`;
   }
 
-  function chartScales() {
-    const tick = "#a1a1aa";
-    const grid = "rgba(63, 63, 70, 0.55)";
-    return {
-      x: { ticks: { color: tick, maxRotation: 45 }, grid: { color: grid } },
-      y: { ticks: { color: tick }, grid: { color: grid } },
-    };
+  function deliveryBadge(status) {
+    const s = status || "unknown";
+    return badge(s, s === "delivered" ? "b-delivered" : s === "suppressed" ? "b-suppressed" : "b-unknown");
   }
 
-  function chartLegendOpts() {
-    return { labels: { color: "#d4d4d8", boxWidth: 10, padding: 12 } };
+  function qualityBadge(score) {
+    if (score == null || score === "") return badge("q —", "b-unknown");
+    const q = Number(score);
+    const cls = q >= 72 ? "b-high" : q >= 48 ? "b-medium" : "b-low";
+    return badge("q " + Math.round(q), cls);
   }
 
-  function navLink(route, label) {
-    const h = location.hash || "#/overview";
-    const active = h.indexOf("#/" + route) === 0 ? "active" : "";
-    return `<a class="${active}" href="#/${route}">${esc(label)}</a>`;
+  function severityBadge(sev) {
+    const s = Number(sev || 0);
+    return badge("S" + (s || "—"), s >= 3 ? "b-sev3" : s === 2 ? "b-sev2" : "");
   }
 
-  function shell(inner) {
-    const tok = getToken();
-    return `
-      <div class="layout">
-        <aside class="sidebar">
-          <div class="sidebar-brand">
-            <span class="brand-mark" aria-hidden="true">◇</span>
-            <div class="brand-text">
-              <strong>Сигналы</strong>
-              <div class="brand-sub">панель управления</div>
+  function signalScore(row) {
+    const p = row.payload || {};
+    const q = Number(p.quality_score || 0);
+    const delivered = (row.delivery_status || p.delivery_status) === "delivered" ? 100 : 0;
+    return delivered + q + Number(row.severity || 0) * 8 + Math.abs(Number(row.z_score || 0));
+  }
+
+  function renderShell(active) {
+    app.className = "";
+    app.innerHTML = `
+      <div class="shell">
+        <aside class="side">
+          <div class="brand">
+            <div class="brand-mark">SC</div>
+            <div>
+              <div class="brand-title">Signal Cockpit</div>
+              <div class="brand-sub">T-Invest anomaly desk</div>
             </div>
           </div>
-          <h2>Разделы</h2>
-          <nav class="sidebar-nav">
-            ${navLink("overview", "Обзор")}
-            ${navLink("table", "Таблица")}
-            ${navLink("catalog", "Типы сигналов")}
-            ${navLink("tickers", "Тикеры")}
-            ${navLink("quality", "Качество")}
-            ${navLink("slices", "Разрезы")}
-            ${navLink("accuracy", "Точность (JSON)")}
-            ${navLink("unary", "Unary API")}
+          <nav class="nav">
+            ${nav.map(([id, label, glyph]) => `
+              <a href="#/${id}" class="${id === active ? "active" : ""}">
+                <span class="glyph">${glyph}</span><span>${label}</span>
+              </a>
+            `).join("")}
           </nav>
-          <div class="sidebar-token">
-            <h2>Доступ</h2>
-            <input type="password" id="admTok" placeholder="ADMIN_API_TOKEN" value="${esc(tok)}" autocomplete="off" />
-            <button type="button" id="admSaveTok">Сохранить токен</button>
+          <div class="side-footer">
+            <label for="tokenInput">Admin token</label>
+            <input id="tokenInput" type="password" value="${esc(state.token)}" autocomplete="off" />
+            <button id="saveToken" class="primary">Save token</button>
           </div>
         </aside>
-        <main class="main-panel">
-          <div class="toolbar toolbar-card">
-            <div class="field">
-              <label for="fMin">Период</label>
-              <select id="fMin">
-                <option value="0">Всё время</option>
-                <option value="60">60 мин</option>
-                <option value="360">6 ч</option>
-                <option value="1440">24 ч</option>
-                <option value="4320">3 дня</option>
-                <option value="10080">7 дней</option>
+        <main class="main">
+          <div class="topbar">
+            <div class="topbar-left">
+              <span class="status-dot"></span>
+              <span class="status-text"><strong>${esc(activeLabel(active))}</strong> · ${esc(periodLabel())}</span>
+            </div>
+            <div class="topbar-right">
+              <select id="periodSelect" title="Период">
+                ${periodOption("60", "1h")}
+                ${periodOption("360", "6h")}
+                ${periodOption("1440", "24h")}
+                ${periodOption("10080", "7d")}
+                ${periodOption("0", "All")}
               </select>
-            </div>
-            <div class="field">
-              <label for="fMq">Мин. оценка</label>
-              <input id="fMq" type="number" min="0" max="100" step="1" placeholder="—" style="width:5.5rem" />
-            </div>
-            <div class="field">
-              <label for="fTy">Тип сигнала</label>
-              <input id="fTy" type="text" placeholder="напр. volume_spike" style="width:11rem" />
-            </div>
-            <div class="field field-actions">
-              <button type="button" id="fApply">Применить</button>
-              <button type="button" class="ghost" id="fCsv">Экспорт CSV</button>
+              <label class="toggle"><input id="autoRefresh" type="checkbox" ${state.auto ? "checked" : ""} /> auto</label>
+              <button id="refreshBtn" class="icon" title="Refresh">R</button>
             </div>
           </div>
-          <div id="mainInner" class="main-inner">${inner}</div>
+          <section id="view" class="view"></section>
         </main>
-      </div>`;
-  }
-
-  function syncFiltersFromState() {
-    const sm = document.getElementById("fMin");
-    const mq = document.getElementById("fMq");
-    const ty = document.getElementById("fTy");
-    if (sm) sm.value = String(state.minutes);
-    if (mq) mq.value = state.minq;
-    if (ty) ty.value = state.signalType;
-  }
-
-  function bindShellHandlers() {
-    document.getElementById("admSaveTok").onclick = () => {
-      setToken(document.getElementById("admTok").value);
-      alert("Токен сохранён в localStorage.");
+      </div>
+    `;
+    document.getElementById("saveToken").onclick = () => {
+      state.token = document.getElementById("tokenInput").value.trim();
+      localStorage.setItem(TOKEN_KEY, state.token);
+      loadCurrent();
     };
-    document.getElementById("fApply").onclick = () => {
-      state.minutes = parseInt(document.getElementById("fMin").value, 10) || 0;
-      state.minq = document.getElementById("fMq").value.trim();
-      state.signalType = document.getElementById("fTy").value.trim();
+    document.getElementById("periodSelect").onchange = (e) => {
+      state.minutes = e.target.value;
+      localStorage.setItem("tinvest_admin_minutes", state.minutes);
       state.offset = 0;
-      writeUrlState();
-      route();
+      loadCurrent();
     };
-    document.getElementById("fCsv").onclick = downloadCsv;
-    syncFiltersFromState();
-  }
-
-  async function downloadCsv() {
-    try {
-      const qs = new URLSearchParams();
-      qs.set("minutes", String(state.minutes));
-      if (state.minq) qs.set("min_quality", state.minq);
-      if (state.signalType) qs.set("signal_type", state.signalType);
-      const url =
-        location.origin + "/admin/api/signals/export.csv?" + qs.toString();
-      const r = await fetch(url, { headers: { "X-Admin-Token": getToken() } });
-      if (!r.ok) throw new Error(await r.text());
-      const blob = await r.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "signals_export.csv";
-      a.click();
-      URL.revokeObjectURL(a.href);
-    } catch (e) {
-      alert(String(e.message || e));
-    }
-  }
-
-  function renderHeatmap(cells) {
-    const grid = {};
-    cells.forEach((c) => {
-      grid[c.dow + "_" + c.hod] = Number(c.c) || 0;
-    });
-    const max = Math.max(1, ...cells.map((c) => Number(c.c) || 0));
-    const dows = [1, 2, 3, 4, 5, 6, 7];
-    const dnames = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-    let h = '<table class="heatmap"><thead><tr><th></th>';
-    for (let hour = 0; hour < 24; hour++) h += "<th>" + hour + "</th>";
-    h += "</tr></thead><tbody>";
-    dows.forEach((d, idx) => {
-      h += "<tr><th>" + dnames[idx] + "</th>";
-      for (let hour = 0; hour < 24; hour++) {
-        const v = grid[d + "_" + hour] || 0;
-        const r = Math.min(3, Math.ceil((v / max) * 3));
-        h += '<td class="hm' + r + '" title="' + v + '">' + (v || "") + "</td>";
-      }
-      h += "</tr>";
-    });
-    h +=
-      '</tbody></table><p class="lead" style="font-size:0.8rem;color:var(--muted);margin-top:0.75rem">День недели × час UTC (ISO).</p>';
-    return '<div class="heatmap-wrap">' + h + "</div>";
-  }
-
-  async function pageOverview() {
-    destroyCharts();
-    const ov = await api(
-      "/admin/api/overview?minutes=" + encodeURIComponent(state.minutes)
-    );
-    let sl = {
-      rapid_followups_within_5m: 0,
-      total_signals: 0,
-      rapid_followup_rate: 0,
-      heatmap_utc: [],
+    document.getElementById("autoRefresh").onchange = (e) => {
+      state.auto = e.target.checked;
+      localStorage.setItem("tinvest_admin_auto", state.auto ? "1" : "0");
     };
-    try {
-      sl = await api(
-        "/admin/api/slices?minutes=" + encodeURIComponent(state.minutes)
-      );
-    } catch (e) {
-      console.warn("slices", e);
-    }
-    const t = ov.totals || {};
-    const fmt = (x) =>
-      x == null || isNaN(x) ? "—" : Number(x).toFixed(1);
-    let cmp = "";
-    if (ov.compare_windows) {
-      const c = ov.compare_windows.current;
-      const p = ov.compare_windows.previous;
-      cmp = `<div class="msg info">Сравнение окон (${ov.compare_windows.window_minutes} мин): сейчас <b>${c.total}</b> сигн., ср.оценка ${fmt(c.avg_quality)}; ранее <b>${p.total}</b>, ср.оценка ${fmt(p.avg_quality)}</div>`;
-    }
-    const inner =
-      cmp +
-      `<div class="page-head"><h1>Обзор</h1>
-      <p class="lead">Сводка сигналов за выбранный период: объёмы, типы, тикеры и распределение оценки.</p></div><div class="kpis">
-      <div class="kpi"><div class="l">Всего</div><div class="v">${t.total ?? 0}</div></div>
-      <div class="kpi"><div class="l">Средняя оценка</div><div class="v">${fmt(t.avg_quality)}</div></div>
-      <div class="kpi"><div class="l">Медиана</div><div class="v">${fmt(t.median_quality)}</div></div>
-      <div class="kpi"><div class="l">Первый</div><div class="v" style="font-size:0.85rem">${esc((t.first_detected_at || "—").slice(0, 19))}</div></div>
-      <div class="kpi"><div class="l">Последний</div><div class="v" style="font-size:0.85rem">${esc((t.last_detected_at || "—").slice(0, 19))}</div></div>
-    </div>
-    <p class="lead" style="font-size:0.875rem;color:var(--muted);margin:0 0 1rem">Повторы за 5 мин по тому же инструменту: <b>${sl.rapid_followups_within_5m}</b> из ${sl.total_signals} (<b>${(sl.rapid_followup_rate * 100).toFixed(2)}%</b>)</p>
-    <div class="charts">
-      <div class="chart-wrap"><h3>Динамика</h3><canvas id="cTime"></canvas></div>
-      <div class="chart-wrap"><h3>По типу</h3><canvas id="cType"></canvas></div>
-    </div>
-    <div class="charts">
-      <div class="chart-wrap"><h3>Серьёзность</h3><canvas id="cSev"></canvas></div>
-      <div class="chart-wrap"><h3>Топ тикеров</h3><canvas id="cTick"></canvas></div>
-    </div>
-    <div class="chart-wrap" style="height:220px"><h3>Оценка (корзины)</h3><canvas id="cQual"></canvas></div>`;
-    document.getElementById("app").innerHTML = shell(inner);
-    bindShellHandlers();
-    if (!t.total) {
-      document.getElementById("mainInner").innerHTML +=
-        '<div class="msg warn">Нет данных за выбранный период.</div>';
-      return;
-    }
-    if (typeof window.Chart !== "function") {
-      document.querySelectorAll("#mainInner .chart-wrap").forEach(function (w) {
-        const c = w.querySelector("canvas");
-        if (c) c.style.display = "none";
-        const p = document.createElement("p");
-        p.className = "msg warn";
-        p.style.margin = "0.75rem";
-        p.textContent =
-          "Графики недоступны: не выполнился скрипт Chart.js (/admin/vendor/chart.umd.min.js). Обновите API и проверьте, что файл есть в образе.";
-        w.appendChild(p);
-      });
-      return;
-    }
-    const tl = ov.hourly || [];
-    const gran = ov.timeline_granularity || "hour";
-    const labels = tl.map((x) =>
-      gran === "day"
-        ? (x.bucket || "").slice(0, 10)
-        : (x.bucket || "").slice(5, 16).replace("T", " ")
-    );
-    const bs = chartScales();
-    charts.cTime = createChart(document.getElementById("cTime"), {
-      type: "bar",
-      data: {
-        labels,
-        datasets: [
-          {
-            label: "Сигналов",
-            data: tl.map((x) => x.signal_count),
-            backgroundColor: "rgba(56, 189, 248, 0.55)",
-            borderRadius: 4,
-          },
-          {
-            label: "Ср.оценка",
-            type: "line",
-            data: tl.map((x) =>
-              x.avg_quality == null ? null : Number(x.avg_quality)
-            ),
-            yAxisID: "y1",
-            borderColor: "#4ade80",
-            tension: 0.25,
-            borderWidth: 2,
-            fill: false,
-            pointRadius: 0,
-            pointHoverRadius: 4,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: chartLegendOpts() },
-        scales: {
-          x: bs.x,
-          y: Object.assign({}, bs.y, { position: "left" }),
-          y1: Object.assign({}, bs.y, {
-            position: "right",
-            grid: { drawOnChartArea: false },
-            min: 0,
-            max: 100,
-          }),
-        },
-      },
-    });
-    const bt = ov.by_type || [];
-    charts.cType = createChart(document.getElementById("cType"), {
-      type: "bar",
-      data: {
-        labels: bt.map((r) => r.signal_type),
-        datasets: [
-          {
-            label: "Кол-во",
-            data: bt.map((r) => r.signal_count),
-            backgroundColor: "rgba(167, 139, 250, 0.55)",
-            borderRadius: 4,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: chartLegendOpts() },
-        scales: { x: bs.x, y: bs.y },
-      },
-    });
-    const sev = ov.by_severity || [];
-    charts.cSev = createChart(document.getElementById("cSev"), {
-      type: "bar",
-      data: {
-        labels: sev.map((r) => "ур. " + r.severity),
-        datasets: [
-          {
-            label: "Кол-во",
-            data: sev.map((r) => r.signal_count),
-            backgroundColor: "rgba(74, 222, 128, 0.55)",
-            borderRadius: 4,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: chartLegendOpts() },
-        scales: { x: bs.x, y: bs.y },
-      },
-    });
-    const tk = ov.by_ticker || [];
-    charts.cTick = createChart(document.getElementById("cTick"), {
-      type: "bar",
-      data: {
-        labels: tk.map((r) => r.ticker),
-        datasets: [
-          {
-            label: "N",
-            data: tk.map((r) => r.signal_count),
-            backgroundColor: "rgba(251, 146, 60, 0.55)",
-            borderRadius: 4,
-          },
-        ],
-      },
-      options: {
-        indexAxis: "y",
-        responsive: true,
-        maintainAspectRatio: false,
-        onClick: function (_evt, elements, chart) {
-          if (!elements || !elements.length) return;
-          const ix = elements[0].index;
-          const tick = chart.data.labels[ix];
-          if (tick)
-            window.open(
-              terminalSearchUrl(String(tick)),
-              "_blank",
-              "noopener,noreferrer"
-            );
-        },
-        plugins: { legend: chartLegendOpts() },
-        scales: { x: bs.x, y: bs.y },
-      },
-    });
-    const qb = ov.quality_buckets || [];
-    const doughnutColors = [
-      "#3f3f46",
-      "#52525b",
-      "#71717a",
-      "#38bdf8",
-      "#4ade80",
-      "#fbbf24",
-      "#fb7185",
+    document.getElementById("refreshBtn").onclick = () => loadCurrent();
+  }
+
+  function periodOption(value, label) {
+    return `<option value="${value}" ${state.minutes === value ? "selected" : ""}>${label}</option>`;
+  }
+
+  function activeLabel(active) {
+    const item = nav.find((x) => x[0] === active);
+    return item ? item[1] : "Signal";
+  }
+
+  function periodLabel() {
+    return state.minutes === "0" ? "all time" : "last " + activePeriodShort();
+  }
+
+  function activePeriodShort() {
+    return state.minutes === "60" ? "1h" :
+      state.minutes === "360" ? "6h" :
+      state.minutes === "1440" ? "24h" :
+      state.minutes === "10080" ? "7d" : "all";
+  }
+
+  function view() {
+    return document.getElementById("view");
+  }
+
+  function authEmpty() {
+    view().innerHTML = `
+      <div class="page-head"><div><h1>Signal Cockpit</h1><p>Введите ADMIN_API_TOKEN в левой панели.</p></div></div>
+      <div class="empty">API защищён токеном. Токен хранится только в localStorage браузера.</div>
+    `;
+  }
+
+  function pageHead(title, sub, actionHtml) {
+    return `
+      <div class="page-head">
+        <div><h1>${esc(title)}</h1>${sub ? `<p>${esc(sub)}</p>` : ""}</div>
+        ${actionHtml || ""}
+      </div>
+    `;
+  }
+
+  function metrics(items) {
+    return `<div class="metrics">${items.map((m) => `
+      <div class="metric">
+        <div class="label">${esc(m.label)}</div>
+        <div class="value">${m.value}</div>
+        <div class="hint">${esc(m.hint || "")}</div>
+      </div>
+    `).join("")}</div>`;
+  }
+
+  function table(headers, rows, emptyText) {
+    if (!rows.length) return `<div class="empty">${esc(emptyText || "Нет данных")}</div>`;
+    return `
+      <div class="table-wrap">
+        <table>
+          <thead><tr>${headers.map((h) => `<th class="${h.cls || ""}">${esc(h.label)}</th>`).join("")}</tr></thead>
+          <tbody>${rows.join("")}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function signalRow(row) {
+    const p = row.payload || {};
+    const status = row.delivery_status || p.delivery_status || "unknown";
+    const reason = row.delivery_reason || p.delivery_reason || "unknown";
+    return `
+      <tr>
+        <td class="mono">${shortTime(row.detected_at)}</td>
+        <td><a href="#/signal?id=${encodeURIComponent(row.signal_id)}"><strong>${esc(row.ticker)}</strong></a><div class="muted">${esc(row.instrument_id)}</div></td>
+        <td><span class="clip">${esc(row.signal_type)}</span></td>
+        <td>${deliveryBadge(status)}<div class="muted clip">${esc(reason)}</div></td>
+        <td>${qualityBadge(p.quality_score)}</td>
+        <td>${severityBadge(row.severity)}</td>
+        <td class="num">${n(row.z_score, 2)}</td>
+        <td class="clip">${esc((row.summary || "").split("\n")[0])}</td>
+      </tr>
+    `;
+  }
+
+  async function pageTriage() {
+    const [ov, delivery, signals] = await Promise.all([
+      api("/admin/api/overview" + params({ minutes: state.minutes })),
+      api("/admin/api/delivery/overview" + params({ minutes: state.minutes })),
+      api("/admin/api/signals" + params({ minutes: state.minutes, limit: 40 })),
+    ]);
+    const totals = delivery.totals || {};
+    const all = totals.total || 0;
+    const ranked = (signals.items || []).slice().sort((a, b) => signalScore(b) - signalScore(a)).slice(0, 14);
+    const last = (ov.totals || {}).last_detected_at;
+    view().innerHTML = `
+      ${pageHead("Triage", "Очередь внимания, доставка и шум за выбранный период.")}
+      ${metrics([
+        { label: "Generated", value: n(all, 0), hint: "saved signals" },
+        { label: "Delivered", value: n(totals.delivered, 0), hint: pct(totals.delivery_rate) },
+        { label: "Suppressed", value: n(totals.suppressed, 0), hint: "visible in cockpit" },
+        { label: "Last signal", value: shortTime(last), hint: "exchange stream" },
+      ])}
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Priority Queue</h2><a href="#/signals">Open table</a></div>
+          ${table(priorityHeaders(), ranked.map(priorityRow), "Нет сигналов за период")}
+        </section>
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-head"><h2>Delivery Funnel</h2></div>
+            <div class="panel-body">${deliveryFunnel(totals)}</div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Suppressed Reasons</h2><a href="#/delivery">Details</a></div>
+            <div class="panel-body">${reasonBars(delivery.reasons || [])}</div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Hot Tickers</h2><a href="#/instruments">All</a></div>
+            ${tickerTable(delivery.by_ticker || [], 8)}
+          </section>
+        </div>
+      </div>
+    `;
+  }
+
+  function signalHeaders() {
+    return [
+      { label: "Time" },
+      { label: "Ticker" },
+      { label: "Type" },
+      { label: "Delivery" },
+      { label: "Quality" },
+      { label: "Sev" },
+      { label: "z", cls: "num" },
+      { label: "Summary" },
     ];
-    charts.cQual = createChart(document.getElementById("cQual"), {
-      type: "doughnut",
-      data: {
-        labels: qb.map((r) => r.bucket_label),
-        datasets: [
-          {
-            data: qb.map((r) => r.signal_count),
-            backgroundColor: qb.map(
-              (_, i) => doughnutColors[i % doughnutColors.length]
-            ),
-            borderWidth: 2,
-            borderColor: "#18181b",
-            hoverOffset: 6,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        cutout: "58%",
-        plugins: {
-          legend: Object.assign({ position: "right" }, chartLegendOpts()),
-        },
-      },
-    });
   }
 
-  async function pageTable() {
-    destroyCharts();
-    let qs =
-      "?minutes=" +
-      encodeURIComponent(state.minutes) +
-      "&limit=" +
-      state.limit +
-      "&offset=" +
-      state.offset;
-    if (state.minq) qs += "&min_quality=" + encodeURIComponent(state.minq);
-    if (state.signalType) qs += "&signal_type=" + encodeURIComponent(state.signalType);
-    const data = await api("/admin/api/signals" + qs);
+  function priorityHeaders() {
+    return [
+      { label: "Time" },
+      { label: "Ticker" },
+      { label: "Type" },
+      { label: "Delivery" },
+      { label: "Quality" },
+      { label: "z", cls: "num" },
+    ];
+  }
+
+  function priorityRow(row) {
+    const p = row.payload || {};
+    const status = row.delivery_status || p.delivery_status || "unknown";
+    const reason = row.delivery_reason || p.delivery_reason || "unknown";
+    return `
+      <tr>
+        <td class="mono">${shortTime(row.detected_at)}</td>
+        <td><a href="#/signal?id=${encodeURIComponent(row.signal_id)}"><strong>${esc(row.ticker)}</strong></a><div class="muted">${esc(row.instrument_id)}</div></td>
+        <td><span class="clip">${esc(row.signal_type)}</span></td>
+        <td>${deliveryBadge(status)}<div class="muted clip">${esc(reason)}</div></td>
+        <td>${qualityBadge(p.quality_score)}</td>
+        <td class="num">${n(row.z_score, 2)}</td>
+      </tr>
+    `;
+  }
+
+  function deliveryFunnel(t) {
+    const total = Number(t.total || 0) || 1;
+    return barList([
+      ["delivered", Number(t.delivered || 0), total],
+      ["suppressed", Number(t.suppressed || 0), total],
+      ["unknown", Number(t.unknown || 0), total],
+    ]);
+  }
+
+  function reasonBars(rows) {
+    const filtered = rows.filter((r) => r.delivery_status !== "delivered").slice(0, 8);
+    const max = Math.max(1, ...filtered.map((r) => Number(r.signal_count || 0)));
+    return barList(filtered.map((r) => [r.delivery_reason, Number(r.signal_count || 0), max]));
+  }
+
+  function barList(rows) {
+    if (!rows.length) return `<div class="empty">Нет данных</div>`;
+    return `<div class="bar">${rows.map(([label, value, max]) => `
+      <div class="bar-row">
+        <div class="clip">${esc(label)}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Math.min(100, (Number(value) / Number(max || 1)) * 100))}%"></div></div>
+        <div class="num">${n(value, 0)}</div>
+      </div>
+    `).join("")}</div>`;
+  }
+
+  function tickerTable(rows, limit) {
+    const items = rows.slice(0, limit || 40);
+    return table(
+      [{ label: "Ticker" }, { label: "Total", cls: "num" }, { label: "Delivered", cls: "num" }, { label: "Rate", cls: "num" }],
+      items.map((r) => {
+        const total = Number(r.total || r.signal_count || 0);
+        const delivered = Number(r.delivered || 0);
+        return `<tr>
+          <td><strong>${esc(r.ticker)}</strong><div class="muted">${shortTime(r.last_detected_at)}</div></td>
+          <td class="num">${n(total, 0)}</td>
+          <td class="num">${n(delivered, 0)}</td>
+          <td class="num">${pct(total ? delivered / total : 0)}</td>
+        </tr>`;
+      }),
+      "Нет тикеров"
+    );
+  }
+
+  function sourceBadges(sources) {
+    const list = Array.isArray(sources) ? sources : [];
+    if (!list.length) return `<span class="muted">none</span>`;
+    return list.map((name) => badge(name)).join(" ");
+  }
+
+  function instrumentUniverseTable(rows) {
+    return table(
+      [
+        { label: "Instrument" },
+        { label: "Sources" },
+        { label: "Signals", cls: "num" },
+        { label: "Delivered", cls: "num" },
+        { label: "Rate", cls: "num" },
+        { label: "Avg q", cls: "num" },
+        { label: "Last" },
+      ],
+      rows.map((r) => {
+        const total = Number(r.total || 0);
+        const delivered = Number(r.delivered || 0);
+        return `<tr>
+          <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)} · ${esc(r.alias || "")}</div></td>
+          <td>${sourceBadges(r.sources)}<div class="muted">book ${esc((r.subscriptions || {}).order_book_depth || "off")}</div></td>
+          <td class="num">${n(total, 0)}</td>
+          <td class="num">${n(delivered, 0)}</td>
+          <td class="num">${pct(total ? delivered / total : 0)}</td>
+          <td class="num">${r.avg_quality == null ? "—" : n(r.avg_quality, 1)}</td>
+          <td>${shortTime(r.last_detected_at)}</td>
+        </tr>`;
+      }),
+      "Нет инструментов в конфиге"
+    );
+  }
+
+  async function pageSignals() {
+    const q = {
+      minutes: state.minutes,
+      limit: 50,
+      offset: state.offset,
+      instrument_id: state.filters.instrument,
+      signal_type: state.filters.type,
+      delivery_status: state.filters.delivery,
+      quality_min: state.filters.qmin,
+      quality_max: state.filters.qmax,
+      feedback: state.filters.feedback,
+      severity: state.filters.severity,
+    };
+    const data = await api("/admin/api/signals" + params(q));
+    const exportUrl = "/admin/api/signals/export.csv" + params({
+      ...q,
+      offset: "",
+      limit: "",
+    });
+    view().innerHTML = `
+      ${pageHead("Signals", "Плотная таблица всех сохранённых сигналов.", `<a href="${exportUrl}" target="_blank">Export CSV</a>`)}
+      <section class="panel">
+        ${filtersHtml()}
+        ${table(signalHeaders(), (data.items || []).map(signalRow), "Нет сигналов под фильтрами")}
+        <div class="pager">
+          <button id="prevPage">Prev</button>
+          <span class="mono">${n(state.offset + 1, 0)}-${n(Math.min(state.offset + 50, data.total || 0), 0)} / ${n(data.total, 0)}</span>
+          <button id="nextPage">Next</button>
+        </div>
+      </section>
+    `;
+    bindFilters();
+    document.getElementById("prevPage").onclick = () => {
+      state.offset = Math.max(0, state.offset - 50);
+      pageSignals().catch(showError);
+    };
+    document.getElementById("nextPage").onclick = () => {
+      if (state.offset + 50 < Number(data.total || 0)) {
+        state.offset += 50;
+        pageSignals().catch(showError);
+      }
+    };
+  }
+
+  function filtersHtml() {
+    return `
+      <div class="filters">
+        ${filterInput("instrument", "Instrument", "SBER_TQBR")}
+        ${filterInput("type", "Signal type", "volume_spike")}
+        <label>Delivery
+          <select id="f_delivery">
+            ${selectOption("", "any", state.filters.delivery)}
+            ${selectOption("delivered", "delivered", state.filters.delivery)}
+            ${selectOption("suppressed", "suppressed", state.filters.delivery)}
+            ${selectOption("unknown", "unknown", state.filters.delivery)}
+          </select>
+        </label>
+        ${filterInput("qmin", "Q min", "65")}
+        ${filterInput("qmax", "Q max", "100")}
+        <label>Feedback
+          <select id="f_feedback">
+            ${selectOption("", "any", state.filters.feedback)}
+            ${selectOption("useful", "useful", state.filters.feedback)}
+            ${selectOption("noise", "noise", state.filters.feedback)}
+            ${selectOption("unsure", "unsure", state.filters.feedback)}
+            ${selectOption("none", "none", state.filters.feedback)}
+          </select>
+        </label>
+        <label>Severity
+          <select id="f_severity">
+            ${selectOption("", "any", state.filters.severity)}
+            ${selectOption("1", "1", state.filters.severity)}
+            ${selectOption("2", "2", state.filters.severity)}
+            ${selectOption("3", "3", state.filters.severity)}
+          </select>
+        </label>
+        <div class="row"><button id="applyFilters" class="primary">Apply</button><button id="clearFilters">Clear</button></div>
+      </div>
+    `;
+  }
+
+  function filterInput(id, label, ph) {
+    return `<label>${esc(label)}<input id="f_${id}" value="${esc(state.filters[id])}" placeholder="${esc(ph)}" /></label>`;
+  }
+
+  function selectOption(value, label, current) {
+    return `<option value="${esc(value)}" ${String(current) === String(value) ? "selected" : ""}>${esc(label)}</option>`;
+  }
+
+  function bindFilters() {
+    document.getElementById("applyFilters").onclick = () => {
+      Object.keys(state.filters).forEach((k) => {
+        state.filters[k] = document.getElementById("f_" + k).value.trim();
+      });
+      state.offset = 0;
+      pageSignals().catch(showError);
+    };
+    document.getElementById("clearFilters").onclick = () => {
+      Object.keys(state.filters).forEach((k) => { state.filters[k] = ""; });
+      state.offset = 0;
+      pageSignals().catch(showError);
+    };
+  }
+
+  async function pageDelivery() {
+    const [overview, reasons, settings] = await Promise.all([
+      api("/admin/api/delivery/overview" + params({ minutes: state.minutes })),
+      api("/admin/api/delivery/reasons" + params({ minutes: state.minutes })),
+      api("/admin/api/settings"),
+    ]);
+    const t = overview.totals || {};
+    view().innerHTML = `
+      ${pageHead("Delivery", "Что ушло наружу, что подавлено и почему.")}
+      ${metrics([
+        { label: "Delivery rate", value: pct(t.delivery_rate), hint: n(t.delivered, 0) + " delivered" },
+        { label: "Suppressed", value: n(t.suppressed, 0), hint: "stored, not sent" },
+        { label: "Unknown", value: n(t.unknown, 0), hint: "old rows" },
+        { label: "Total", value: n(t.total, 0), hint: activePeriodShort() },
+      ])}
+      ${signalCatalogPanel(settings.signals)}
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Per Type</h2></div>
+          ${deliveryTypeTable(overview.by_type || [])}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Reasons</h2></div>
+          ${deliveryReasonTable(reasons.items || [])}
+        </section>
+      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>Recent Delivered</h2></div>
+        ${table(signalHeaders(), (overview.recent_delivered || []).map(signalRow), "Нет delivered сигналов")}
+      </section>
+    `;
+  }
+
+  function deliveryTypeTable(rows) {
+    return table(
+      [
+        { label: "Type" },
+        { label: "Total", cls: "num" },
+        { label: "Delivered", cls: "num" },
+        { label: "Suppressed", cls: "num" },
+        { label: "Rate", cls: "num" },
+        { label: "Avg q", cls: "num" },
+      ],
+      rows.map((r) => {
+        const total = Number(r.total || 0);
+        const delivered = Number(r.delivered || 0);
+        return `<tr>
+          <td class="clip">${esc(r.signal_type)}</td>
+          <td class="num">${n(total, 0)}</td>
+          <td class="num">${n(delivered, 0)}</td>
+          <td class="num">${n(r.suppressed, 0)}</td>
+          <td class="num">${pct(total ? delivered / total : 0)}</td>
+          <td class="num">${n(r.avg_quality, 1)}</td>
+        </tr>`;
+      }),
+      "Нет delivery статистики"
+    );
+  }
+
+  function deliveryReasonTable(rows) {
+    return table(
+      [
+        { label: "Reason" },
+        { label: "Status" },
+        { label: "Type" },
+        { label: "Count", cls: "num" },
+        { label: "Avg q", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td class="clip">${esc(r.delivery_reason)}</td>
+        <td>${deliveryBadge(r.delivery_status)}</td>
+        <td class="clip">${esc(r.signal_type)}</td>
+        <td class="num">${n(r.signal_count, 0)}</td>
+        <td class="num">${n(r.avg_quality, 1)}</td>
+      </tr>`),
+      "Нет причин"
+    );
+  }
+
+  function signalCatalogPanel(signals) {
+    const all = (signals && signals.types) || [];
+    const enabled = all.filter((r) => r.enabled);
+    const source = signals && signals.source_coverage ? signals.source_coverage : {};
+    const sourceHint = [
+      `trade ${n(source.trade, 0)}`,
+      `last ${n(source.last_price, 0)}`,
+      `book ${n(source.orderbook, 0)}`,
+      `info ${n(source.trading_status, 0)}`,
+    ].join(" · ");
+    return `<section class="panel">
+      <div class="panel-head">
+        <h2>Configured Detector Types</h2>
+        <span class="muted">${n(enabled.length, 0)} active / ${n(all.length, 0)} known · ${esc(sourceHint)}</span>
+      </div>
+      ${signalCatalogTable(all)}
+    </section>`;
+  }
+
+  function signalCatalogTable(rows) {
+    const sorted = (rows || []).slice().sort((a, b) => {
+      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+      return String(a.signal_type || "").localeCompare(String(b.signal_type || ""));
+    });
+    return table(
+      [
+        { label: "Type" },
+        { label: "State" },
+        { label: "Source", cls: "num" },
+        { label: "Config" },
+        { label: "Delivery rule" },
+      ],
+      sorted.map((r) => {
+        const cls = r.enabled ? "b-high" : r.reason === "source_not_subscribed" ? "b-medium" : "b-unknown";
+        const state = r.enabled ? "active" : (r.reason || "disabled");
+        return `<tr>
+          <td class="clip">${esc(r.signal_type)}</td>
+          <td>${badge(state, cls)}<div class="muted clip">${esc(r.scope || "")}</div></td>
+          <td class="num">${n(r.source_coverage, 0)}<div class="muted clip">${esc(r.source || "")}</div></td>
+          <td class="clip">${esc(r.config || "")}</td>
+          <td class="clip">${esc(r.delivery_rule || "")}</td>
+        </tr>`;
+      }),
+      "Нет каталога типов сигналов"
+    );
+  }
+
+  async function pageCalibration() {
+    const [data, settings] = await Promise.all([
+      api("/admin/api/calibration" + params({ minutes: state.minutes })),
+      api("/admin/api/settings"),
+    ]);
     const rows = data.items || [];
-    let tbl =
-      '<div class="page-head"><h1>Таблица</h1><p class="lead">Постраничный список сигналов с фильтрами из панели выше.</p></div><div class="table-card"><div class="table-scroll"><table class="data-table"><thead><tr><th>Время</th><th>Тикер</th><th class="td-wrap">Тип</th><th class="th-num">Sev</th><th class="th-num">Оценка</th><th class="th-num">|z|</th><th>Разметка</th><th></th></tr></thead><tbody>';
-    rows.forEach((row) => {
-      const p = row.payload || {};
-      const q = p.quality_score != null ? Math.round(Number(p.quality_score)) : null;
-      const fb = row.admin_feedback_label || "—";
-      const qc = qClass(q);
-      tbl +=
-        "<tr><td>" +
-        esc((row.detected_at || "").replace("T", " ").slice(0, 19)) +
-        "</td><td>" +
-        tickerCellHtml(row.ticker, row.class_code) +
-        '</td><td class="td-wrap">' +
-        esc(row.signal_type) +
-        '</td><td class="td-num">' +
-        esc(row.severity) +
-        '</td><td class="td-num' +
-        (qc ? " " + qc : "") +
-        '">' +
-        (q == null ? "—" : q) +
-        '</td><td class="td-num">' +
-        (row.z_score == null
-          ? "—"
-          : Math.abs(Number(row.z_score)).toFixed(2)) +
-        "</td><td>" +
-        esc(fb) +
-        '</td><td><a href="#/signal?id=' +
-        esc(row.signal_id) +
-        '">Открыть</a></td></tr>';
-    });
-    tbl +=
-      "</tbody></table></div>" +
-      '<div class="pager"><button class="ghost" id="pgP">Назад</button><span>' +
-      esc(
-        "Показано " +
-          rows.length +
-          " из " +
-          (data.total || 0) +
-          ", offset " +
-          state.offset
-      ) +
-      '</span><button class="ghost" id="pgN">Вперёд</button></div></div>';
-    document.getElementById("app").innerHTML = shell(tbl);
-    bindShellHandlers();
-    document.getElementById("pgP").onclick = () => {
-      state.offset = Math.max(0, state.offset - state.limit);
-      writeUrlState();
-      route();
-    };
-    document.getElementById("pgN").onclick = () => {
-      state.offset += state.limit;
-      writeUrlState();
-      route();
-    };
+    view().innerHTML = `
+      ${pageHead("Calibration", "Матрица качества, доставки и ручной разметки.")}
+      ${signalCatalogPanel(settings.signals)}
+      <section class="panel">
+        <div class="panel-head"><h2>Signal Type Matrix</h2></div>
+        ${calibrationTable(rows)}
+      </section>
+    `;
   }
 
-  async function pageCatalog() {
-    destroyCharts();
-    const ov = await api(
-      "/admin/api/overview?minutes=" + encodeURIComponent(state.minutes)
-    );
-    const bt = ov.by_type || [];
-    let h =
-      '<div class="page-head"><h1>Типы сигналов</h1><p class="lead">Агрегаты за выбранный период. Подробности — в docs/detectors.md</p></div><div class="table-card"><div class="table-scroll"><table class="data-table"><thead><tr><th class="td-wrap">Тип</th><th class="th-num">Кол-во</th><th class="th-num">Ср. оценка</th></tr></thead><tbody>';
-    bt.forEach((r) => {
-      h +=
-        '<tr><td class="td-wrap"><code>' +
-        esc(r.signal_type) +
-        '</code></td><td class="td-num">' +
-        r.signal_count +
-        '</td><td class="td-num">' +
-        (r.avg_quality == null ? "—" : Number(r.avg_quality).toFixed(1)) +
-        "</td></tr>";
-    });
-    h += "</tbody></table></div></div>";
-    document.getElementById("app").innerHTML = shell(h);
-    bindShellHandlers();
-  }
-
-  async function pageTickers() {
-    destroyCharts();
-    const ov = await api(
-      "/admin/api/overview?minutes=" + encodeURIComponent(state.minutes)
-    );
-    const tk = ov.by_ticker || [];
-    let h =
-      '<div class="page-head"><h1>Тикеры</h1><p class="lead">Сколько сигналов пришло по каждому тикеру за период.</p></div><div class="table-card"><div class="table-scroll"><table class="data-table"><thead><tr><th>Тикер</th><th class="th-num">Кол-во</th><th class="th-num">Ср. оценка</th></tr></thead><tbody>';
-    tk.forEach((r) => {
-      h +=
-        "<tr><td>" +
-        tickerCellHtml(r.ticker, "") +
-        '</td><td class="td-num">' +
-        r.signal_count +
-        '</td><td class="td-num">' +
-        (r.avg_quality == null ? "—" : Number(r.avg_quality).toFixed(1)) +
-        "</td></tr>";
-    });
-    h += "</tbody></table></div></div>";
-    document.getElementById("app").innerHTML = shell(h);
-    bindShellHandlers();
-  }
-
-  async function pageQuality() {
-    await pageOverview();
-    const inner = document.getElementById("mainInner");
-    if (!inner) return;
-    const h1 = inner.querySelector("h1");
-    if (h1) h1.textContent = "Качество и обзор";
-    inner.insertAdjacentHTML(
-      "afterbegin",
-      '<p class="msg info" style="margin-bottom:0.75rem">Оценка 0–100 в payload — <b>эвристика</b> (|z|, величина, severity, вес типа). Истинная полезность: раздел <a href="#/accuracy">Точность</a> (офлайн DuckDB) и разметка на карточке сигнала.</p>'
+  function calibrationTable(rows) {
+    return table(
+      [
+        { label: "Type" },
+        { label: "Tier" },
+        { label: "Delivery" },
+        { label: "Feedback" },
+        { label: "Count", cls: "num" },
+        { label: "Avg q", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td class="clip">${esc(r.signal_type)}</td>
+        <td>${badge(r.quality_tier, r.quality_tier === "high" ? "b-high" : r.quality_tier === "medium" ? "b-medium" : "b-low")}</td>
+        <td>${deliveryBadge(r.delivery_status)}</td>
+        <td>${badge(r.feedback || "none")}</td>
+        <td class="num">${n(r.signal_count, 0)}</td>
+        <td class="num">${n(r.avg_quality, 1)}</td>
+      </tr>`),
+      "Нет данных для калибровки"
     );
   }
 
-  async function pageSlices() {
-    destroyCharts();
-    const sl = await api(
-      "/admin/api/slices?minutes=" + encodeURIComponent(state.minutes)
-    );
-    const inner =
-      '<div class="page-head"><h1>Разрезы</h1>' +
-      '<p class="lead">Тепловая карта: день недели × час UTC. Метрика быстрых повторов — следующий сигнал по тому же инструменту в течение 5 минут.</p></div>' +
-      "<p><b>Всего сигналов:</b> " +
-      sl.total_signals +
-      ", <b>быстрых пар:</b> " +
-      sl.rapid_followups_within_5m +
-      " (<b>" +
-      (sl.rapid_followup_rate * 100).toFixed(2) +
-      "%</b>)</p>" +
-      renderHeatmap(sl.heatmap_utc || []);
-    document.getElementById("app").innerHTML = shell(inner);
-    bindShellHandlers();
+  async function pageInstruments() {
+    const data = await api("/admin/api/instruments" + params({ minutes: state.minutes }));
+    const items = data.items || [];
+    const totals = items.reduce((acc, row) => {
+      acc.signals += Number(row.total || 0);
+      acc.delivered += Number(row.delivered || 0);
+      return acc;
+    }, { signals: 0, delivered: 0 });
+    const coverage = data.source_coverage || {};
+    view().innerHTML = `
+      ${pageHead("Instruments", "Тикеры с частотой сигналов, качеством и delivery rate.")}
+      ${metrics([
+        { label: "Configured", value: n(data.count, 0), hint: "instruments.yaml" },
+        { label: "With signals", value: n(data.active_count, 0), hint: activePeriodShort() },
+        { label: "Signals", value: n(totals.signals, 0), hint: "stored" },
+        { label: "Delivered", value: n(totals.delivered, 0), hint: pct(totals.signals ? totals.delivered / totals.signals : 0) },
+        { label: "Orderbook", value: n(coverage.orderbook, 0), hint: "L2 subscriptions" },
+      ])}
+      <section class="panel">
+        <div class="panel-head"><h2>Configured Instruments</h2><span class="muted">Rows with 0 signals are still monitored</span></div>
+        ${instrumentUniverseTable(items)}
+      </section>
+    `;
   }
 
   async function pageAccuracy() {
-    destroyCharts();
-    let body = "";
     try {
-      const j = await api("/admin/api/accuracy");
-      body = "<pre class=json>" + esc(JSON.stringify(j, null, 2)) + "</pre>";
-    } catch (e) {
-      body =
-        '<div class="msg err">' +
-        esc(String(e.message || e)) +
-        "</div><p style=font-size:0.85rem;color:var(--muted)>Сгенерируйте JSON: <code>python scripts/duckdb_label_signals.py ...</code> и смонтируйте в контейнер api (<code>./var/accuracy</code>).</p>";
+      const data = await api("/admin/api/accuracy");
+      view().innerHTML = `
+        ${pageHead("Accuracy", "Офлайн JSON из duckdb_label_signals.")}
+        <section class="panel"><div class="panel-body"><pre class="json">${esc(JSON.stringify(data, null, 2))}</pre></div></section>
+      `;
+    } catch (err) {
+      view().innerHTML = `
+        ${pageHead("Accuracy", "Офлайн JSON из duckdb_label_signals.")}
+        <div class="empty">${esc(err.message)}</div>
+      `;
     }
-    document.getElementById("app").innerHTML = shell(
-      '<div class="page-head"><h1>Офлайн точность</h1><p class="lead">JSON из duckdb_label_signals (смонтированный файл).</p></div>' +
-        body
-    );
-    bindShellHandlers();
   }
 
-  const UNARY_IID_KEY = "tinvest_unary_last_instrument_id";
-
-  async function pageUnary() {
-    destroyCharts();
-    const savedIid = (localStorage.getItem(UNARY_IID_KEY) || "").trim();
-    let options = '<option value="">— выберите —</option>';
-    let loadErr = "";
-    try {
-      const list = await api("/admin/api/instruments");
-      (list.items || []).forEach((it) => {
-        const lab =
-          esc(String(it.ticker || "")) +
-          " / " +
-          esc(String(it.class_code || "")) +
-          " (" +
-          esc(String(it.instrument_id || "")) +
-          ")";
-        options +=
-          '<option value="' +
-          esc(String(it.instrument_id || "")) +
-          '">' +
-          lab +
-          "</option>";
-      });
-    } catch (e) {
-      loadErr =
-        '<div class="msg err">' + esc(String(e.message || e)) + "</div>";
-      options += '<option value="">(список недоступен)</option>';
-    }
-    document.getElementById("app").innerHTML = shell(
-      '<div class="page-head"><h1>Unary T‑Invest</h1><p class="lead">Снимки <code>GetMarketValues</code> и <code>GetTechAnalysis</code> по <code>conf/instruments.yaml</code> (не стрим). Нужны <code>TINVEST_TOKEN</code> в окружении API и сохранённый здесь <code>ADMIN_API_TOKEN</code>. Периодическая публикация в Kafka: сервис <code>market-unary-emitter</code> (<code>docker compose --profile unary</code>).</p></div>' +
-        loadErr +
-        '<details class="card" open style="margin-bottom:0.75rem"><summary style="cursor:pointer;font-weight:600">Инструмент</summary><div style="margin-top:0.75rem">' +
-        "<label>Из конфига</label><br/>" +
-        '<select id="unInstr" style="min-width:18rem;margin:0.35rem 0">' +
-        options +
-        "</select>" +
-        '<p style="font-size:0.85rem;color:var(--muted);margin:0.5rem 0 0.75rem">Или вручную <code>instrument_id</code> (сохраняется в localStorage):</p>' +
-        '<input id="unInstrManual" type="text" placeholder="например SBER_TQBR" style="width:100%;max-width:24rem" />' +
-        "</div></details>" +
-        '<details class="card" open style="margin-bottom:0.75rem"><summary style="cursor:pointer;font-weight:600">GetMarketValues</summary><div style="margin-top:0.75rem">' +
-        "<label>value_types (CSV, опционально)</label>" +
-        '<input id="unMvTypes" type="text" placeholder="last_price,open_interest,close_price" style="width:100%;max-width:28rem;margin:0.35rem 0;display:block" />' +
-        '<p><button type="button" id="unBtnMv">Загрузить рыночные значения</button></p></div></details>' +
-        '<details class="card" open style="margin-bottom:0.75rem"><summary style="cursor:pointer;font-weight:600">GetTechAnalysis</summary><div style="margin-top:0.75rem">' +
-        '<p style="display:flex;flex-wrap:wrap;gap:0.75rem;align-items:flex-end">' +
-        '<span class="field"><label>indicator</label><br/><select id="unTaInd"><option>rsi</option><option>ema</option><option>sma</option><option>bb</option><option>macd</option></select></span>' +
-        '<span class="field"><label>interval</label><br/><input id="unTaIv" type="text" value="1h" style="width:4rem" /></span>' +
-        '<span class="field"><label>type_of_price</label><br/><select id="unTaTop"><option>close</option><option>open</option><option>high</option><option>low</option><option>avg</option></select></span>' +
-        '<span class="field"><label>length</label><br/><input id="unTaLen" type="number" value="14" min="1" max="500" style="width:4.5rem" /></span>' +
-        '<span class="field"><label>window_min</label><br/><input id="unTaWin" type="number" value="1440" min="5" style="width:5rem" /></span></p>' +
-        '<p><button type="button" id="unBtnTa">Загрузить теханализ</button></p></div></details>' +
-        '<div class="card"><h3 style="margin-top:0">Ответ</h3>' +
-        '<p><button type="button" class="ghost" id="unCopyOut">Копировать JSON</button></p>' +
-        '<pre id="unOut" class="json" style="max-height:70vh;overflow:auto;margin:0">{}</pre></div>'
-    );
-    bindShellHandlers();
-    const sel = document.getElementById("unInstr");
-    const manual = document.getElementById("unInstrManual");
-    if (savedIid) {
-      manual.value = savedIid;
-      for (let i = 0; i < sel.options.length; i++) {
-        if (sel.options[i].value === savedIid) {
-          sel.selectedIndex = i;
-          break;
-        }
-      }
-    }
-    sel.addEventListener("change", function () {
-      if (sel.value) localStorage.setItem(UNARY_IID_KEY, sel.value);
-    });
-    manual.addEventListener("blur", function () {
-      const v = curIid();
-      if (v) localStorage.setItem(UNARY_IID_KEY, v);
-    });
-    function curIid() {
-      const m = (document.getElementById("unInstrManual").value || "").trim();
-      if (m) return m;
-      return (document.getElementById("unInstr").value || "").trim();
-    }
-    document.getElementById("unBtnMv").onclick = async () => {
-      const iid = curIid();
-      if (!iid) {
-        alert("Выберите инструмент или введите instrument_id");
-        return;
-      }
-      const vt = (document.getElementById("unMvTypes").value || "").trim();
-      let path =
-        "/admin/api/instruments/" +
-        encodeURIComponent(iid) +
-        "/market-values";
-      if (vt) path += "?" + new URLSearchParams({ value_types: vt }).toString();
-      const out = document.getElementById("unOut");
-      out.textContent = "Загрузка…";
-      try {
-        const j = await api(path);
-        out.textContent = JSON.stringify(j, null, 2);
-        localStorage.setItem(UNARY_IID_KEY, iid);
-      } catch (e) {
-        out.textContent = String(e.message || e);
-      }
-    };
-    document.getElementById("unCopyOut").onclick = async function () {
-      const t = document.getElementById("unOut").textContent || "";
-      try {
-        await navigator.clipboard.writeText(t);
-        alert("Скопировано в буфер обмена");
-      } catch (e) {
-        alert(String(e.message || e) || "Не удалось скопировать");
-      }
-    };
-    document.getElementById("unBtnTa").onclick = async () => {
-      const iid = curIid();
-      if (!iid) {
-        alert("Выберите инструмент или введите instrument_id");
-        return;
-      }
-      const qs = new URLSearchParams();
-      qs.set("indicator", document.getElementById("unTaInd").value);
-      qs.set("interval", document.getElementById("unTaIv").value.trim() || "1h");
-      qs.set("type_of_price", document.getElementById("unTaTop").value);
-      qs.set("length", String(document.getElementById("unTaLen").value || "14"));
-      qs.set(
-        "window_minutes",
-        String(document.getElementById("unTaWin").value || "1440")
-      );
-      const path =
-        "/admin/api/instruments/" +
-        encodeURIComponent(iid) +
-        "/tech-analysis?" +
-        qs.toString();
-      const out = document.getElementById("unOut");
-      out.textContent = "Загрузка…";
-      try {
-        const j = await api(path);
-        out.textContent = JSON.stringify(j, null, 2);
-        localStorage.setItem(UNARY_IID_KEY, iid);
-      } catch (e) {
-        out.textContent = String(e.message || e);
-      }
-    };
+  async function pageSettings() {
+    const data = await api("/admin/api/settings");
+    view().innerHTML = `
+      ${pageHead("Settings", "Read-only runtime configuration.")}
+      <div class="grid-3">
+        ${settingsPanel("Delivery", data.delivery)}
+        ${settingsPanel("Signals", data.signals)}
+        ${settingsPanel("Paths", data.paths)}
+        ${settingsPanel("Kafka", data.kafka)}
+      </div>
+    `;
   }
 
-  async function pageSignal() {
-    destroyCharts();
-    const { q } = parseHash();
-    const id = (q.get("id") || "").trim();
+  function settingsPanel(title, obj) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>${esc(title)}</h2></div>
+      <div class="panel-body"><pre class="json">${esc(JSON.stringify(obj || {}, null, 2))}</pre></div>
+    </section>`;
+  }
+
+  async function pageSignal(id) {
     if (!id) {
-      document.getElementById("app").innerHTML =
-        shell('<div class="msg err">Не указан id в hash: #/signal?id=UUID</div>');
-      bindShellHandlers();
+      view().innerHTML = `${pageHead("Signal", "")}<div class="empty">signal_id missing</div>`;
       return;
     }
     const row = await api("/admin/api/signal/" + encodeURIComponent(id));
     const p = row.payload || {};
-    const qv = p.quality_score;
-    const termU = p.terminal_url
-      ? String(p.terminal_url)
-      : "";
-    const invU = p.instrument_page_url
-      ? String(p.instrument_page_url)
-      : "";
-    let links = "";
-    if (termU || invU) {
-      links = '<div class="signal-meta" style="margin-top:0.5rem">';
-      if (termU)
-        links +=
-          '<span class="link-pill"><a href="' +
-          esc(termU) +
-          '" target="_blank" rel="noopener">Терминал</a></span> ';
-      if (invU)
-        links +=
-          '<span class="link-pill"><a href="' +
-          esc(invU) +
-          '" target="_blank" rel="noopener">Карточка</a></span>';
-      links += "</div>";
-    }
-    let fbForm =
-      '<div class="panel"><h3>Разметка</h3><p class="lead" style="margin-bottom:0.75rem">Текущая метка: <b>' +
-      esc(row.admin_feedback_label || "нет") +
-      "</b></p>" +
-      '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">' +
-      '<select id="fbLab"><option value="useful">Полезно</option><option value="noise">Шум</option><option value="unsure">Не уверен</option></select>' +
-      '<input id="fbNote" type="text" placeholder="Заметка" style="min-width:12rem;flex:1" />' +
-      '<button type="button" id="fbSend">Сохранить</button></div></div>';
-    let chBtn =
-      '<div class="panel"><h3>ClickHouse</h3><p class="lead" style="margin-bottom:0.65rem">Сырые события вокруг времени сигнала (±2 мин).</p>' +
-      '<button type="button" class="ghost" id="chLoad">Загрузить контекст</button>' +
-      '<pre id="chOut" class="json" style="display:none;margin-top:0.75rem"></pre></div>';
-    const card =
-      '<article class="signal-page">' +
-      '<div class="page-head"><h1>Сигнал</h1><p class="lead"><code>' +
-      esc(row.signal_id) +
-      "</code></p></div>" +
-      '<p style="margin:0 0 0.5rem;font-size:0.9rem">' +
-      tickerCellHtml(row.ticker, row.class_code) +
-      " · <code>" +
-      esc(row.signal_type) +
-      "</code></p>" +
-      '<div class="signal-summary">' +
-      esc(row.summary) +
-      "</div>" +
-      '<div class="signal-meta">' +
-      "<span>detected_at: <code>" +
-      esc(row.detected_at) +
-      "</code></span>" +
-      "<span>|z|: <code>" +
-      esc(row.z_score) +
-      "</code></span>" +
-      "<span>severity: <code>" +
-      esc(row.severity) +
-      "</code></span>" +
-      "<span>оценка: <code>" +
-      esc(qv != null ? String(qv) : "—") +
-      "</code></span></div>" +
-      links +
-      '<div class="panel"><h3>Payload</h3><pre class="json">' +
-      esc(JSON.stringify(p, null, 2)) +
-      "</pre></div>" +
-      fbForm +
-      chBtn +
-      "</article>";
-    document.getElementById("app").innerHTML = shell(card);
-    bindShellHandlers();
-    if (row.admin_feedback_label) {
-      const sel = document.getElementById("fbLab");
-      if (sel) sel.value = row.admin_feedback_label;
-    }
-    document.getElementById("fbNote").value = row.admin_feedback_note || "";
-    document.getElementById("fbSend").onclick = async () => {
-      try {
-        await api("/admin/api/feedback", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            signal_id: id,
-            label: document.getElementById("fbLab").value,
-            note: document.getElementById("fbNote").value,
-          }),
-        });
-        alert("Сохранено");
-        route();
-      } catch (e) {
-        alert(String(e.message || e));
-      }
-    };
-    document.getElementById("chLoad").onclick = async () => {
-      const out = document.getElementById("chOut");
-      out.style.display = "block";
-      out.textContent = "Загрузка…";
-      try {
-        const ctx = await api(
-          "/admin/api/signal/" +
-            encodeURIComponent(id) +
-            "/context?seconds_before=120&seconds_after=120"
-        );
-        out.textContent = JSON.stringify(ctx, null, 2);
-      } catch (e) {
-        out.textContent = String(e.message || e);
-      }
+    view().innerHTML = `
+      ${pageHead(row.ticker + " · " + row.signal_type, row.instrument_id, `<a href="#/signals">Back to table</a>`)}
+      <div class="detail-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>Signal</h2><div class="row">${deliveryBadge(row.delivery_status || p.delivery_status)} ${qualityBadge(p.quality_score)} ${severityBadge(row.severity)}</div></div>
+          <div class="panel-body stack">
+            <div class="summary-text">${esc(row.summary)}</div>
+            <div class="grid-3">
+              ${miniMetric("Detected", shortTime(row.detected_at))}
+              ${miniMetric("z-score", n(row.z_score, 2))}
+              ${miniMetric("Metric", n(row.metric_value, 4))}
+            </div>
+            <div class="row">
+              ${p.terminal_url ? `<a class="badge" href="${esc(p.terminal_url)}" target="_blank">Terminal</a>` : ""}
+              ${p.instrument_page_url ? `<a class="badge" href="${esc(p.instrument_page_url)}" target="_blank">Instrument</a>` : ""}
+            </div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Delivery Decision</h2></div>
+          <div class="panel-body stack">
+            ${decisionLine("Status", row.delivery_status || p.delivery_status || "unknown")}
+            ${decisionLine("Reason", row.delivery_reason || p.delivery_reason || "unknown")}
+            ${decisionLine("Rule", p.delivery_rule || "unknown")}
+            ${decisionLine("Policy", p.delivery_policy_version || "unknown")}
+            ${decisionLine("Delivered at", p.delivered_at || "—")}
+          </div>
+        </section>
+      </div>
+      <div class="detail-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>Payload</h2></div>
+          <div class="panel-body"><pre class="json">${esc(JSON.stringify(p, null, 2))}</pre></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Feedback</h2></div>
+          <div class="panel-body stack">
+            <select id="fbLabel">
+              ${selectOption("useful", "useful", row.admin_feedback_label || "")}
+              ${selectOption("noise", "noise", row.admin_feedback_label || "")}
+              ${selectOption("unsure", "unsure", row.admin_feedback_label || "")}
+            </select>
+            <textarea id="fbNote" placeholder="note">${esc(row.admin_feedback_note || "")}</textarea>
+            <button id="saveFeedback" class="primary">Save feedback</button>
+            <div class="muted">${row.admin_feedback_at ? "updated " + shortTime(row.admin_feedback_at) : "no feedback yet"}</div>
+          </div>
+        </section>
+      </div>
+    `;
+    document.getElementById("saveFeedback").onclick = async () => {
+      await api("/admin/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signal_id: row.signal_id,
+          label: document.getElementById("fbLabel").value,
+          note: document.getElementById("fbNote").value,
+        }),
+      });
+      await pageSignal(id);
     };
   }
 
-  async function route() {
-    readUrlState();
-    const { name } = parseHash();
-    try {
-      if (name === "overview" || name === "") await pageOverview();
-      else if (name === "table") await pageTable();
-      else if (name === "catalog") await pageCatalog();
-      else if (name === "tickers") await pageTickers();
-      else if (name === "quality") await pageQuality();
-      else if (name === "slices") await pageSlices();
-      else if (name === "accuracy") await pageAccuracy();
-      else if (name === "unary") await pageUnary();
-      else if (name === "signal") await pageSignal();
-      else {
-        document.getElementById("app").innerHTML = shell(
-          '<div class="msg err">Неизвестный раздел: ' + esc(name) + "</div>"
-        );
-        bindShellHandlers();
-      }
-    } catch (e) {
-      document.getElementById("app").innerHTML = shell(
-        '<div class="msg err">' + esc(String(e.message || e)) + "</div>"
-      );
-      bindShellHandlers();
+  function miniMetric(label, value) {
+    return `<div class="metric"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`;
+  }
+
+  function decisionLine(label, value) {
+    return `<div class="split"><span class="muted">${esc(label)}</span><code>${esc(value)}</code></div>`;
+  }
+
+  function showError(err) {
+    view().innerHTML = `<div class="error">${esc(err.message || err)}</div>`;
+  }
+
+  async function loadCurrent() {
+    const r = route();
+    const active = r.name === "signal" ? "signals" : (
+      nav.some((x) => x[0] === r.name) ? r.name : "triage"
+    );
+    renderShell(active);
+    if (!state.token) {
+      authEmpty();
+      return;
     }
-    syncFiltersFromState();
+    try {
+      if (r.name === "signals") await pageSignals();
+      else if (r.name === "delivery") await pageDelivery();
+      else if (r.name === "calibration") await pageCalibration();
+      else if (r.name === "instruments") await pageInstruments();
+      else if (r.name === "accuracy") await pageAccuracy();
+      else if (r.name === "settings") await pageSettings();
+      else if (r.name === "signal") await pageSignal(r.params.get("id"));
+      else await pageTriage();
+    } catch (err) {
+      showError(err);
+    }
   }
 
   window.addEventListener("hashchange", () => {
-    route();
+    state.offset = 0;
+    loadCurrent();
   });
-  readUrlState();
-  route();
+  setInterval(() => {
+    if (state.auto && state.token && route().name !== "signal") {
+      loadCurrent();
+    }
+  }, 30000);
+  loadCurrent();
 })();

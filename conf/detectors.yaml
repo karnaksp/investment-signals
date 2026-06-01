@@ -80,7 +80,7 @@ detector:
   combo_freshness_seconds: 45
 
   # Сумма баллов по компонентам должна быть >= этого числа для алерта combo.
-  combo_min_score: 7
+  combo_min_score: 6
 
   # Отдельная пауза между алертами microstructure_combo_* (сек).
   combo_alert_cooldown_seconds: 180
@@ -135,5 +135,5 @@ detector:
 # per_instrument:
 #   BRM6_SPBFUT:
 #     volume_zscore_threshold: 5.5
-#     combo_min_score: 7
+#     combo_min_score: 6
 # -----------------------------------------------------------------------------

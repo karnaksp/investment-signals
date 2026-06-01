@@ -61,7 +61,7 @@ Observability:
 
 Так проект остаётся близким к реальному event pipeline, но достаточно лёгким для локального запуска.
 
-Документация: [архитектура](docs/architecture.md), [детекторы](docs/detectors.md), [Dagster](docs/orchestration.md), [SQL по сигналам](docs/signal_analytics.md), [решение проблем](docs/troubleshooting.md) (Telegram, синтетический тест, ClickHouse).
+Документация: [архитектура](docs/architecture.md), [детекторы](docs/detectors.md), [Signal Cockpit](docs/admin_cockpit.md), [Dagster](docs/orchestration.md), [SQL по сигналам](docs/signal_analytics.md), [решение проблем](docs/troubleshooting.md) (Telegram, синтетический тест, ClickHouse).
 
 ## Структура проекта
 
@@ -117,7 +117,7 @@ docker compose up --build
 - Dagster: `http://localhost:30300` (расписания пересчёта порогов и unary single-shot; см. `docs/orchestration.md`)
 - Проверка API: `http://localhost:38000/health` (liveness), `http://localhost:38000/ready` (readiness: ping Postgres)
 - Последние сигналы: `http://localhost:38000/signals/recent`
-- Админка аналитики сигналов: задайте `ADMIN_API_TOKEN` в `.env`, перезапустите API и откройте `http://localhost:38000/admin`. Опционально: `ADMIN_API_RATE_LIMIT_PER_MINUTE`, `ADMIN_API_ALLOWED_IPS` для путей `/admin/api/*` (см. `.env.example`). — токен сохраняется в `localStorage` и уходит в заголовке `X-Admin-Token` (без `?token=` в URL). Многостраничный UI по hash (`#/overview`, `#/table`, `#/unary`, `#/signal?id=…`). По умолчанию период «всё время» (`minutes=0`). Для разметки «полезно/шум» примените SQL `sql/postgres/init/002_signal_admin_feedback.sql` к существующей БД (на чистом volume init подхватит сам). Контейнер `api` монтирует `./var/accuracy` и задаёт `SIGNAL_ACCURACY_JSON_PATH` / `CLICKHOUSE_HTTP_URL` для разделов «Точность» и контекста CH. Раздел **Unary API** вызывает `GetMarketValues` / `GetTechAnalysis` (нужен `TINVEST_TOKEN` у процесса API). Периодическая публикация тех же unary-снимков в Kafka: `docker compose --profile unary up -d market-unary-emitter` и переменные `MARKET_UNARY_*` в `.env.example`.
+- Signal Cockpit: задайте `ADMIN_API_TOKEN` в `.env`, перезапустите API и откройте `http://localhost:38000/admin`. Опционально: `ADMIN_API_RATE_LIMIT_PER_MINUTE`, `ADMIN_API_ALLOWED_IPS` для путей `/admin/api/*` (см. `.env.example`). Токен сохраняется в `localStorage` и уходит в заголовке `X-Admin-Token` (без `?token=` в URL). Основные разделы: `#/triage`, `#/signals`, `#/delivery`, `#/calibration`, `#/instruments`, `#/accuracy`, `#/settings`, `#/signal?id=…`. Для разметки «полезно/шум» примените SQL `sql/postgres/init/002_signal_admin_feedback.sql` к существующей БД (на чистом volume init подхватит сам). Контейнер `api` монтирует `./conf` и `./var/accuracy`, задаёт `SIGNAL_ACCURACY_JSON_PATH` / `CLICKHOUSE_HTTP_URL` для accuracy и raw-контекста. Скриншоты и описание экранов — в [docs/admin_cockpit.md](docs/admin_cockpit.md). Периодическая публикация unary-снимков в Kafka: `docker compose --profile unary up -d market-unary-emitter` и переменные `MARKET_UNARY_*` в `.env.example`.
 
 ### Проверка контура без живого рынка
 

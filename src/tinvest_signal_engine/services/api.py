@@ -19,7 +19,7 @@ import uvicorn
 
 from ..admin_http_guard import AdminApiRateLimiter, admin_client_ip
 from ..clickhouse_context import fetch_raw_events_window
-from ..config import RuntimeSettings
+from ..config import RuntimeSettings, load_detector_config, load_instrument_configs
 from ..market_unary import (
     RequestError as TinvestRequestError,
     fetch_market_values,
@@ -44,6 +44,308 @@ _ADMIN_CHART_JS_PATH = (
     / "vendor"
     / "chart.umd.min.js"
 )
+
+
+_SIGNAL_TYPE_DEFINITIONS: tuple[dict[str, Any], ...] = (
+    {
+        "signal_type": "volume_spike",
+        "source": "trade",
+        "sources_any": ("trade",),
+        "config": "volume_zscore_threshold",
+        "delivery_rule": "momentum_quality_and_z",
+        "enabled": lambda c: c.volume_zscore_threshold > 0,
+    },
+    {
+        "signal_type": "trade_rate_spike",
+        "source": "trade",
+        "sources_any": ("trade",),
+        "config": "trade_count_zscore_threshold",
+        "delivery_rule": "momentum_quality_and_z",
+        "enabled": lambda c: c.trade_count_zscore_threshold > 0,
+    },
+    {
+        "signal_type": "price_jump",
+        "source": "trade/last_price",
+        "sources_any": ("trade", "last_price"),
+        "config": "price_return_zscore_threshold",
+        "delivery_rule": "price_extreme_or_activity_confirmed",
+        "enabled": lambda c: c.price_return_zscore_threshold > 0,
+    },
+    {
+        "signal_type": "spread_widening",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "spread_zscore_threshold",
+        "delivery_rule": "liquidity_activity_confirmed",
+        "enabled": lambda c: c.spread_zscore_threshold > 0,
+    },
+    {
+        "signal_type": "orderbook_imbalance",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "imbalance_zscore_threshold",
+        "delivery_rule": "liquidity_activity_confirmed",
+        "enabled": lambda c: c.imbalance_zscore_threshold > 0,
+    },
+    {
+        "signal_type": "microstructure_combo_long",
+        "source": "trade+orderbook",
+        "sources_all": ("trade", "orderbook"),
+        "config": "combo_enabled",
+        "delivery_rule": "combo_score",
+        "enabled": lambda c: c.combo_enabled,
+    },
+    {
+        "signal_type": "microstructure_combo_short",
+        "source": "trade+orderbook",
+        "sources_all": ("trade", "orderbook"),
+        "config": "combo_enabled",
+        "delivery_rule": "combo_score",
+        "enabled": lambda c: c.combo_enabled,
+    },
+    {
+        "signal_type": "trading_status_changed",
+        "source": "trading_status",
+        "sources_any": ("trading_status",),
+        "config": "info subscription",
+        "delivery_rule": "status_access_always",
+        "enabled": lambda c: True,
+    },
+    {
+        "signal_type": "market_access_changed",
+        "source": "trading_status",
+        "sources_any": ("trading_status",),
+        "config": "track_market_access_flags",
+        "delivery_rule": "status_access_always",
+        "enabled": lambda c: c.track_market_access_flags,
+    },
+    {
+        "signal_type": "obi_dynamics",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "obi_dynamics_enabled",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.obi_dynamics_enabled,
+    },
+    {
+        "signal_type": "aggressive_trade_burst",
+        "source": "trade",
+        "sources_any": ("trade",),
+        "config": "trade_burst_enabled",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.trade_burst_enabled,
+    },
+    {
+        "signal_type": "orderbook_spoofing_bid_pull",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "spoofing_enabled",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.spoofing_enabled,
+    },
+    {
+        "signal_type": "orderbook_spoofing_ask_pull",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "spoofing_enabled",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.spoofing_enabled,
+    },
+    {
+        "signal_type": "lead_lag_divergence",
+        "source": "trade/last_price/orderbook",
+        "sources_any": ("trade", "last_price", "orderbook"),
+        "config": "lead_lag_enabled + lead_lag.pairs",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.lead_lag_enabled,
+        "requires_lead_lag_pairs": True,
+    },
+    {
+        "signal_type": "open_interest_spike",
+        "source": "open_interest",
+        "sources_any": ("open_interest",),
+        "config": "open_interest_zscore_threshold",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.open_interest_zscore_threshold > 0,
+    },
+    {
+        "signal_type": "candle_range_spike",
+        "source": "candle",
+        "sources_any": ("candle",),
+        "config": "candle_range_zscore_threshold",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.candle_range_zscore_threshold > 0,
+    },
+    {
+        "signal_type": "price_near_limit_band",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "limit_band_warning_bps",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.limit_band_warning_bps > 0,
+    },
+    {
+        "signal_type": "orderbook_snapshot_inconsistent",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "signal_orderbook_inconsistent",
+        "delivery_rule": "default_quality",
+        "enabled": lambda c: c.signal_orderbook_inconsistent,
+    },
+)
+
+
+def _configured_signal_catalog(settings: RuntimeSettings) -> dict[str, Any]:
+    try:
+        detector = load_detector_config(
+            settings.detector_path,
+            settings.detector_overrides_path,
+        )
+    except Exception as exc:
+        return {
+            "config_error": f"{type(exc).__name__}: {exc}",
+            "instrument_count": 0,
+            "source_coverage": {},
+            "enabled_count": 0,
+            "known_count": len(_SIGNAL_TYPE_DEFINITIONS),
+            "enabled_types": [],
+            "types": [],
+        }
+
+    instrument_error: str | None = None
+    try:
+        instruments = load_instrument_configs(settings.instruments_path)
+    except Exception as exc:
+        instruments = []
+        instrument_error = f"{type(exc).__name__}: {exc}"
+
+    source_coverage = {
+        "trade": sum(1 for item in instruments if item.trades),
+        "last_price": sum(1 for item in instruments if item.last_price),
+        "orderbook": sum(1 for item in instruments if item.order_book_depth),
+        "trading_status": sum(1 for item in instruments if item.info),
+        "candle": sum(1 for item in instruments if item.candles),
+        "open_interest": 0,
+    }
+
+    rows: list[dict[str, Any]] = []
+    for definition in _SIGNAL_TYPE_DEFINITIONS:
+        predicate = definition["enabled"]
+        global_enabled = bool(predicate(detector.default))
+        any_enabled = global_enabled or any(
+            bool(predicate(item)) for item in detector.per_instrument.values()
+        )
+        if definition.get("requires_lead_lag_pairs"):
+            any_enabled = any_enabled and bool(detector.lead_lag_pairs)
+            global_enabled = global_enabled and bool(detector.lead_lag_pairs)
+
+        source_count = _signal_source_count(definition, source_coverage)
+        enabled = any_enabled and source_count > 0
+        if global_enabled:
+            scope = "global"
+        elif any_enabled:
+            scope = "per_instrument"
+        else:
+            scope = "disabled"
+        reason = "enabled"
+        if not any_enabled:
+            reason = "config_disabled"
+        elif source_count <= 0:
+            reason = "source_not_subscribed"
+
+        rows.append(
+            {
+                "signal_type": definition["signal_type"],
+                "source": definition["source"],
+                "source_coverage": source_count,
+                "config": definition["config"],
+                "enabled": enabled,
+                "scope": scope,
+                "reason": reason,
+                "delivery_rule": definition["delivery_rule"],
+            }
+        )
+
+    enabled_rows = [row for row in rows if row["enabled"]]
+    return {
+        "instrument_count": len(instruments),
+        "source_coverage": source_coverage,
+        "instrument_error": instrument_error,
+        "per_instrument_overrides": len(detector.per_instrument),
+        "lead_lag_pairs": len(detector.lead_lag_pairs),
+        "enabled_count": len(enabled_rows),
+        "known_count": len(rows),
+        "enabled_types": enabled_rows,
+        "types": rows,
+    }
+
+
+def _signal_source_count(
+    definition: dict[str, Any],
+    source_coverage: dict[str, int],
+) -> int:
+    all_sources = tuple(definition.get("sources_all") or ())
+    if all_sources:
+        return min(source_coverage.get(name, 0) for name in all_sources)
+    any_sources = tuple(definition.get("sources_any") or ())
+    if any_sources:
+        return max(source_coverage.get(name, 0) for name in any_sources)
+    return 0
+
+
+def _configured_instrument_catalog(settings: RuntimeSettings) -> dict[str, Any]:
+    try:
+        instruments = load_instrument_configs(settings.instruments_path)
+    except Exception as exc:
+        return {
+            "config_error": f"{type(exc).__name__}: {exc}",
+            "count": 0,
+            "source_coverage": {},
+            "items": [],
+        }
+
+    items = []
+    for item in instruments:
+        sources = []
+        if item.trades:
+            sources.append("trade")
+        if item.last_price:
+            sources.append("last_price")
+        if item.order_book_depth:
+            sources.append("orderbook")
+        if item.info:
+            sources.append("trading_status")
+        if item.candles:
+            sources.append("candle")
+        items.append(
+            {
+                "instrument_id": item.instrument_id,
+                "ticker": item.ticker,
+                "class_code": item.class_code,
+                "alias": item.alias,
+                "subscriptions": {
+                    "trades": item.trades,
+                    "last_price": item.last_price,
+                    "info": item.info,
+                    "order_book_depth": item.order_book_depth,
+                    "candles": item.candles,
+                    "candle_interval": item.candle_interval,
+                },
+                "sources": sources,
+            }
+        )
+
+    return {
+        "count": len(items),
+        "source_coverage": {
+            "trade": sum(1 for item in instruments if item.trades),
+            "last_price": sum(1 for item in instruments if item.last_price),
+            "orderbook": sum(1 for item in instruments if item.order_book_depth),
+            "trading_status": sum(1 for item in instruments if item.info),
+            "candle": sum(1 for item in instruments if item.candles),
+        },
+        "items": items,
+    }
 
 
 class HealthResponse(BaseModel):
@@ -408,6 +710,11 @@ def create_app() -> FastAPI:
             float | None,
             Query(description="Минимум quality_score из payload."),
         ] = None,
+        quality_min: Annotated[float | None, Query()] = None,
+        quality_max: Annotated[float | None, Query()] = None,
+        delivery_status: Annotated[str | None, Query()] = None,
+        feedback: Annotated[str | None, Query()] = None,
+        severity: Annotated[int | None, Query(ge=1, le=3)] = None,
     ) -> dict[str, Any]:
         items, total = fastapi_app.state.signal_store.fetch_admin_signals_page(
             limit=limit,
@@ -416,6 +723,11 @@ def create_app() -> FastAPI:
             instrument_id=instrument_id,
             signal_type=signal_type,
             min_quality=min_quality,
+            quality_min=quality_min,
+            quality_max=quality_max,
+            delivery_status=delivery_status,
+            feedback=feedback,
+            severity=severity,
         )
         return {
             "items": items,
@@ -437,6 +749,80 @@ def create_app() -> FastAPI:
         ] = 0,
     ) -> dict[str, Any]:
         return fastapi_app.state.signal_store.fetch_admin_slices(minutes=minutes)
+
+    @fastapi_app.get(
+        "/admin/api/delivery/overview",
+        tags=["admin"],
+        summary="Сводка delivery policy",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_delivery_overview(
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
+    ) -> dict[str, Any]:
+        return fastapi_app.state.signal_store.fetch_admin_delivery_overview(
+            minutes=minutes
+        )
+
+    @fastapi_app.get(
+        "/admin/api/delivery/reasons",
+        tags=["admin"],
+        summary="Причины delivered/suppressed",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_delivery_reasons(
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
+    ) -> dict[str, Any]:
+        return fastapi_app.state.signal_store.fetch_admin_delivery_reasons(
+            minutes=minutes
+        )
+
+    @fastapi_app.get(
+        "/admin/api/calibration",
+        tags=["admin"],
+        summary="Матрица калибровки signal_type × quality × delivery × feedback",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_calibration(
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
+    ) -> dict[str, Any]:
+        return fastapi_app.state.signal_store.fetch_admin_calibration(
+            minutes=minutes
+        )
+
+    @fastapi_app.get(
+        "/admin/api/settings",
+        tags=["admin"],
+        summary="Read-only runtime settings for the cockpit",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_settings(request: Request) -> dict[str, Any]:
+        s = request.app.state.settings
+        return {
+            "delivery": {
+                "enabled": s.signal_delivery_enabled,
+                "min_quality": s.signal_delivery_min_quality,
+                "max_per_hour": s.signal_delivery_max_per_hour,
+                "instrument_cooldown_seconds": (
+                    s.signal_delivery_instrument_cooldown_seconds
+                ),
+                "type_rules_json_configured": bool(
+                    s.signal_delivery_type_rules_json
+                ),
+                "legacy_signal_min_quality_score": s.signal_min_quality_score,
+            },
+            "paths": {
+                "detectors_config": str(s.detector_path),
+                "detectors_overrides_config": str(s.detector_overrides_path),
+                "instruments_config": str(s.instruments_path),
+                "signal_accuracy_json_path": str(s.signal_accuracy_json_path),
+            },
+            "kafka": {
+                "raw_topic": s.kafka_raw_topic,
+                "signal_topic": s.kafka_signal_topic,
+                "signal_value_format": s.kafka_signal_value_format,
+            },
+            "signals": _configured_signal_catalog(s),
+        }
 
     @fastapi_app.get(
         "/admin/api/accuracy",
@@ -482,10 +868,78 @@ def create_app() -> FastAPI:
     @fastapi_app.get(
         "/admin/api/instruments",
         tags=["admin"],
-        summary="Список инструментов из conf/instruments.yaml (разрешённые uid через T-Invest)",
+        summary="Configured instrument universe with activity stats",
         dependencies=[Depends(require_admin)],
     )
-    def admin_instruments_list(request: Request) -> dict[str, Any]:
+    def admin_instruments_list(
+        request: Request,
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
+        resolve: Annotated[
+            bool,
+            Query(description="Resolve FIGI/UID through T-Invest; slower and needs token."),
+        ] = False,
+    ) -> dict[str, Any]:
+        settings = request.app.state.settings
+        catalog = _configured_instrument_catalog(settings)
+        activity = fastapi_app.state.signal_store.fetch_admin_instrument_activity(
+            minutes=minutes
+        )
+
+        metadata_by_id: dict[str, Any] = {}
+        if resolve:
+            if not (settings.tinvest_token or "").strip():
+                raise HTTPException(
+                    status_code=503,
+                    detail="TINVEST_TOKEN не задан — resolve через T-Invest недоступен.",
+                )
+            reg, new_cache = resolve_instrument_registry(
+                settings,
+                getattr(request.app.state, "instrument_registry_cache", None),
+            )
+            request.app.state.instrument_registry_cache = new_cache
+            metadata_by_id = {m.instrument_id: m for m in reg}
+
+        items: list[dict[str, Any]] = []
+        for raw in catalog.get("items", []):
+            item = dict(raw)
+            stat = dict(activity.get(str(item.get("instrument_id")), {}))
+            total = int(stat.get("total") or 0)
+            delivered = int(stat.get("delivered") or 0)
+            item.update(
+                {
+                    "total": total,
+                    "delivered": delivered,
+                    "suppressed": int(stat.get("suppressed") or 0),
+                    "unknown": int(stat.get("unknown") or 0),
+                    "delivery_rate": (delivered / total) if total else 0.0,
+                    "avg_quality": stat.get("avg_quality"),
+                    "last_detected_at": stat.get("last_detected_at"),
+                    "has_activity": total > 0,
+                }
+            )
+            meta = metadata_by_id.get(str(item.get("instrument_id")))
+            if meta is not None:
+                item.update({"figi": meta.figi, "uid": meta.uid, "resolved": True})
+            else:
+                item.update({"figi": None, "uid": None, "resolved": False})
+            items.append(item)
+
+        return {
+            "items": items,
+            "count": len(items),
+            "active_count": sum(1 for item in items if item["has_activity"]),
+            "minutes": minutes,
+            "source_coverage": catalog.get("source_coverage", {}),
+            "config_error": catalog.get("config_error"),
+        }
+
+    @fastapi_app.get(
+        "/admin/api/instruments/resolve",
+        tags=["admin"],
+        summary="Resolved instrument metadata from T-Invest",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_instruments_resolve(request: Request) -> dict[str, Any]:
         settings = request.app.state.settings
         if not (settings.tinvest_token or "").strip():
             raise HTTPException(
@@ -748,6 +1202,11 @@ def create_app() -> FastAPI:
         instrument_id: Annotated[str | None, Query()] = None,
         signal_type: Annotated[str | None, Query()] = None,
         min_quality: Annotated[float | None, Query()] = None,
+        quality_min: Annotated[float | None, Query()] = None,
+        quality_max: Annotated[float | None, Query()] = None,
+        delivery_status: Annotated[str | None, Query()] = None,
+        feedback: Annotated[str | None, Query()] = None,
+        severity: Annotated[int | None, Query(ge=1, le=3)] = None,
     ) -> StreamingResponse:
         store = fastapi_app.state.signal_store
 
@@ -763,6 +1222,11 @@ def create_app() -> FastAPI:
                     instrument_id=instrument_id,
                     signal_type=signal_type,
                     min_quality=min_quality,
+                    quality_min=quality_min,
+                    quality_max=quality_max,
+                    delivery_status=delivery_status,
+                    feedback=feedback,
+                    severity=severity,
                 )
                 if not items:
                     break
@@ -774,6 +1238,8 @@ def create_app() -> FastAPI:
                         r.get("signal_type", ""),
                         str(r.get("severity", "")),
                         str(r.get("z_score", "")),
+                        r.get("delivery_status") or "",
+                        r.get("delivery_reason") or "",
                         (r.get("summary") or "").replace("\r", " ").replace("\n", " "),
                         r.get("admin_feedback_label") or "",
                     ]
@@ -792,6 +1258,8 @@ def create_app() -> FastAPI:
                     "signal_type",
                     "severity",
                     "z_score",
+                    "delivery_status",
+                    "delivery_reason",
                     "summary",
                     "admin_feedback",
                 ],

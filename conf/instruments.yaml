@@ -39,7 +39,7 @@ instruments:
       trades: true
       last_price: true
       info: false
-      order_book_depth:
+      order_book_depth: 10
       candles: false
       candle_interval: 1m
 
@@ -50,9 +50,273 @@ instruments:
       trades: true
       last_price: true
       info: false
-      order_book_depth:
+      order_book_depth: 10
       candles: false
       candle_interval: 1m
+
+  # --- RU equities: liquid / high-attention core (TQBR) ---
+  # Depth 10 broadens L2 coverage without the same stream load as depth 50.
+  - ticker: SBERP
+    class_code: TQBR
+    alias: sber_pref
+    subscriptions: &ru_equity_watch_subscriptions
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 10
+      candles: false
+      candle_interval: 1m
+
+  - ticker: VTBR
+    class_code: TQBR
+    alias: vtbr
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: T
+    class_code: TQBR
+    alias: t_tech
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: YDEX
+    class_code: TQBR
+    alias: yandex
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: NVTK
+    class_code: TQBR
+    alias: novatek
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: GMKN
+    class_code: TQBR
+    alias: norilsk_nickel
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: ROSN
+    class_code: TQBR
+    alias: rosneft
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: SNGS
+    class_code: TQBR
+    alias: surgut
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: SNGSP
+    class_code: TQBR
+    alias: surgut_pref
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: TATN
+    class_code: TQBR
+    alias: tatneft
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: TATNP
+    class_code: TQBR
+    alias: tatneft_pref
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: PLZL
+    class_code: TQBR
+    alias: polyus
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: ALRS
+    class_code: TQBR
+    alias: alrosa
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: AFLT
+    class_code: TQBR
+    alias: aeroflot
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: MGNT
+    class_code: TQBR
+    alias: magnit
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: MOEX
+    class_code: TQBR
+    alias: moex
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: MTSS
+    class_code: TQBR
+    alias: mts
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: RUAL
+    class_code: TQBR
+    alias: rusal
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: CHMF
+    class_code: TQBR
+    alias: severstal
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: NLMK
+    class_code: TQBR
+    alias: nlmk
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: MAGN
+    class_code: TQBR
+    alias: mmk
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: FEES
+    class_code: TQBR
+    alias: rosseti
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: HYDR
+    class_code: TQBR
+    alias: rushydro
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: PHOR
+    class_code: TQBR
+    alias: phosagro
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: AKRN
+    class_code: TQBR
+    alias: akron
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: IRAO
+    class_code: TQBR
+    alias: inter_rao
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: FLOT
+    class_code: TQBR
+    alias: sovcomflot
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: TRNFP
+    class_code: TQBR
+    alias: transneft_pref
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: X5
+    class_code: TQBR
+    alias: x5
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: HEAD
+    class_code: TQBR
+    alias: headhunter
+    subscriptions: *ru_equity_watch_subscriptions
+
+  # --- RU equities: volatile / media-sensitive watchlist (TQBR) ---
+  - ticker: POSI
+    class_code: TQBR
+    alias: positive
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: ASTR
+    class_code: TQBR
+    alias: astra
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: DIAS
+    class_code: TQBR
+    alias: diasoft
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: VKCO
+    class_code: TQBR
+    alias: vk
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: OZON
+    class_code: TQBR
+    alias: ozon
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: WUSH
+    class_code: TQBR
+    alias: whoosh
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: CARM
+    class_code: TQBR
+    alias: carm
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: SMLT
+    class_code: TQBR
+    alias: samolet
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: PIKK
+    class_code: TQBR
+    alias: pik
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: SGZH
+    class_code: TQBR
+    alias: segezha
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: UNAC
+    class_code: TQBR
+    alias: uac
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: MVID
+    class_code: TQBR
+    alias: mvideo
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: BELU
+    class_code: TQBR
+    alias: novabev
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: MTLR
+    class_code: TQBR
+    alias: mechel
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: MTLRP
+    class_code: TQBR
+    alias: mechel_pref
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: RNFT
+    class_code: TQBR
+    alias: russneft
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: DATA
+    class_code: TQBR
+    alias: arenadata
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: EUTR
+    class_code: TQBR
+    alias: eurotrans
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: FIXR
+    class_code: TQBR
+    alias: fix_price
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: ETLN
+    class_code: TQBR
+    alias: etalon
+    subscriptions: *ru_equity_watch_subscriptions
+
+  - ticker: SELG
+    class_code: TQBR
+    alias: seligdar
+    subscriptions: *ru_equity_watch_subscriptions
 
   # >>> FUTURES_NEAREST_BEGIN (python scripts/resolve_nearest_futures.py --write)
   # Ближайшие контракты по дате экспирации (см. скрипт).
