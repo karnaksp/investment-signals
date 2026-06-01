@@ -1,5 +1,10 @@
 # T-Invest Signal Engine
 
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-0969da)](https://karnaksp.github.io/investment-signals/)
+[![Publish docs](https://github.com/karnaksp/investment-signals/actions/workflows/docs.yml/badge.svg)](https://github.com/karnaksp/investment-signals/actions/workflows/docs.yml)
+
+**Публичная документация:** https://karnaksp.github.io/investment-signals/
+
 Конвейер обнаружения рыночных аномалий в реальном времени по данным T-Invest.
 
 Проект собран как небольшой data-engineering стек:
