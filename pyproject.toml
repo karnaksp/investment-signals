@@ -64,5 +64,5 @@ backtest = [
   "duckdb>=1.0.0",
 ]
 proto = [
-  "grpcio-tools>=1.62,<1.70",
+  "grpcio-tools>=1.62,<1.82",
 ]
