@@ -50,6 +50,7 @@ orchestration = [
   "dagster-webserver>=1.8.0,<2",
 ]
 dev = [
+  "pytest>=8",
   "playwright>=1.40",
   "dagster>=1.8.0,<2",
   "dagster-webserver>=1.8.0,<2",
