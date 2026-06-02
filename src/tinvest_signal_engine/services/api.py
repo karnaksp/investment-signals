@@ -35,6 +35,9 @@ from ..market_unary import (
 )
 from ..logging_utils import configure_logging
 from ..models import TriggerSignal
+from ..poi import POI_CONTRACT_VERSION, build_pois_from_signal_rows, find_poi
+from ..poi_accuracy import load_poi_accuracy_summary
+from ..poi_delivery import classify_pois_delivery, summarize_poi_delivery
 from ..runtime_info import runtime_fingerprint
 from ..sinks import create_postgres_signal_store_with_retry
 
@@ -740,6 +743,57 @@ class AdminFeedbackIn(BaseModel):
         return v.strip()
 
 
+class POIJournalIn(BaseModel):
+    """Manual POI journal mark from the cockpit."""
+
+    poi_id: str
+    action: str = Field(
+        description="watch | dismiss | paper_long | paper_short | missed | useful | noise | unsure"
+    )
+    instrument_id: str = ""
+    ticker: str = ""
+    setup_type: str = ""
+    bias: str = ""
+    note: str = ""
+    entry_price: float | None = None
+    exit_price: float | None = None
+    result: str = ""
+
+    @field_validator("poi_id")
+    @classmethod
+    def _poi_uuid(cls, v: str) -> str:
+        s = v.strip()
+        uuid.UUID(s)
+        return s
+
+    @field_validator("action")
+    @classmethod
+    def _action_ok(cls, v: str) -> str:
+        allowed = {
+            "watch",
+            "dismiss",
+            "paper_long",
+            "paper_short",
+            "missed",
+            "useful",
+            "noise",
+            "unsure",
+        }
+        value = (v or "").strip().lower()
+        if value not in allowed:
+            raise ValueError(f"action must be one of: {', '.join(sorted(allowed))}")
+        return value
+
+
+class POIDeliverySimulationIn(BaseModel):
+    """Dry-run POI delivery policy over read-time POIs."""
+
+    minutes: int = Field(default=1440, ge=0, le=10_080)
+    limit: int = Field(default=100, ge=1, le=200)
+    realtime_interest_threshold: int = Field(default=82, ge=0, le=100)
+    digest_interest_threshold: int = Field(default=62, ge=0, le=100)
+
+
 class DeliverySimulationIn(BaseModel):
     """Dry-run delivery settings over recent stored signals."""
 
@@ -1284,6 +1338,147 @@ def create_app() -> FastAPI:
         )
 
     @fastapi_app.get(
+        "/admin/api/poi",
+        tags=["admin"],
+        summary="Read-time trading points of interest from stored signals",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_poi(
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 1440,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        signal_limit: Annotated[int, Query(ge=1, le=2_000)] = 1_000,
+    ) -> dict[str, Any]:
+        rows, source_signal_total = fastapi_app.state.signal_store.fetch_admin_signals_page(
+            limit=signal_limit,
+            offset=0,
+            minutes=minutes,
+        )
+        pois = build_pois_from_signal_rows(rows)
+        return {
+            "items": pois[:limit],
+            "count": min(limit, len(pois)),
+            "total": len(pois),
+            "source_signal_total": source_signal_total,
+            "minutes": minutes,
+            "contract_version": POI_CONTRACT_VERSION,
+        }
+
+    @fastapi_app.post(
+        "/admin/api/poi/feedback",
+        tags=["admin"],
+        summary="Save manual POI journal action",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_poi_feedback(body: POIJournalIn) -> dict[str, str]:
+        fastapi_app.state.signal_store.upsert_poi_journal(
+            poi_id=body.poi_id,
+            action=body.action,
+            instrument_id=body.instrument_id,
+            ticker=body.ticker,
+            setup_type=body.setup_type,
+            bias=body.bias,
+            note=body.note,
+            entry_price=body.entry_price,
+            exit_price=body.exit_price,
+            result=body.result,
+        )
+        return {"status": "ok"}
+
+    @fastapi_app.post(
+        "/admin/api/poi/delivery/simulation",
+        tags=["admin"],
+        summary="Dry-run POI delivery policy without Telegram side effects",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_poi_delivery_simulation(
+        request: Request,
+        body: POIDeliverySimulationIn,
+    ) -> dict[str, Any]:
+        rows, source_signal_total = fastapi_app.state.signal_store.fetch_admin_signals_page(
+            limit=1_000,
+            offset=0,
+            minutes=body.minutes,
+        )
+        pois = build_pois_from_signal_rows(rows)[: body.limit]
+        try:
+            source_health = _source_health_response(
+                request.app.state.settings,
+                minutes=body.minutes or 1440,
+                stale_after_minutes=15,
+            )
+            health_by_instrument = {
+                item.get("instrument_id"): item.get("source_health")
+                for item in source_health.get("items", [])
+            }
+        except Exception:
+            health_by_instrument = {}
+        enriched = []
+        for poi in pois:
+            item = dict(poi)
+            item["source_health"] = health_by_instrument.get(poi.get("instrument_id"))
+            enriched.append(item)
+        decisions = classify_pois_delivery(
+            enriched,
+            realtime_interest_threshold=body.realtime_interest_threshold,
+            digest_interest_threshold=body.digest_interest_threshold,
+        )
+        summary = summarize_poi_delivery(decisions, sample_limit=20)
+        return {
+            **summary,
+            "items": decisions,
+            "minutes": body.minutes,
+            "source_signal_total": source_signal_total,
+            "contract_version": POI_CONTRACT_VERSION,
+        }
+
+    @fastapi_app.get(
+        "/admin/api/journal",
+        tags=["admin"],
+        summary="Manual POI journal and paper trading marks",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_journal(
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+        poi_id: Annotated[str | None, Query()] = None,
+    ) -> dict[str, Any]:
+        if poi_id:
+            try:
+                uuid.UUID(poi_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="poi_id должен быть UUID") from exc
+        return fastapi_app.state.signal_store.fetch_poi_journal(
+            minutes=minutes,
+            limit=limit,
+            poi_id=poi_id,
+        )
+
+    @fastapi_app.get(
+        "/admin/api/poi/{poi_id}",
+        tags=["admin"],
+        summary="One read-time trading point of interest",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_poi_one(
+        poi_id: str,
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 1440,
+        signal_limit: Annotated[int, Query(ge=1, le=2_000)] = 1_000,
+    ) -> dict[str, Any]:
+        try:
+            uuid.UUID(poi_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="poi_id должен быть UUID") from exc
+        rows, _ = fastapi_app.state.signal_store.fetch_admin_signals_page(
+            limit=signal_limit,
+            offset=0,
+            minutes=minutes,
+        )
+        poi = find_poi(build_pois_from_signal_rows(rows), poi_id)
+        if poi is None:
+            raise HTTPException(status_code=404, detail="POI не найден")
+        return poi
+
+    @fastapi_app.get(
         "/admin/api/calibration",
         tags=["admin"],
         summary="Матрица калибровки signal_type × quality × delivery × feedback",
@@ -1354,6 +1549,17 @@ def create_app() -> FastAPI:
     def admin_accuracy(request: Request) -> dict[str, Any]:
         path = request.app.state.settings.signal_accuracy_json_path
         return _accuracy_response_from_path(path)
+
+    @fastapi_app.get(
+        "/admin/api/poi-accuracy",
+        tags=["admin"],
+        summary="JSON offline POI accuracy report",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_poi_accuracy(request: Request) -> dict[str, Any]:
+        signal_path = request.app.state.settings.signal_accuracy_json_path
+        path = signal_path.parent / "poi_accuracy.json"
+        return load_poi_accuracy_summary(path)
 
     @fastapi_app.get(
         "/admin/api/source-health",

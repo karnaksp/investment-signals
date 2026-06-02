@@ -22,21 +22,23 @@
   };
 
   const nav = [
+    ["radar", "Radar", "RD"],
     ["triage", "Triage", "TR"],
     ["signals", "Signals", "SG"],
     ["delivery", "Delivery", "DL"],
     ["calibration", "Calibration", "CL"],
     ["feedback", "Feedback", "FB"],
     ["instruments", "Instruments", "IN"],
+    ["journal", "Journal", "JR"],
     ["accuracy", "Accuracy", "AC"],
     ["settings", "Settings", "ST"],
   ];
 
   function route() {
-    const raw = (location.hash || "#/triage").replace(/^#/, "") || "/triage";
+    const raw = (location.hash || "#/radar").replace(/^#/, "") || "/radar";
     const u = new URL(raw, location.origin);
     return {
-      name: (u.pathname.replace(/^\/+/, "") || "triage").toLowerCase(),
+      name: (u.pathname.replace(/^\/+/, "") || "radar").toLowerCase(),
       params: u.searchParams,
     };
   }
@@ -402,6 +404,397 @@
         <td class="clip">${esc(humanLine(row))}</td>
       </tr>
     `;
+  }
+
+  function poiBiasBadge(bias) {
+    const value = bias || "watch";
+    const cls = value === "long" ? "b-high" :
+      value === "short" ? "b-low" :
+      value === "status" ? "b-medium" : "b-unknown";
+    return badge(value, cls);
+  }
+
+  function confidenceBadge(confidence) {
+    const value = confidence || "low";
+    const cls = value === "high" ? "b-high" :
+      value === "medium" ? "b-medium" : "b-low";
+    return badge(value, cls);
+  }
+
+  function scoreBadge(score) {
+    const value = finiteNumber(score, 0);
+    const cls = value >= 82 ? "b-high" : value >= 62 ? "b-medium" : "b-low";
+    return badge("score " + Math.round(value), cls);
+  }
+
+  function levelValue(value) {
+    return value == null ? "-" : n(value, 4);
+  }
+
+  function entryZoneText(zone) {
+    if (!zone) return "-";
+    return levelValue(zone.low) + " - " + levelValue(zone.high);
+  }
+
+  function poiDriversText(poi) {
+    return (poi.drivers || [])
+      .slice(0, 4)
+      .map((d) => {
+        const q = d.quality_score == null ? "" : " q" + Math.round(Number(d.quality_score));
+        return String(d.signal_type || "unknown") + q;
+      })
+      .join(" / ") || "-";
+  }
+
+  function terminalUrlForPoi(poi) {
+    if (!poi || !poi.ticker) return "";
+    return "https://www.tbank.ru/terminal/?workspace=new_tab&widget_name=CHART_TV&widget_settings=symbolId," + encodeURIComponent(poi.ticker);
+  }
+
+  function poiHeaders() {
+    return [
+      { label: "Updated" },
+      { label: "Ticker" },
+      { label: "Setup" },
+      { label: "Bias" },
+      { label: "Score" },
+      { label: "Entry" },
+      { label: "Invalid" },
+      { label: "Targets" },
+      { label: "Drivers" },
+      { label: "Journal" },
+    ];
+  }
+
+  function poiJournalButtons(poi) {
+    const actions = [
+      ["watch", "Watch"],
+      ["dismiss", "Dismiss"],
+      ["paper_long", "Long"],
+      ["paper_short", "Short"],
+    ];
+    return `<div class="feedback-actions">
+      ${actions.map(([value, label]) => `<button type="button" class="feedback-btn poi-action-btn" data-poi-id="${esc(poi.poi_id)}" data-poi-action="${esc(value)}" title="${esc(label)}">${esc(label)}</button>`).join("")}
+    </div>`;
+  }
+
+  async function savePoiJournal(poi, action, extra) {
+    await api("/admin/api/poi/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        poi_id: poi.poi_id,
+        action,
+        instrument_id: poi.instrument_id || "",
+        ticker: poi.ticker || "",
+        setup_type: poi.setup_type || "",
+        bias: poi.bias || "",
+        ...(extra || {}),
+      }),
+    });
+  }
+
+  function bindPoiJournalActions(pois, reloadFn) {
+    const byId = {};
+    (pois || []).forEach((poi) => { byId[poi.poi_id] = poi; });
+    document.querySelectorAll(".poi-action-btn").forEach((btn) => {
+      btn.onclick = async () => {
+        const poi = byId[btn.getAttribute("data-poi-id") || ""];
+        const action = btn.getAttribute("data-poi-action") || "";
+        if (!poi || !action) return;
+        btn.disabled = true;
+        try {
+          await savePoiJournal(poi, action, {});
+          await reloadFn();
+        } catch (err) {
+          btn.disabled = false;
+          showError(err);
+        }
+      };
+    });
+  }
+
+  function poiRow(poi) {
+    return `
+      <tr>
+        <td class="mono">${shortTime(poi.updated_at)}</td>
+        <td>
+          <a href="#/poi?id=${encodeURIComponent(poi.poi_id)}"><strong>${esc(poi.ticker || poi.instrument_id)}</strong></a>
+          <div class="muted">${esc(poi.instrument_id || "")}</div>
+        </td>
+        <td><span class="clip">${esc(poi.setup_type || "")}</span><div class="muted">${esc(poi.horizon || "")}</div></td>
+        <td>${poiBiasBadge(poi.bias)}</td>
+        <td>${scoreBadge(poi.interest_score)}<div>${confidenceBadge(poi.confidence)}</div></td>
+        <td class="num">${esc(entryZoneText(poi.entry_zone))}</td>
+        <td class="num">${esc(levelValue(poi.invalidation_price))}</td>
+        <td class="num">${esc(levelValue(poi.target_1))}<div class="muted">${esc(levelValue(poi.target_2))}</div></td>
+        <td class="clip">${esc(poiDriversText(poi))}</td>
+        <td>${poiJournalButtons(poi)}</td>
+      </tr>
+    `;
+  }
+
+  function tickerRowsInPlay(items) {
+    const byTicker = {};
+    (items || []).forEach((poi) => {
+      const key = poi.ticker || poi.instrument_id || "unknown";
+      if (!byTicker[key]) {
+        byTicker[key] = {
+          ticker: key,
+          count: 0,
+          maxScore: 0,
+          updatedAt: poi.updated_at,
+          biases: new Set(),
+          setups: new Set(),
+        };
+      }
+      byTicker[key].count += 1;
+      byTicker[key].maxScore = Math.max(byTicker[key].maxScore, finiteNumber(poi.interest_score, 0));
+      byTicker[key].updatedAt = byTicker[key].updatedAt > poi.updated_at ? byTicker[key].updatedAt : poi.updated_at;
+      byTicker[key].biases.add(poi.bias || "watch");
+      byTicker[key].setups.add(poi.setup_type || "unknown");
+    });
+    return Object.values(byTicker)
+      .sort((a, b) => b.maxScore - a.maxScore)
+      .slice(0, 20)
+      .map((row) => `<tr>
+        <td><strong>${esc(row.ticker)}</strong><div class="muted">${esc(shortTime(row.updatedAt))}</div></td>
+        <td class="num">${n(row.count, 0)}</td>
+        <td>${scoreBadge(row.maxScore)}</td>
+        <td>${Array.from(row.biases).map((b) => poiBiasBadge(b)).join(" ")}</td>
+        <td class="clip">${esc(Array.from(row.setups).slice(0, 3).join(" / "))}</td>
+      </tr>`);
+  }
+
+  async function pageRadar() {
+    const [data, settings, poiSimulation] = await Promise.all([
+      api("/admin/api/poi" + params({ minutes: state.minutes, limit: 75 })),
+      api("/admin/api/settings"),
+      api("/admin/api/poi/delivery/simulation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ minutes: Number(state.minutes || 0), limit: 75 }),
+      }).catch(() => ({ by_channel: {}, by_status: {}, by_reason: {} })),
+    ]);
+    rememberRuntime(settings);
+    const items = data.items || [];
+    const high = items.filter((p) => p.confidence === "high").length;
+    const medium = items.filter((p) => p.confidence === "medium").length;
+    const longCount = items.filter((p) => p.bias === "long").length;
+    const shortCount = items.filter((p) => p.bias === "short").length;
+    view().innerHTML = `
+      ${pageHead("Trading Radar", "Точки интереса из кластеров аномальных сигналов.", `<a href="#/signals">Raw signals</a>`)}
+      ${metrics([
+        { label: "POI", value: n(data.total, 0), hint: activePeriodShort() },
+        { label: "High", value: n(high, 0), hint: "confidence" },
+        { label: "Medium", value: n(medium, 0), hint: "watchlist" },
+        { label: "Bias", value: n(longCount, 0) + "L / " + n(shortCount, 0) + "S", hint: data.contract_version || "poi_v1" },
+      ])}
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>POI Queue</h2><span class="muted">${esc(n(data.source_signal_total, 0))} raw signals sampled</span></div>
+          ${table(poiHeaders(), items.map(poiRow), "Нет точек интереса за выбранный период")}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Tickers In Play</h2><span class="muted">ranked by max score</span></div>
+          ${table(
+            [
+              { label: "Ticker" },
+              { label: "POI", cls: "num" },
+              { label: "Score" },
+              { label: "Bias" },
+              { label: "Setups" },
+            ],
+            tickerRowsInPlay(items),
+            "Нет активных тикеров"
+          )}
+        </section>
+      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>POI Delivery Dry-run</h2><span class="muted">no Telegram side effects</span></div>
+        <div class="grid-2">
+          <section class="mini-panel">
+            <h3>Channels</h3>
+            ${barList(Object.entries(poiSimulation.by_channel || {}).map(([k, v]) => [k, v, Math.max(1, poiSimulation.count || 1)]))}
+          </section>
+          <section class="mini-panel">
+            <h3>Reasons</h3>
+            ${barList(Object.entries(poiSimulation.by_reason || {}).map(([k, v]) => [k, v, Math.max(1, poiSimulation.count || 1)]))}
+          </section>
+        </div>
+      </section>
+    `;
+    bindPoiJournalActions(items, () => pageRadar());
+  }
+
+  function poiSourceHealth(sourceHealth, instrumentId) {
+    const row = ((sourceHealth || {}).items || []).find((item) => item.instrument_id === instrumentId);
+    if (!row) return null;
+    return row;
+  }
+
+  function sourceHealthPanel(row) {
+    if (!row) {
+      return `<section class="panel">
+        <div class="panel-head"><h2>Source Health</h2></div>
+        <div class="panel-body"><div class="empty">source health unavailable</div></div>
+      </section>`;
+    }
+    const sources = row.source_health || {};
+    const sourceStatuses = Object.entries(sources).map(([source, info]) => source + ":" + (info.status || "unknown"));
+    const okCount = Object.values(sources).filter((info) => info && info.status === "ok").length;
+    const subscribedCount = Object.values(sources).filter((info) => info && info.subscribed).length;
+    const overall = subscribedCount > 0 && okCount === subscribedCount ? "ok" : okCount > 0 ? "partial" : "unknown";
+    const blocked = row.impossible_signal_types || [];
+    return `<section class="panel">
+      <div class="panel-head"><h2>Source Health</h2>${badge(overall, overall === "ok" ? "b-high" : overall === "partial" ? "b-medium" : "b-unknown")}</div>
+      <div class="panel-body stack">
+        ${decisionLine("Instrument", row.instrument_id || "")}
+        ${decisionLine("Sources", sourceStatuses.join(" / ") || "-")}
+        ${decisionLine("Blocked", blocked.slice(0, 5).map((r) => r.signal_type + ":" + r.reason).join(" / ") || "-")}
+      </div>
+    </section>`;
+  }
+
+  function poiDriverTable(drivers) {
+    return table(
+      [
+        { label: "Type" },
+        { label: "Quality", cls: "num" },
+        { label: "z", cls: "num" },
+        { label: "Delivery" },
+        { label: "Headline" },
+      ],
+      (drivers || []).map((d) => `<tr>
+        <td class="clip">${esc(d.signal_type || "")}</td>
+        <td class="num">${n(d.quality_score, 0)}</td>
+        <td class="num">${n(d.z_score, 2)}</td>
+        <td>${deliveryBadge(d.delivery_status)}<div class="muted clip">${esc(d.delivery_reason || "")}</div></td>
+        <td class="clip">${esc(d.headline || "")}</td>
+      </tr>`),
+      "Нет драйверов"
+    );
+  }
+
+  function poiNearbyTable(signals) {
+    return table(
+      [
+        { label: "Time" },
+        { label: "Signal" },
+        { label: "Quality", cls: "num" },
+        { label: "Severity" },
+        { label: "Delivery" },
+        { label: "Summary" },
+      ],
+      (signals || []).map((row) => `<tr>
+        <td class="mono">${shortTime(row.detected_at)}</td>
+        <td>${row.signal_id ? `<a href="#/signal?id=${encodeURIComponent(row.signal_id)}">${esc(row.signal_type || "")}</a>` : esc(row.signal_type || "")}</td>
+        <td class="num">${n(row.quality_score, 0)}</td>
+        <td>${severityBadge(row.severity)}</td>
+        <td>${deliveryBadge(row.delivery_status)}</td>
+        <td class="clip">${esc(row.summary || "")}</td>
+      </tr>`),
+      "Нет nearby signals"
+    );
+  }
+
+  async function pagePoi(id) {
+    if (!id) {
+      view().innerHTML = `${pageHead("POI", "")}<div class="empty">poi_id missing</div>`;
+      return;
+    }
+    const [poi, sourceHealth] = await Promise.all([
+      api("/admin/api/poi/" + encodeURIComponent(id) + params({ minutes: state.minutes })),
+      api("/admin/api/source-health" + params({ minutes: sourceHealthMinutes() })).catch(() => null),
+    ]);
+    const healthRow = poiSourceHealth(sourceHealth, poi.instrument_id);
+    const terminalUrl = terminalUrlForPoi(poi);
+    view().innerHTML = `
+      ${pageHead(
+        (poi.ticker || poi.instrument_id) + " / " + (poi.setup_type || "poi"),
+        poi.human_summary_ru || "",
+        `<a href="#/radar">Back to radar</a> ${terminalUrl ? `<a href="${esc(terminalUrl)}" target="_blank">Tbank</a>` : ""}`
+      )}
+      <div class="detail-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>Scenario</h2><div class="row">${poiBiasBadge(poi.bias)} ${confidenceBadge(poi.confidence)} ${scoreBadge(poi.interest_score)}</div></div>
+          <div class="panel-body stack">
+            <div class="summary-text">${esc(poi.human_summary_ru || "")}</div>
+            <div class="grid-3">
+              ${miniMetric("Detected", shortTime(poi.detected_at))}
+              ${miniMetric("Updated", shortTime(poi.updated_at))}
+              ${miniMetric("Price", levelValue(poi.price))}
+              ${miniMetric("Entry", entryZoneText(poi.entry_zone))}
+              ${miniMetric("Invalidation", levelValue(poi.invalidation_price))}
+              ${miniMetric("Targets", levelValue(poi.target_1) + " / " + levelValue(poi.target_2))}
+            </div>
+          </div>
+        </section>
+        ${sourceHealthPanel(healthRow)}
+      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>Journal</h2><a href="#/journal">Open journal</a></div>
+        <div class="panel-body">
+          <form id="poiJournalForm" class="filters">
+            <label>Action
+              <select id="poiAction">
+                ${selectOption("watch", "Watch", "watch")}
+                ${selectOption("dismiss", "Dismiss", "watch")}
+                ${selectOption("paper_long", "Paper Long", "watch")}
+                ${selectOption("paper_short", "Paper Short", "watch")}
+                ${selectOption("missed", "Missed", "watch")}
+                ${selectOption("useful", "Useful", "watch")}
+                ${selectOption("noise", "Noise", "watch")}
+                ${selectOption("unsure", "Unsure", "watch")}
+              </select>
+            </label>
+            <label>Entry<input id="poiEntry" placeholder="${esc(levelValue(poi.price))}" /></label>
+            <label>Exit<input id="poiExit" placeholder="optional" /></label>
+            <label>Result<input id="poiResult" placeholder="win/loss/flat" /></label>
+            <label>Note<input id="poiNote" placeholder="trade idea, miss reason, context" /></label>
+            <div class="row"><button class="primary" type="submit">Save mark</button></div>
+          </form>
+        </div>
+      </section>
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Drivers</h2></div>
+          ${poiDriverTable(poi.drivers || [])}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Nearby Raw Signals</h2></div>
+          ${poiNearbyTable(poi.nearby_signals || [])}
+        </section>
+      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>POI Payload</h2></div>
+        <div class="panel-body"><pre class="json">${esc(JSON.stringify(poi, null, 2))}</pre></div>
+      </section>
+    `;
+    bindPoiDetailJournal(poi);
+  }
+
+  function bindPoiDetailJournal(poi) {
+    const form = document.getElementById("poiJournalForm");
+    if (!form) return;
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const action = document.getElementById("poiAction").value;
+      await savePoiJournal(poi, action, {
+        note: document.getElementById("poiNote").value,
+        entry_price: numberOrNull(document.getElementById("poiEntry").value),
+        exit_price: numberOrNull(document.getElementById("poiExit").value),
+        result: document.getElementById("poiResult").value,
+      });
+      location.hash = "#/journal";
+    };
+  }
+
+  function numberOrNull(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const num = Number(text.replace(",", "."));
+    return Number.isFinite(num) ? num : null;
   }
 
   async function pageTriage() {
@@ -1087,9 +1480,12 @@
 
   async function pageAccuracy() {
     try {
-      const data = await api("/admin/api/accuracy");
+      const [data, poiData] = await Promise.all([
+        api("/admin/api/accuracy"),
+        api("/admin/api/poi-accuracy").catch((err) => ({ status: "error", error: err.message, summary: {} })),
+      ]);
       const summary = data.summary || {};
-      view().innerHTML = accuracyHtml(data, summary);
+      view().innerHTML = accuracyHtml(data, summary, poiData);
       return;
       view().innerHTML = `
         ${pageHead("Accuracy", "Офлайн JSON из duckdb_label_signals.")}
@@ -1103,10 +1499,76 @@
     }
   }
 
-  function accuracyHtml(data, summary) {
+  async function pageJournal() {
+    const data = await api("/admin/api/journal" + params({ minutes: state.minutes, limit: 200 }));
+    const s = data.summary || {};
+    view().innerHTML = `
+      ${pageHead("Journal", "Ручная разметка POI и paper trading.")}
+      ${metrics([
+        { label: "Marks", value: n(s.total, 0), hint: activePeriodShort() },
+        { label: "Paper", value: n(s.paper_trades, 0), hint: n(s.closed_paper_trades, 0) + " closed" },
+        { label: "PnL", value: s.paper_pnl == null ? "-" : n(s.paper_pnl, 4), hint: "price units" },
+        { label: "Win-rate", value: pct(s.win_rate), hint: n(s.missed, 0) + " missed" },
+      ])}
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Journal Entries</h2></div>
+          ${journalTable(data.items || [])}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Actions</h2></div>
+          ${journalActionTable((s.by_action && Object.entries(s.by_action)) || [])}
+        </section>
+      </div>
+    `;
+  }
+
+  function journalTable(rows) {
+    return table(
+      [
+        { label: "Updated" },
+        { label: "Ticker" },
+        { label: "Action" },
+        { label: "Setup" },
+        { label: "Entry", cls: "num" },
+        { label: "Exit", cls: "num" },
+        { label: "PnL", cls: "num" },
+        { label: "Note" },
+      ],
+      rows.map((row) => `<tr>
+        <td class="mono">${shortTime(row.updated_at)}</td>
+        <td><a href="#/poi?id=${encodeURIComponent(row.poi_id)}"><strong>${esc(row.ticker || row.instrument_id || "POI")}</strong></a><div class="muted">${esc(row.instrument_id || "")}</div></td>
+        <td>${badge(row.action || "unknown", row.action === "noise" || row.action === "dismiss" ? "b-low" : row.action === "useful" ? "b-high" : "b-medium")}</td>
+        <td class="clip">${esc(row.setup_type || "")}<div class="muted">${esc(row.bias || "")}</div></td>
+        <td class="num">${levelValue(row.entry_price)}</td>
+        <td class="num">${levelValue(row.exit_price)}</td>
+        <td class="num">${row.paper_pnl == null ? "-" : n(row.paper_pnl, 4)}</td>
+        <td class="clip">${esc(row.note || "")}</td>
+      </tr>`),
+      "Нет записей journal"
+    );
+  }
+
+  function journalActionTable(entries) {
+    return table(
+      [
+        { label: "Action" },
+        { label: "Count", cls: "num" },
+      ],
+      entries.map(([action, count]) => `<tr>
+        <td>${esc(action)}</td>
+        <td class="num">${n(count, 0)}</td>
+      </tr>`),
+      "Нет действий"
+    );
+  }
+
+  function accuracyHtml(data, summary, poiData) {
+    const poiSummary = (poiData && poiData.summary) || {};
     return `
       ${pageHead("Accuracy", "Offline DuckDB accuracy report from signal_accuracy.json.")}
       ${data.status === "missing" ? `<div class="empty">Accuracy JSON is not built yet: ${esc(data.path || "")}</div>` : ""}
+      ${poiData && poiData.status === "missing" ? `<div class="empty">POI accuracy JSON is not built yet: ${esc(poiData.path || "")}</div>` : ""}
       <section class="panel">
         <div class="panel-head"><h2>Forward Horizons</h2></div>
         ${accuracyHorizonTable(summary.horizons || [])}
@@ -1132,10 +1594,80 @@
         </section>
       </div>
       <section class="panel">
+        <div class="panel-head"><h2>POI Horizons</h2><span class="muted">${esc(poiSummary.contract_version || "poi_accuracy_v1")}</span></div>
+        ${poiAccuracyHorizonTable(poiSummary.horizons || [])}
+      </section>
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>POI By Setup</h2></div>
+          ${poiAccuracyMetricTable(poiSummary.by_setup_type || [], "setup_type")}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>POI By Bias</h2></div>
+          ${poiAccuracyMetricTable(poiSummary.by_bias || [], "bias")}
+        </section>
+      </div>
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>POI By Score Tier</h2></div>
+          ${poiAccuracyMetricTable(poiSummary.by_score_tier || [], "score_tier")}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>POI By Ticker</h2></div>
+          ${poiAccuracyMetricTable((poiSummary.by_ticker || []).slice(0, 80), "ticker")}
+        </section>
+      </div>
+      <section class="panel">
         <div class="panel-head"><h2>Raw JSON</h2></div>
         <div class="panel-body"><pre class="json">${esc(JSON.stringify(data.raw || {}, null, 2))}</pre></div>
       </section>
     `;
+  }
+
+  function poiAccuracyHorizonTable(rows) {
+    return table(
+      [
+        { label: "Horizon" },
+        { label: "Hit-rate", cls: "num" },
+        { label: "Hits", cls: "num" },
+        { label: "Misses", cls: "num" },
+        { label: "Count", cls: "num" },
+        { label: "Median", cls: "num" },
+        { label: "MFE", cls: "num" },
+        { label: "MAE", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td>${esc(r.horizon)}</td>
+        <td class="num">${r.directional_hit_rate == null ? "-" : pct(r.directional_hit_rate)}</td>
+        <td class="num">${n(r.directional_hits, 0)}</td>
+        <td class="num">${n(r.directional_misses, 0)}</td>
+        <td class="num">${n(r.poi_count || r.count, 0)}</td>
+        <td class="num">${r.median_forward_return_pct == null ? "-" : n(r.median_forward_return_pct, 3) + "%"}</td>
+        <td class="num">${r.median_mfe_pct == null ? "-" : n(r.median_mfe_pct, 3) + "%"}</td>
+        <td class="num">${r.median_mae_pct == null ? "-" : n(r.median_mae_pct, 3) + "%"}</td>
+      </tr>`),
+      "No POI accuracy horizons yet"
+    );
+  }
+
+  function poiAccuracyMetricTable(rows, key) {
+    return table(
+      [
+        { label: key },
+        { label: "H" },
+        { label: "Count", cls: "num" },
+        { label: "Hit-rate", cls: "num" },
+        { label: "Median", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td class="clip">${esc(r[key] || "unknown")}</td>
+        <td>${esc(r.horizon || "")}</td>
+        <td class="num">${n(r.poi_count || r.count, 0)}</td>
+        <td class="num">${r.directional_hit_rate == null ? "-" : pct(r.directional_hit_rate)}</td>
+        <td class="num">${r.median_forward_return_pct == null ? "-" : n(r.median_forward_return_pct, 3) + "%"}</td>
+      </tr>`),
+      "No POI grouped accuracy data"
+    );
   }
 
   function accuracyHorizonTable(rows) {
@@ -1287,8 +1819,8 @@
 
   async function loadCurrent() {
     const r = route();
-    const active = r.name === "signal" ? "signals" : (
-      nav.some((x) => x[0] === r.name) ? r.name : "triage"
+    const active = r.name === "signal" ? "signals" : r.name === "poi" ? "radar" : (
+      nav.some((x) => x[0] === r.name) ? r.name : "radar"
     );
     renderShell(active);
     if (!state.token) {
@@ -1296,15 +1828,18 @@
       return;
     }
     try {
-      if (r.name === "signals") await pageSignals();
+      if (r.name === "radar") await pageRadar();
+      else if (r.name === "signals") await pageSignals();
       else if (r.name === "delivery") await pageDelivery();
       else if (r.name === "calibration") await pageCalibration();
       else if (r.name === "feedback") await pageFeedback();
       else if (r.name === "instruments") await pageInstruments();
+      else if (r.name === "journal") await pageJournal();
       else if (r.name === "accuracy") await pageAccuracy();
       else if (r.name === "settings") await pageSettings();
       else if (r.name === "signal") await pageSignal(r.params.get("id"));
-      else await pageTriage();
+      else if (r.name === "poi") await pagePoi(r.params.get("id"));
+      else await pageRadar();
     } catch (err) {
       showError(err);
     }
@@ -1315,7 +1850,8 @@
     loadCurrent();
   });
   setInterval(() => {
-    if (state.auto && state.token && route().name !== "signal") {
+    const name = route().name;
+    if (state.auto && state.token && name !== "signal" && name !== "poi") {
       loadCurrent();
     }
   }, 30000);

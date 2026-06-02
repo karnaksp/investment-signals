@@ -27,6 +27,32 @@ Signal Cockpit — статическая админка для triage сигн�
 
 В таблицах и карточке сигнала Cockpit использует `payload.interpretation`: короткую human-readable строку и набор фактов. Поэтому `price_jump` показывает направление и процент изменения цены, `volume_spike` — оценочный оборот в деньгах, а orderbook-сигналы — bid/ask, spread и сторону перекоса без ручного чтения JSON.
 
+## Manual intraday workflow
+
+The cockpit is evolving from a raw signal triage screen into a manual intraday trading cockpit. The operator flow is:
+
+1. Raw detector signals stay storage-first in Postgres/Kafka and remain visible even when delivery suppresses them.
+2. The cockpit groups actionable signals into Points of Interest (POI): ticker, direction, price/volume/orderbook context, quality, delivery status, and the reason it deserves review.
+3. The operator records a paper-trading or journal decision against the POI: watched, skipped, paper entry, paper exit, thesis, invalidation, and outcome.
+4. Accuracy views compare POI and signal decisions with forward VWAP/price movement, feedback labels, and delivery status.
+5. Delivery policy stays conservative: unproven POI types should start as `admin_only` or `digest` and only move to realtime after journal, feedback, and accuracy evidence supports promotion.
+
+POI is not a promise that the system will trade automatically. It is the cockpit unit for human review, paper trading, and later calibration.
+
+## Trading Radar MVP
+
+The current POI implementation is read-time and conservative:
+
+- `#/radar` is now the default admin route.
+- `/admin/api/poi` builds Points of Interest from stored signal rows grouped by instrument and a short time window.
+- `/admin/api/poi/{poi_id}` returns a POI detail view with scenario summary, drivers, nearby raw signals, source health, and Tbank links.
+- `/admin/api/poi/delivery/simulation` classifies POIs into `realtime`, `digest`, or `admin_only` candidates without mutating payloads or sending Telegram.
+- `/admin/api/poi/feedback` saves manual journal actions such as `watch`, `dismiss`, `paper_long`, `paper_short`, `missed`, `useful`, `noise`, and `unsure`.
+- `#/journal` shows manual POI marks, paper PnL, win-rate, missed opportunities, and notes.
+- `/admin/api/poi-accuracy` reads `var/accuracy/poi_accuracy.json` next to the signal accuracy file and returns a safe empty state when it is missing.
+
+V1 POIs are not persisted as a separate entity. The journal stores the POI id and snapshot metadata, while raw detector signals remain the source of truth.
+
 ## Запуск
 
 1. Задайте `ADMIN_API_TOKEN` в `.env`.
@@ -77,6 +103,8 @@ Rate-limit и instrument cooldown проверяются не только в п
 
 Quick feedback controls are available directly in `Triage` and `Signals`: `Useful`, `Noise`, and `Unsure` save `/admin/api/feedback` without opening the signal drawer. The `Signals` feedback filter supports `unlabeled` for rows that still need review.
 
+For manual POI review, treat `Triage` as the queue, `Signals` as the audit trail, `Delivery` as the suppression explanation, `Calibration` as the threshold review surface, and `Accuracy` as the evidence layer before promoting a POI family to wider delivery.
+
 <a id="screens"></a>
 
 ## Примеры экранов
@@ -125,3 +153,17 @@ Quick feedback controls are available directly in `Triage` and `Signals`: `Usefu
 | `/admin/api/calibration` | Матрица калибровки по type/quality/feedback. |
 | `/admin/api/instruments` | Configured universe + activity stats. |
 | `/admin/api/settings` | Read-only runtime settings для Cockpit. |
+
+### POI Routes and API
+
+| Surface | Purpose |
+|---|---|
+| `#/radar` | Default Trading Radar: POI queue, tickers in play, bias/score/levels, POI delivery dry-run, quick journal actions. |
+| `#/poi?id=...` | POI detail: scenario, source health, drivers, nearby raw signals, journal form, and raw POI JSON. |
+| `#/journal` | Manual POI actions and paper-trading results. |
+| `/admin/api/poi` | Read-time POI queue built from stored signals. |
+| `/admin/api/poi/{poi_id}` | POI detail contract with drivers and nearby raw signals. |
+| `/admin/api/poi/feedback` | Save manual POI journal/paper-trading action. |
+| `/admin/api/poi/delivery/simulation` | Dry-run POI delivery policy; no Telegram side effects. |
+| `/admin/api/journal` | Manual POI journal with paper PnL and win-rate summary. |
+| `/admin/api/poi-accuracy` | POI accuracy JSON summary with safe missing-file state. |

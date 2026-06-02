@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from tinvest_signal_engine.poi import build_pois_from_signal_rows
 from tinvest_signal_engine.services import api as api_module
 
 
@@ -334,6 +335,36 @@ def test_admin_accuracy_missing_returns_empty_state(
     assert data["summary"]["horizons"] == []
 
 
+def test_admin_poi_accuracy_missing_returns_empty_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("SIGNAL_ACCURACY_JSON_PATH", str(tmp_path / "signal_accuracy.json"))
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.get(
+            "/admin/api/poi-accuracy",
+            headers={"X-Admin-Token": "test-secret-token"},
+        )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "missing"
+    assert data["path"].endswith("poi_accuracy.json")
+    assert data["summary"]["horizons"] == []
+
+
 def test_admin_delivery_simulation_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
     monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
@@ -441,6 +472,261 @@ def test_admin_delivery_simulation_admin_only_rollout_preset(
     assert item["simulated_delivery_status"] == "suppressed"
     assert item["simulated_delivery_reason"] == "type_rule_admin_only"
     assert item["simulated_delivery_channel"] == "admin_only"
+
+
+def test_admin_poi_list_and_detail_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+
+    rows = [
+        {
+            "signal_id": "00000000-0000-4000-8000-000000000010",
+            "detected_at": "2026-06-01T10:00:00+00:00",
+            "instrument_id": "SBER_TQBR",
+            "ticker": "SBER",
+            "class_code": "TQBR",
+            "alias": "sber",
+            "source_event_type": "trade",
+            "signal_type": "volume_spike",
+            "severity": 3,
+            "metric_value": 100.0,
+            "baseline_value": 10.0,
+            "z_score": 7.0,
+            "window_seconds": 60,
+            "summary": "volume",
+            "payload": {"quality_score": 80, "current_price": 100.0},
+            "delivery_status": "suppressed",
+            "delivery_reason": "test",
+        },
+        {
+            "signal_id": "00000000-0000-4000-8000-000000000011",
+            "detected_at": "2026-06-01T10:01:00+00:00",
+            "instrument_id": "SBER_TQBR",
+            "ticker": "SBER",
+            "class_code": "TQBR",
+            "alias": "sber",
+            "source_event_type": "trade",
+            "signal_type": "microstructure_combo_long",
+            "severity": 3,
+            "metric_value": 6.0,
+            "baseline_value": None,
+            "z_score": 5.0,
+            "window_seconds": 60,
+            "summary": "combo",
+            "payload": {"quality_score": 85, "direction": "buy", "current_price": 101.0},
+            "delivery_status": "delivered",
+            "delivery_reason": "combo_score",
+        },
+    ]
+    poi_id = build_pois_from_signal_rows(rows)[0]["poi_id"]
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_signals_page.return_value = (rows, len(rows))
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+
+    app = api_module.create_app()
+    hdrs = {"X-Admin-Token": "test-secret-token"}
+    with TestClient(app) as client:
+        listing = client.get("/admin/api/poi?minutes=1440&limit=10", headers=hdrs)
+        detail = client.get(f"/admin/api/poi/{poi_id}?minutes=1440", headers=hdrs)
+
+    assert listing.status_code == 200
+    payload = listing.json()
+    assert payload["contract_version"] == "poi_v1"
+    assert payload["count"] == 1
+    assert payload["source_signal_total"] == 2
+    assert payload["items"][0]["poi_id"] == poi_id
+    assert payload["items"][0]["bias"] == "long"
+    assert detail.status_code == 200
+    assert detail.json()["poi_id"] == poi_id
+
+
+def test_admin_poi_empty_and_bad_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_signals_page.return_value = ([], 0)
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+
+    app = api_module.create_app()
+    hdrs = {"X-Admin-Token": "test-secret-token"}
+    with TestClient(app) as client:
+        listing = client.get("/admin/api/poi", headers=hdrs)
+        bad = client.get("/admin/api/poi/not-a-uuid", headers=hdrs)
+
+    assert listing.status_code == 200
+    assert listing.json()["items"] == []
+    assert bad.status_code == 400
+
+
+def test_admin_poi_journal_save_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.upsert_poi_journal.return_value = None
+    mock_store.fetch_poi_journal.return_value = {
+        "items": [
+            {
+                "poi_id": "00000000-0000-4000-8000-000000000099",
+                "ticker": "SBER",
+                "action": "paper_long",
+                "paper_pnl": 1.5,
+            }
+        ],
+        "count": 1,
+        "summary": {"paper_trades": 1, "win_rate": 1.0},
+    }
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+
+    app = api_module.create_app()
+    hdrs = {"X-Admin-Token": "test-secret-token"}
+    with TestClient(app) as client:
+        saved = client.post(
+            "/admin/api/poi/feedback",
+            headers=hdrs,
+            json={
+                "poi_id": "00000000-0000-4000-8000-000000000099",
+                "action": "paper_long",
+                "instrument_id": "SBER_TQBR",
+                "ticker": "SBER",
+                "setup_type": "momentum_breakout",
+                "bias": "long",
+                "entry_price": 100.0,
+                "exit_price": 101.5,
+            },
+        )
+        listed = client.get(
+            "/admin/api/journal?poi_id=00000000-0000-4000-8000-000000000099",
+            headers=hdrs,
+        )
+
+    assert saved.status_code == 200
+    assert listed.status_code == 200
+    assert listed.json()["summary"]["paper_trades"] == 1
+    mock_store.upsert_poi_journal.assert_called_once()
+    assert mock_store.upsert_poi_journal.call_args.kwargs["action"] == "paper_long"
+    assert mock_store.fetch_poi_journal.call_args.kwargs["poi_id"] == (
+        "00000000-0000-4000-8000-000000000099"
+    )
+
+
+def test_admin_poi_journal_rejects_invalid_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/api/poi/feedback",
+            headers={"X-Admin-Token": "test-secret-token"},
+            json={
+                "poi_id": "00000000-0000-4000-8000-000000000099",
+                "action": "buy_real_money",
+            },
+        )
+
+    assert r.status_code == 422
+
+
+def test_admin_poi_delivery_simulation_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.delenv("CLICKHOUSE_HTTP_URL", raising=False)
+
+    rows = [
+        {
+            "signal_id": "00000000-0000-4000-8000-000000000020",
+            "detected_at": "2026-06-01T10:00:00+00:00",
+            "instrument_id": "SBER_TQBR",
+            "ticker": "SBER",
+            "class_code": "TQBR",
+            "alias": "sber",
+            "source_event_type": "trade",
+            "signal_type": "volume_spike",
+            "severity": 3,
+            "metric_value": 100.0,
+            "baseline_value": 10.0,
+            "z_score": 7.0,
+            "window_seconds": 60,
+            "summary": "volume",
+            "payload": {"quality_score": 90, "current_price": 100.0},
+            "delivery_status": "suppressed",
+            "delivery_reason": "test",
+        },
+        {
+            "signal_id": "00000000-0000-4000-8000-000000000021",
+            "detected_at": "2026-06-01T10:01:00+00:00",
+            "instrument_id": "SBER_TQBR",
+            "ticker": "SBER",
+            "class_code": "TQBR",
+            "alias": "sber",
+            "source_event_type": "trade",
+            "signal_type": "microstructure_combo_long",
+            "severity": 3,
+            "metric_value": 6.0,
+            "baseline_value": None,
+            "z_score": 8.0,
+            "window_seconds": 60,
+            "summary": "combo",
+            "payload": {"quality_score": 95, "direction": "buy", "current_price": 101.0},
+            "delivery_status": "delivered",
+            "delivery_reason": "combo_score",
+        },
+    ]
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_signals_page.return_value = (rows, len(rows))
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/api/poi/delivery/simulation",
+            headers={"X-Admin-Token": "test-secret-token"},
+            json={"minutes": 1440, "limit": 10},
+        )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["contract_version"] == "poi_v1"
+    assert data["count"] == 1
+    assert data["items"][0]["delivery_channel"] == "realtime"
+    assert data["items"][0]["delivery_status"] == "delivered_candidate"
 
 
 def test_admin_settings_exposes_configured_signal_catalog(

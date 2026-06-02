@@ -31,6 +31,7 @@ def _safe_identifier(value: str) -> str:
 
 
 _ADMIN_FEEDBACK_TABLE = _safe_identifier("signal_admin_feedback")
+_POI_JOURNAL_TABLE = _safe_identifier("poi_journal")
 
 
 def _quality_sql(alias: str = "ms") -> str:
@@ -51,10 +52,71 @@ def _delivery_reason_sql(alias: str = "ms") -> str:
     )
 
 
+def _format_poi_journal_row(row: dict[str, Any]) -> dict[str, Any]:
+    entry = row.get("entry_price")
+    exit_price = row.get("exit_price")
+    action = str(row.get("action") or "")
+    pnl = None
+    if isinstance(entry, (int, float)) and isinstance(exit_price, (int, float)):
+        if action == "paper_long":
+            pnl = float(exit_price) - float(entry)
+        elif action == "paper_short":
+            pnl = float(entry) - float(exit_price)
+    created_at = row.get("created_at")
+    updated_at = row.get("updated_at")
+    return {
+        "poi_id": str(row.get("poi_id") or ""),
+        "instrument_id": row.get("instrument_id") or "",
+        "ticker": row.get("ticker") or "",
+        "setup_type": row.get("setup_type") or "",
+        "bias": row.get("bias") or "",
+        "action": action,
+        "note": row.get("note") or "",
+        "entry_price": entry,
+        "exit_price": exit_price,
+        "result": row.get("result") or "",
+        "paper_pnl": pnl,
+        "created_at": created_at.isoformat() if created_at is not None else None,
+        "updated_at": updated_at.isoformat() if updated_at is not None else None,
+    }
+
+
+def _poi_journal_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    by_action: dict[str, int] = {}
+    paper_trades = 0
+    closed = 0
+    wins = 0
+    pnl_total = 0.0
+    missed = 0
+    for item in items:
+        action = str(item.get("action") or "unknown")
+        by_action[action] = by_action.get(action, 0) + 1
+        if action == "missed":
+            missed += 1
+        if action in {"paper_long", "paper_short"}:
+            paper_trades += 1
+            pnl = item.get("paper_pnl")
+            if isinstance(pnl, (int, float)):
+                closed += 1
+                pnl_total += float(pnl)
+                if float(pnl) > 0:
+                    wins += 1
+    return {
+        "total": len(items),
+        "by_action": by_action,
+        "paper_trades": paper_trades,
+        "closed_paper_trades": closed,
+        "paper_pnl": pnl_total if closed else None,
+        "win_rate": (wins / closed) if closed else None,
+        "missed": missed,
+    }
+
+
 class PostgresSignalStore:
     def __init__(self, settings: RuntimeSettings):
         self._table_name = _safe_identifier(settings.postgres_table)
         self._feedback_table = _ADMIN_FEEDBACK_TABLE
+        self._poi_journal_table = _POI_JOURNAL_TABLE
         self._settings = settings
         self._open_connection()
 
@@ -620,6 +682,126 @@ class PostgresSignalStore:
                     "note": (note or "").strip(),
                 },
             )
+
+    def upsert_poi_journal(
+        self,
+        *,
+        poi_id: str,
+        action: str,
+        instrument_id: str = "",
+        ticker: str = "",
+        setup_type: str = "",
+        bias: str = "",
+        note: str = "",
+        entry_price: float | None = None,
+        exit_price: float | None = None,
+        result: str = "",
+    ) -> None:
+        q = f"""
+            INSERT INTO {self._poi_journal_table} (
+                poi_id,
+                instrument_id,
+                ticker,
+                setup_type,
+                bias,
+                action,
+                note,
+                entry_price,
+                exit_price,
+                result,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                %(poi_id)s::uuid,
+                %(instrument_id)s,
+                %(ticker)s,
+                %(setup_type)s,
+                %(bias)s,
+                %(action)s,
+                %(note)s,
+                %(entry_price)s,
+                %(exit_price)s,
+                %(result)s,
+                NOW(),
+                NOW()
+            )
+            ON CONFLICT (poi_id) DO UPDATE SET
+                instrument_id = EXCLUDED.instrument_id,
+                ticker = EXCLUDED.ticker,
+                setup_type = EXCLUDED.setup_type,
+                bias = EXCLUDED.bias,
+                action = EXCLUDED.action,
+                note = EXCLUDED.note,
+                entry_price = EXCLUDED.entry_price,
+                exit_price = EXCLUDED.exit_price,
+                result = EXCLUDED.result,
+                updated_at = NOW()
+        """
+        with self._cursor() as cursor:
+            cursor.execute(
+                q,
+                {
+                    "poi_id": poi_id.strip(),
+                    "instrument_id": (instrument_id or "").strip(),
+                    "ticker": (ticker or "").strip(),
+                    "setup_type": (setup_type or "").strip(),
+                    "bias": (bias or "").strip(),
+                    "action": action.strip(),
+                    "note": (note or "").strip(),
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "result": (result or "").strip(),
+                },
+            )
+
+    def fetch_poi_journal(
+        self,
+        *,
+        limit: int = 200,
+        minutes: int = 0,
+        poi_id: str | None = None,
+    ) -> dict[str, Any]:
+        lim = max(1, min(int(limit), 500))
+        time_sql, time_params, all_time = self._admin_time_sql(minutes)
+        time_sql = time_sql.replace("detected_at", "updated_at")
+        conds = [time_sql]
+        params: dict[str, Any] = dict(time_params)
+        if poi_id:
+            conds.append("poi_id = %(poi_id)s::uuid")
+            params["poi_id"] = poi_id.strip()
+        params["limit"] = lim
+        where_sql = " AND ".join(conds)
+        q = f"""
+            SELECT
+                poi_id,
+                instrument_id,
+                ticker,
+                setup_type,
+                bias,
+                action,
+                note,
+                entry_price,
+                exit_price,
+                result,
+                created_at,
+                updated_at
+            FROM {self._poi_journal_table}
+            WHERE {where_sql}
+            ORDER BY updated_at DESC
+            LIMIT %(limit)s
+        """
+        with self._cursor(row_factory=dict_row) as cursor:
+            cursor.execute(q, params)
+            rows = [dict(row) for row in cursor.fetchall()]
+        items = [_format_poi_journal_row(row) for row in rows]
+        return {
+            "items": items,
+            "count": len(items),
+            "minutes": 0 if all_time else int(time_params.get("m", 0)),
+            "all_time": all_time,
+            "summary": _poi_journal_summary(items),
+        }
 
     def fetch_admin_signal_by_id(self, signal_id: str) -> dict[str, Any] | None:
         q = f"""

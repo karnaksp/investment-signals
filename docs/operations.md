@@ -36,6 +36,16 @@ python -m mkdocs build
 
 `.github/workflows/docs.yml` remains responsible for GitHub Pages deployment from `main`.
 
+## Develop Branch Workflow
+
+Use `develop` as the shared integration branch while the cockpit evolves. Multiple agents or contributors may work at the same time, so changes should be small, scoped, and easy to review.
+
+- Pull or rebase from `develop` before starting a slice and before opening a PR.
+- Do not revert unrelated local or remote edits; if another worker changed the same file, reconcile the intent instead of deleting their work.
+- Keep branch scope explicit: docs-only work stays in `docs/` and `CHANGELOG.md`; runtime work should not be mixed with documentation cleanup.
+- Prefer short PRs that name the cockpit slice: POI model, journal/paper trading, accuracy, delivery policy, or QA.
+- Update `CHANGELOG.md` for user-visible cockpit, delivery, accuracy, or workflow changes.
+
 ## Delivery Policy v3
 
 Delivery v3 keeps the storage-first rule: detector and enrichment save signals, delivery decides what can leave the system.
@@ -110,6 +120,17 @@ python scripts/duckdb_label_signals.py \
 ```
 
 The report groups forward VWAP metrics by signal type, ticker, quality tier, and delivery status. `/admin/api/accuracy` reads `SIGNAL_ACCURACY_JSON_PATH`; when the file is missing, it returns an empty state instead of failing the page.
+
+## POI, Journal, and Delivery QA
+
+QA for the manual intraday cockpit should cover the full operator path, not only raw detector output:
+
+- Raw signal persistence: suppressed, digest, admin-only, unknown, and delivered signals remain queryable in admin views.
+- POI review: a signal promoted into the POI queue keeps instrument, timestamp, signal type, quality, direction when available, delivery status, and explanation.
+- Journal and paper trading: operator decisions can be recorded without mutating raw signal facts; edits remain attributable and auditable.
+- Accuracy: generated JSON covers signal type, ticker, quality tier, delivery status, and forward horizons before a POI family is promoted.
+- Conservative delivery: new POI or signal types default to `admin_only` or `digest`; realtime delivery requires source-health, feedback, and accuracy evidence.
+- Regression checks: run unit tests, static JS syntax check, and MkDocs build when touched files affect the cockpit, docs, or admin behavior.
 
 ## Controlled Rollout
 

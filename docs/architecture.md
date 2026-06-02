@@ -56,6 +56,28 @@ flowchart LR
 8. **Локальный нотификатор** (на Windows-хосте) читает топик сигналов с `localhost` и показывает всплывающие уведомления.
 9. **Prometheus / Grafana** (compose) собирают метрики Redpanda и детектора (`detector_*`); при профиле `unary` — метрики `market_unary_*` на порту `MARKET_UNARY_METRICS_LISTEN_PORT` (см. `observability/prometheus.yml`, закомментированный job-пример).
 
+## Manual cockpit data flow
+
+The manual intraday Trading Cockpit adds an operator layer on top of the existing storage-first signal pipeline:
+
+```mermaid
+flowchart LR
+  RAW[Raw market events] --> DET[Detector signals]
+  DET --> STORE[(Postgres / Kafka signals)]
+  STORE --> POI[POI queue in cockpit]
+  POI --> JOURNAL[Journal / paper trade decisions]
+  JOURNAL --> ACC[POI and signal accuracy]
+  ACC --> POLICY[Conservative delivery policy]
+  POLICY --> TG[Telegram / webhook delivery]
+  POLICY -. admin_only / digest .-> POI
+```
+
+- Raw events and detector signals remain the source of truth; delivery suppression must not remove data needed for later review.
+- A Point of Interest (POI) is the cockpit-facing unit for manual intraday work: signal context, instrument, direction if known, quality, delivery decision, and nearby raw-market evidence.
+- Journal and paper-trading records are downstream annotations on a POI or signal, not detector inputs. They should be safe to add, edit, and audit without changing historical raw signals.
+- Accuracy jobs compare POI, signal, feedback, and paper-trading outcomes against forward market movement. Promotion to realtime delivery should depend on this evidence, not on a single strong-looking alert.
+- Conservative delivery is part of the architecture: new POI families start as `admin_only` or `digest`; realtime Telegram/webhook output is the last step after source health, feedback, and accuracy checks.
+
 ## Docker Compose: сервисы
 
 Файл `docker-compose.yml` задаёт связку процессов. Ниже — роль каждого сервиса.
