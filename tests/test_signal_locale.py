@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 
 from tinvest_signal_engine.models import TriggerSignal
 from tinvest_signal_engine.signal_enrichment import enrich_signal_for_delivery
+from tinvest_signal_engine.signal_interpretation import build_signal_interpretation
 from tinvest_signal_engine.signal_locale import (
     build_plain_explanation_ru,
+    build_telegram_html,
     signal_type_ru,
 )
 from tinvest_signal_engine.terminal_links import (
@@ -77,6 +79,101 @@ def test_enrich_preserves_summary_en_on_repeat() -> None:
     assert "<a href=" in s1.payload.get("telegram_html", "")
     s2 = enrich_signal_for_delivery(s1)
     assert s2.payload.get("summary_en") == s0.summary
+
+
+def test_price_jump_interpretation_has_signed_percent() -> None:
+    s = _signal(
+        signal_type="price_jump",
+        metric_value=125.0,
+        baseline_value=20.0,
+        payload={
+            "start_price": 100.0,
+            "current_price": 101.25,
+            "price_change": 1.25,
+            "price_change_pct": 1.25,
+            "price_direction": "up",
+        },
+    )
+    interp = build_signal_interpretation(s)
+    assert interp["direction"] == "up"
+    assert "+1,25%" in interp["headline_ru"]
+    assert any(f["key"] == "price_change_pct" for f in interp["facts"])
+
+
+def test_price_jump_without_signed_payload_does_not_guess_direction() -> None:
+    s = _signal(
+        signal_type="price_jump",
+        metric_value=188.0,
+        baseline_value=17.82,
+        z_score=10.53,
+        window_seconds=180,
+        payload={},
+    )
+    interp = build_signal_interpretation(s)
+    assert interp["direction"] == "unknown"
+    assert "Цена изменилась примерно на 1,88%" in interp["headline_ru"]
+    assert "выросла" not in interp["headline_ru"]
+
+
+def test_telegram_price_jump_uses_interpretation_not_legacy_text() -> None:
+    s = _signal(
+        signal_type="price_jump",
+        metric_value=188.0,
+        baseline_value=17.82,
+        z_score=10.53,
+        window_seconds=180,
+        payload={
+            "start_price": 100.0,
+            "current_price": 101.88,
+            "price_change": 1.88,
+            "price_change_pct": 1.88,
+            "price_direction": "up",
+        },
+    )
+    html = build_telegram_html(
+        s,
+        {"quality_score": 97, "quality_tier_ru": "высокая", "quality_hint_ru": "x"},
+        ticker_terminal_url="https://example.test/chart",
+        instrument_page_url="https://example.test/instrument",
+    )
+    assert "Цена выросла на +1,88%" in html
+    assert "Диапазон движения цены" not in html
+
+
+def test_volume_spike_interpretation_has_notional() -> None:
+    s = _signal(
+        signal_type="volume_spike",
+        metric_value=1200.0,
+        baseline_value=300.0,
+        payload={
+            "window_lots": 1200.0,
+            "window_units": 12000.0,
+            "window_notional": 3_420_000.0,
+            "last_price": 285.0,
+            "lot": 10,
+        },
+    )
+    interp = build_signal_interpretation(s)
+    assert "Оборот" in {f["label"] for f in interp["facts"]}
+    assert "₽" in interp["headline_ru"]
+
+
+def test_enrichment_adds_structured_interpretation() -> None:
+    s = _signal(
+        signal_type="price_jump",
+        payload={
+            "start_price": 100.0,
+            "current_price": 98.0,
+            "price_change": -2.0,
+            "price_change_pct": -2.0,
+            "price_direction": "down",
+        },
+    )
+    out = enrich_signal_for_delivery(s)
+    interp = out.payload.get("interpretation")
+    assert isinstance(interp, dict)
+    assert interp.get("direction") == "down"
+    assert out.payload.get("interpretation_ru") == interp.get("headline_ru")
 
 
 def test_spoofing_explanation_ask_not_bid() -> None:

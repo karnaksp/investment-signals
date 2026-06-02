@@ -25,6 +25,8 @@ Signal Cockpit — статическая админка для triage сигн�
 
 Админка не заменяет detector. Detector продолжает генерировать и сохранять все enriched-сигналы в Postgres/Kafka, а Cockpit показывает, что было доставлено в Telegram, что было подавлено и почему.
 
+В таблицах и карточке сигнала Cockpit использует `payload.interpretation`: короткую human-readable строку и набор фактов. Поэтому `price_jump` показывает направление и процент изменения цены, `volume_spike` — оценочный оборот в деньгах, а orderbook-сигналы — bid/ask, spread и сторону перекоса без ручного чтения JSON.
+
 ## Запуск
 
 1. Задайте `ADMIN_API_TOKEN` в `.env`.

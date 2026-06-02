@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 
 from .models import TriggerSignal
+from .signal_interpretation import build_signal_interpretation
 from .terminal_links import t_invest_web_terminal_url
 
 _SIGNAL_TYPE_RU: dict[str, str] = {
@@ -52,6 +53,11 @@ def _severity_ru(sev: int) -> str:
 
 def build_plain_explanation_ru(signal: TriggerSignal) -> str:
     """Короткое объяснение «что случилось» без английского жаргона в заголовке."""
+    interpretation = build_signal_interpretation(signal)
+    headline = interpretation.get("headline_ru")
+    if isinstance(headline, str) and headline.strip():
+        return headline.strip()
+
     st = signal.signal_type
     p = signal.payload or {}
     z = abs(float(signal.z_score))

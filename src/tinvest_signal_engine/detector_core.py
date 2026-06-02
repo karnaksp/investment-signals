@@ -204,7 +204,7 @@ class SignalDetector:
             TradePoint(
                 ts=event.source_time,
                 quantity=quantity,
-                notional=price * quantity,
+                notional=price * quantity * max(1, int(event.lot or 0)),
             )
         )
         signed_qty = _signed_quantity_from_trade_payload(
@@ -328,6 +328,16 @@ class SignalDetector:
                     "{ticker} spread widened to {metric:.2f} bps "
                     "vs baseline {baseline:.2f} (z={z_score:.2f})."
                 ),
+                payload_extra={
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "mid": mid,
+                    "spread_price": best_ask - best_bid,
+                    "spread_bps": spread_bps,
+                    "depth_levels": depth,
+                    "top_bid_qty": top_bids_qty,
+                    "top_ask_qty": top_asks_qty,
+                },
             )
         )
 
@@ -348,6 +358,20 @@ class SignalDetector:
                         "{ticker} order book imbalance reached {metric:.2f} "
                         "vs baseline {baseline:.2f} (z={z_score:.2f})."
                     ),
+                    payload_extra={
+                        "imbalance_abs": imbalance_abs,
+                        "imbalance_ratio": imbalance_ratio,
+                        "dominant_side": (
+                            "bid" if top_bids_qty >= top_asks_qty else "ask"
+                        ),
+                        "depth_levels": depth,
+                        "top_bid_qty": top_bids_qty,
+                        "top_ask_qty": top_asks_qty,
+                        "total_book_qty": total_qty,
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "mid": mid,
+                    },
                 )
             )
 
@@ -379,6 +403,15 @@ class SignalDetector:
                             baseline_label="obi delta",
                             window_seconds=cfg.orderbook_window_seconds,
                             summary_template=tmpl,
+                            payload_extra={
+                                "obi": obi,
+                                "previous_obi": state.last_sampled_obi,
+                                "delta_obi": delta_obi,
+                                "abs_delta_obi": abs(delta_obi),
+                                "depth_levels": depth,
+                                "top_bid_qty": top_bids_qty,
+                                "top_ask_qty": top_asks_qty,
+                            },
                         )
                     )
                 state.obi_delta_history.append(abs(delta_obi))
@@ -450,7 +483,10 @@ class SignalDetector:
         if not self._should_sample(state, "trade_window", event.source_time, cfg):
             return []
         total_qty = sum(point.quantity for point in state.trade_points)
+        total_notional = sum(point.notional for point in state.trade_points)
         trade_count = float(len(state.trade_points))
+        lot = max(1, int(event.lot or 0))
+        current_price = quotation_to_float(event.payload.get("price"))
         signals: list[TriggerSignal] = []
 
         signals.extend(
@@ -469,6 +505,14 @@ class SignalDetector:
                     "{ticker} rolling volume hit {metric:.2f} lots "
                     "vs baseline {baseline:.2f} (z={z_score:.2f})."
                 ),
+                payload_extra={
+                    "window_lots": total_qty,
+                    "window_units": total_qty * lot,
+                    "window_notional": total_notional,
+                    "window_notional_currency": "price_units",
+                    "last_price": current_price,
+                    "lot": lot,
+                },
             )
         )
 
@@ -488,6 +532,18 @@ class SignalDetector:
                     "{ticker} trade count reached {metric:.2f} "
                     "vs baseline {baseline:.2f} (z={z_score:.2f})."
                 ),
+                payload_extra={
+                    "trade_count": trade_count,
+                    "window_lots": total_qty,
+                    "window_units": total_qty * lot,
+                    "window_notional": total_notional,
+                    "window_notional_currency": "price_units",
+                    "avg_trade_notional": (
+                        total_notional / trade_count if trade_count > 0 else None
+                    ),
+                    "last_price": current_price,
+                    "lot": lot,
+                },
             )
         )
 
@@ -514,7 +570,8 @@ class SignalDetector:
         oldest_price = state.price_points[0].price
         if oldest_price <= 0:
             return []
-        move_bps = abs((current_price - oldest_price) / oldest_price) * 10_000
+        signed_move_bps = ((current_price - oldest_price) / oldest_price) * 10_000
+        move_bps = abs(signed_move_bps)
         if (
             cfg.price_move_absolute_threshold_bps > 0
             and move_bps < cfg.price_move_absolute_threshold_bps
@@ -535,6 +592,15 @@ class SignalDetector:
                 "{ticker} moved {metric:.2f} bps in {window}s "
                 "vs baseline {baseline:.2f} (z={z_score:.2f})."
             ),
+            payload_extra={
+                "start_price": oldest_price,
+                "current_price": current_price,
+                "price_change": current_price - oldest_price,
+                "price_change_bps": signed_move_bps,
+                "price_change_pct": signed_move_bps / 100.0,
+                "abs_price_change_bps": move_bps,
+                "price_direction": "up" if signed_move_bps > 0 else "down",
+            },
         )
 
         state.return_history.append(move_bps)
@@ -858,6 +924,7 @@ class SignalDetector:
         baseline_label: str,
         window_seconds: int,
         summary_template: str,
+        payload_extra: dict[str, Any] | None = None,
     ) -> list[TriggerSignal]:
         if len(history) < cfg.min_baseline_points:
             return []
@@ -874,6 +941,12 @@ class SignalDetector:
         if not self._is_alert_ready(state, signal_type, event.source_time, cfg):
             return []
         state.last_alert_at[signal_type] = event.source_time
+        payload = {
+            "baseline_label": baseline_label,
+            "event_payload": event.payload,
+        }
+        if payload_extra:
+            payload.update(payload_extra)
         return [
             TriggerSignal(
                 signal_id=str(uuid4()),
@@ -896,10 +969,7 @@ class SignalDetector:
                     z_score=z_score,
                     window=window_seconds,
                 ),
-                payload={
-                    "baseline_label": baseline_label,
-                    "event_payload": event.payload,
-                },
+                payload=payload,
             )
         ]
 
@@ -1021,6 +1091,9 @@ class SignalDetector:
             return []
         state.last_alert_at["aggressive_trade_burst"] = event.source_time
         direction = "buy" if signs[0] > 0 else "sell"
+        price = quotation_to_float(event.payload.get("price"))
+        lot = max(1, int(event.lot or 0))
+        notional = price * total_abs * lot if price is not None else None
         return [
             TriggerSignal(
                 signal_id=str(uuid4()),
@@ -1045,7 +1118,11 @@ class SignalDetector:
                     "print_count": len(dq),
                     "window_ms": cfg.trade_burst_window_ms,
                     "abs_qty_sum": total_abs,
-                    "lot": event.lot,
+                    "abs_units_sum": total_abs * lot,
+                    "last_price": price,
+                    "estimated_notional": notional,
+                    "estimated_notional_currency": "price_units",
+                    "lot": lot,
                 },
             )
         ]
@@ -1107,6 +1184,7 @@ class SignalDetector:
         dist_up = (lim_up - mid) / mid * 10_000.0
         dist_dn = (mid - lim_dn) / mid * 10_000.0
         nearest = min(dist_up, dist_dn)
+        nearest_side = "upper" if dist_up <= dist_dn else "lower"
         if nearest > cfg.limit_band_warning_bps:
             return []
         if not self._is_alert_ready(
@@ -1135,6 +1213,7 @@ class SignalDetector:
                 ),
                 payload={
                     "nearest_limit_distance_bps": nearest,
+                    "nearest_limit_side": nearest_side,
                     "limit_up": lim_up,
                     "limit_down": lim_dn,
                     "mid": mid,
@@ -1228,6 +1307,7 @@ class SignalDetector:
                 "{ticker} open interest {metric:.0f} vs baseline {baseline:.0f} "
                 "(z={z_score:.2f})."
             ),
+            payload_extra={"open_interest": oi},
         )
         state.open_interest_history.append(oi)
         state.last_sample_at["open_interest"] = event.source_time
@@ -1245,6 +1325,7 @@ class SignalDetector:
         o = quotation_to_float(event.payload.get("open"))
         h = quotation_to_float(event.payload.get("high"))
         low = quotation_to_float(event.payload.get("low"))
+        close = quotation_to_float(event.payload.get("close"))
         if o is None or h is None or low is None or o <= 0:
             return []
         range_bps = (h - low) / o * 10_000.0
@@ -1263,6 +1344,14 @@ class SignalDetector:
                 "{ticker} candle range {metric:.1f} bps vs baseline {baseline:.1f} "
                 "(z={z_score:.2f})."
             ),
+            payload_extra={
+                "open": o,
+                "high": h,
+                "low": low,
+                "close": close,
+                "range_bps": range_bps,
+                "range_pct": range_bps / 100.0,
+            },
         )
         state.candle_range_history.append(range_bps)
         self._trim_histories(state, cfg)

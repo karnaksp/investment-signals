@@ -134,6 +134,28 @@
     return delivered + q + Number(row.severity || 0) * 8 + Math.abs(Number(row.z_score || 0));
   }
 
+  function humanLine(row) {
+    const p = row.payload || {};
+    const i = p.interpretation || {};
+    return i.headline_ru || p.interpretation_ru || (row.summary || "").split("\n")[0] || "";
+  }
+
+  function interpretationFacts(payload) {
+    const i = (payload || {}).interpretation || {};
+    const facts = Array.isArray(i.facts) ? i.facts : [];
+    if (!facts.length) return "";
+    return `
+      <div class="fact-grid">
+        ${facts.slice(0, 12).map((f) => `
+          <div class="fact">
+            <div class="label">${esc(f.label || f.key || "")}</div>
+            <div class="value">${esc(f.value || "")}</div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
   function renderShell(active) {
     app.className = "";
     app.innerHTML = `
@@ -274,7 +296,7 @@
         <td>${qualityBadge(p.quality_score)}</td>
         <td>${severityBadge(row.severity)}</td>
         <td class="num">${n(row.z_score, 2)}</td>
-        <td class="clip">${esc((row.summary || "").split("\n")[0])}</td>
+        <td class="clip">${esc(humanLine(row))}</td>
       </tr>
     `;
   }
@@ -780,6 +802,7 @@
           <div class="panel-head"><h2>Signal</h2><div class="row">${deliveryBadge(row.delivery_status || p.delivery_status)} ${qualityBadge(p.quality_score)} ${severityBadge(row.severity)}</div></div>
           <div class="panel-body stack">
             <div class="summary-text">${esc(row.summary)}</div>
+            ${interpretationFacts(p)}
             <div class="grid-3">
               ${miniMetric("Detected", shortTime(row.detected_at))}
               ${miniMetric("z-score", n(row.z_score, 2))}

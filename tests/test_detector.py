@@ -135,6 +135,44 @@ class SignalDetectorTest(unittest.TestCase):
         signal_types = {signal.signal_type for signal in emitted}
         self.assertIn("volume_spike", signal_types)
 
+    def test_price_jump_payload_includes_signed_move_context(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                sample_every_seconds=5,
+                min_baseline_points=5,
+                baseline_points=20,
+                trade_window_seconds=60,
+                price_window_seconds=60,
+                alert_cooldown_seconds=0,
+                price_return_zscore_threshold=1.0,
+                price_move_absolute_threshold_bps=0.0,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        for index in range(6):
+            detector.process(
+                _trade_event(
+                    ts=start + timedelta(seconds=index * 5),
+                    quantity=10,
+                    price=100.0,
+                )
+            )
+
+        emitted = detector.process(
+            _trade_event(
+                ts=start + timedelta(seconds=35),
+                quantity=10,
+                price=102.0,
+            )
+        )
+
+        price_jump = next(s for s in emitted if s.signal_type == "price_jump")
+        self.assertEqual(price_jump.payload["price_direction"], "up")
+        self.assertAlmostEqual(price_jump.payload["price_change_pct"], 2.0)
+        self.assertEqual(price_jump.payload["start_price"], 100.0)
+        self.assertEqual(price_jump.payload["current_price"], 102.0)
+
     def test_min_relative_metric_excursion_blocks_flat_baseline_spike(self) -> None:
         """Высокий z при нулевом std не должен проходить без заметного относит. отклонения."""
         cfg = DetectorSettings(

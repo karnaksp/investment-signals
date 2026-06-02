@@ -1153,6 +1153,8 @@ def _webhook_payload(signal: TriggerSignal) -> dict[str, Any]:
     d["quality_tier"] = p.get("quality_tier")
     d["quality_tier_ru"] = p.get("quality_tier_ru")
     d["quality_factors"] = p.get("quality_factors")
+    d["interpretation"] = p.get("interpretation")
+    d["interpretation_ru"] = p.get("interpretation_ru")
     return d
 
 

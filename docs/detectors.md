@@ -20,6 +20,27 @@
 
 Текущий Telegram-gate намеренно строже записи в хранилище: `volume_spike` и `trade_rate_spike` требуют качества и z-score одновременно, `price_jump` требует extreme quality/z или подтверждения nearby trade activity, а standalone liquidity-сигналы подавляются без соседнего volume/trade/combo. `SIGNAL_DELIVERY_MAX_PER_HOUR` и `SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS` проверяются по Postgres history и in-memory state, поэтому рестарт detector не сбрасывает throttle.
 
+## Человекочитаемая интерпретация
+
+После detector-срабатывания слой enrichment добавляет в `payload_json` блок `interpretation`:
+
+- `headline_ru` — короткая строка для Telegram и таблицы админки: что именно произошло без чтения сырого payload.
+- `direction` — направление или сторона, если оно применимо: `up/down`, `bid/ask`, `long/short`, `buy/sell`, `activity`, `liquidity`.
+- `facts` — компактные пары `label/value/key` для Signal Cockpit detail.
+
+Примеры:
+
+| Signal | Что добавляется |
+|---|---|
+| `price_jump` | направление, `start_price`, `current_price`, `price_change`, `price_change_pct`, signed bps. |
+| `volume_spike` | лоты, штуки/контракты через `lot`, оценочный оборот `quantity * lot * price`, последняя цена. |
+| `trade_rate_spike` | число сделок, оборот окна, средний чек сделки. |
+| `spread_widening` | bid/ask, spread в цене и bps, объёмы верхних уровней. |
+| `orderbook_imbalance` | dominant side, bid/ask share, объёмы top-N уровней. |
+| `microstructure_combo_*` | score/min_score и компоненты, которые дали баллы. |
+
+Это не меняет пороги и количество сигналов: поля нужны для объяснимости в Telegram, webhook, API и админке.
+
 ## Источники данных (типы событий потока)
 
 | Тип события (`event_type`) | Торговый смысл | Что обновляет детектор |

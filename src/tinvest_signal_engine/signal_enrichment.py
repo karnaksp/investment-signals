@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .models import TriggerSignal
+from .signal_interpretation import build_signal_interpretation
 from .signal_locale import build_summary_ru, build_telegram_html
 from .signal_quality import compute_signal_quality
 from .terminal_links import (
@@ -32,6 +33,7 @@ def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
         instrument_uid=instrument_uid,
         class_code=signal.class_code,
     )
+    interpretation = build_signal_interpretation(signal)
     summary_ru = build_summary_ru(signal, quality)
     tg_html = build_telegram_html(
         signal,
@@ -46,6 +48,8 @@ def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
         "terminal_url": terminal_search_url,
         "instrument_page_url": instrument_url,
         "telegram_html": tg_html,
+        "interpretation": interpretation,
+        "interpretation_ru": interpretation.get("headline_ru"),
         **quality,
     }
     return replace(signal, summary=summary_ru, payload=payload)
