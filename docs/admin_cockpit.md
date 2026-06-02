@@ -75,6 +75,8 @@ Rate-limit и instrument cooldown проверяются не только в п
 | Accuracy | `#/accuracy` | JSON-метрики accuracy, если подготовлен `SIGNAL_ACCURACY_JSON_PATH`. |
 | Settings | `#/settings` | Read-only runtime config без секретов. |
 
+Quick feedback controls are available directly in `Triage` and `Signals`: `Useful`, `Noise`, and `Unsure` save `/admin/api/feedback` without opening the signal drawer. The `Signals` feedback filter supports `unlabeled` for rows that still need review.
+
 <a id="screens"></a>
 
 ## Примеры экранов

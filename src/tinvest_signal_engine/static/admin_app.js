@@ -9,6 +9,7 @@
     auto: localStorage.getItem("tinvest_admin_auto") !== "0",
     offset: 0,
     runtime: null,
+    signalRows: {},
     filters: {
       instrument: "",
       type: "",
@@ -125,6 +126,14 @@
   function deliveryBadge(status) {
     const s = status || "unknown";
     return badge(s, s === "delivered" ? "b-delivered" : s === "suppressed" ? "b-suppressed" : "b-unknown");
+  }
+
+  function feedbackBadge(label) {
+    const value = label || "unlabeled";
+    const cls = value === "useful" ? "b-high" :
+      value === "noise" ? "b-low" :
+      value === "unsure" ? "b-medium" : "b-unknown";
+    return badge(value, cls);
   }
 
   function qualityBadge(score) {
@@ -323,6 +332,59 @@
     `;
   }
 
+  function rememberSignalRows(rows) {
+    (rows || []).forEach((row) => {
+      if (row && row.signal_id) state.signalRows[row.signal_id] = row;
+    });
+  }
+
+  function feedbackControls(row) {
+    const current = row.admin_feedback_label || "";
+    const labels = [
+      ["useful", "Useful"],
+      ["noise", "Noise"],
+      ["unsure", "Unsure"],
+    ];
+    return `
+      <div class="feedback-cell">
+        ${feedbackBadge(current)}
+        <div class="feedback-actions">
+          ${labels.map(([value, label]) => `<button type="button" class="feedback-btn ${current === value ? "is-active" : ""}" data-signal-id="${esc(row.signal_id)}" data-feedback="${esc(value)}" title="Mark ${esc(label.toLowerCase())}">${esc(label)}</button>`).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function bindQuickFeedback(reloadFn) {
+    document.querySelectorAll(".feedback-btn").forEach((btn) => {
+      btn.onclick = async () => {
+        const signalId = btn.getAttribute("data-signal-id") || "";
+        const label = btn.getAttribute("data-feedback") || "";
+        if (!signalId || !label) return;
+        const row = state.signalRows[signalId] || {};
+        btn.disabled = true;
+        try {
+          await api("/admin/api/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              signal_id: signalId,
+              label,
+              note: row.admin_feedback_note || "",
+            }),
+          });
+          row.admin_feedback_label = label;
+          row.admin_feedback_at = new Date().toISOString();
+          state.signalRows[signalId] = row;
+          await reloadFn();
+        } catch (err) {
+          btn.disabled = false;
+          showError(err);
+        }
+      };
+    });
+  }
+
   function signalRow(row) {
     const p = row.payload || {};
     const status = row.delivery_status || p.delivery_status || "unknown";
@@ -335,6 +397,7 @@
         <td>${deliveryBadge(status)}<div class="muted clip">${esc(reason)}</div></td>
         <td>${qualityBadge(p.quality_score)}</td>
         <td>${severityBadge(row.severity)}</td>
+        <td>${feedbackControls(row)}</td>
         <td class="num">${n(row.z_score, 2)}</td>
         <td class="clip">${esc(humanLine(row))}</td>
       </tr>
@@ -349,6 +412,7 @@
       api("/admin/api/settings"),
     ]);
     rememberRuntime(settings);
+    rememberSignalRows(signals.items || []);
     const totals = delivery.totals || {};
     const all = totals.total || 0;
     const ranked = (signals.items || []).slice().sort((a, b) => signalScore(b) - signalScore(a)).slice(0, 14);
@@ -382,6 +446,7 @@
         </div>
       </div>
     `;
+    bindQuickFeedback(() => pageTriage());
   }
 
   function signalHeaders() {
@@ -392,6 +457,7 @@
       { label: "Delivery" },
       { label: "Quality" },
       { label: "Sev" },
+      { label: "Feedback" },
       { label: "z", cls: "num" },
       { label: "Summary" },
     ];
@@ -404,6 +470,7 @@
       { label: "Type" },
       { label: "Delivery" },
       { label: "Quality" },
+      { label: "Feedback" },
       { label: "z", cls: "num" },
     ];
   }
@@ -419,6 +486,7 @@
         <td><span class="clip">${esc(row.signal_type)}</span></td>
         <td>${deliveryBadge(status)}<div class="muted clip">${esc(reason)}</div></td>
         <td>${qualityBadge(p.quality_score)}</td>
+        <td>${feedbackControls(row)}</td>
         <td class="num">${n(row.z_score, 2)}</td>
       </tr>
     `;
@@ -542,6 +610,7 @@
       severity: state.filters.severity,
     };
     const data = await api("/admin/api/signals" + params(q));
+    rememberSignalRows(data.items || []);
     const exportUrl = "/admin/api/signals/export.csv" + params({
       ...q,
       offset: "",
@@ -560,6 +629,7 @@
       </section>
     `;
     bindFilters();
+    bindQuickFeedback(() => pageSignals());
     document.getElementById("prevPage").onclick = () => {
       state.offset = Math.max(0, state.offset - 50);
       pageSignals().catch(showError);
@@ -593,7 +663,7 @@
             ${selectOption("useful", "useful", state.filters.feedback)}
             ${selectOption("noise", "noise", state.filters.feedback)}
             ${selectOption("unsure", "unsure", state.filters.feedback)}
-            ${selectOption("none", "none", state.filters.feedback)}
+            ${selectOption("unlabeled", "unlabeled", state.filters.feedback)}
           </select>
         </label>
         <label>Severity

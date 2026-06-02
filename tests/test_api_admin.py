@@ -138,6 +138,64 @@ def test_admin_signal_filters_forwarded(monkeypatch: pytest.MonkeyPatch) -> None
     assert kwargs["signal_type"] == "volume_spike"
 
 
+def test_admin_signal_unlabeled_filter_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_signals_page.return_value = ([], 0)
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.get(
+            "/admin/api/signals?feedback=unlabeled",
+            headers={"X-Admin-Token": "test-secret-token"},
+        )
+
+    assert r.status_code == 200
+    assert mock_store.fetch_admin_signals_page.call_args.kwargs["feedback"] == "unlabeled"
+
+
+def test_admin_feedback_save_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.upsert_admin_feedback.return_value = None
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/api/feedback",
+            headers={"X-Admin-Token": "test-secret-token"},
+            json={
+                "signal_id": "00000000-0000-4000-8000-000000000001",
+                "label": "useful",
+                "note": "telegram-worthy",
+            },
+        )
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    mock_store.upsert_admin_feedback.assert_called_once_with(
+        signal_id="00000000-0000-4000-8000-000000000001",
+        label="useful",
+        note="telegram-worthy",
+    )
+
+
 def test_admin_instruments_merges_configured_universe_with_activity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
