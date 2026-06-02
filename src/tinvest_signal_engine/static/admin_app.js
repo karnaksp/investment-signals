@@ -49,30 +49,40 @@
   }
 
   function n(value, digits) {
-    if (value == null || value === "") return "—";
-    const num = Number(value);
-    if (!Number.isFinite(num)) return "—";
+    const num = finiteNumberOrNull(value);
+    if (num == null) return "-";
     return num.toLocaleString("ru-RU", {
       maximumFractionDigits: digits == null ? 1 : digits,
     });
   }
 
   function pct(value) {
-    const num = Number(value || 0);
-    if (!Number.isFinite(num)) return "—";
+    const num = finiteNumberOrNull(value);
+    if (num == null) return "-";
     return (num * 100).toFixed(1) + "%";
   }
 
   function shortTime(value) {
-    if (!value) return "—";
+    if (!value) return "-";
     const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return "—";
+    if (Number.isNaN(d.getTime())) return "-";
     return d.toLocaleString("ru-RU", {
       day: "2-digit",
       month: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
     });
+  }
+
+  function finiteNumberOrNull(value) {
+    if (value == null || value === "") return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  function finiteNumber(value, fallback) {
+    const num = finiteNumberOrNull(value);
+    return num == null ? fallback : num;
   }
 
   function params(obj) {
@@ -118,7 +128,7 @@
   }
 
   function qualityBadge(score) {
-    if (score == null || score === "") return badge("q —", "b-unknown");
+    if (score == null || score === "") return badge("q -", "b-unknown");
     const q = Number(score);
     const cls = q >= 72 ? "b-high" : q >= 48 ? "b-medium" : "b-low";
     return badge("q " + Math.round(q), cls);
@@ -126,7 +136,7 @@
 
   function severityBadge(sev) {
     const s = Number(sev || 0);
-    return badge("S" + (s || "—"), s >= 3 ? "b-sev3" : s === 2 ? "b-sev2" : "");
+    return badge("S" + (s || "-"), s >= 3 ? "b-sev3" : s === 2 ? "b-sev2" : "");
   }
 
   function signalScore(row) {
@@ -188,7 +198,7 @@
             <div class="topbar-left">
               <span class="status-dot"></span>
               <span id="runtimeBadge" class="runtime-badge"></span>
-              <span class="status-text"><strong>${esc(activeLabel(active))}</strong> · ${esc(periodLabel())}</span>
+              <span class="status-text"><strong>${esc(activeLabel(active))}</strong> / ${esc(periodLabel())}</span>
             </div>
             <div class="topbar-right">
               <select id="periodSelect" title="Период">
@@ -237,8 +247,8 @@
     const sha = String(rt.commit_sha || "unknown");
     const shortSha = sha === "unknown" ? sha : sha.slice(0, 12);
     const version = rt.app_version || "0.1.0";
-    const built = rt.build_time && rt.build_time !== "unknown" ? " · " + rt.build_time : "";
-    return "v" + version + " · " + shortSha + built;
+    const built = rt.build_time && rt.build_time !== "unknown" ? " / " + rt.build_time : "";
+    return "v" + version + " / " + shortSha + built;
   }
 
   function updateRuntimeBadge() {
@@ -483,7 +493,7 @@
       .filter((r) => !r.enabled)
       .slice(0, 3)
       .map((r) => (r.signal_type || "") + ":" + (r.reason || "blocked"));
-    return blocked.length ? blocked.join(" · ") : "all configured signals possible";
+    return blocked.length ? blocked.join(" / ") : "all configured signals possible";
   }
 
   function instrumentUniverseTable(rows) {
@@ -503,14 +513,14 @@
         const total = Number(r.total || 0);
         const delivered = Number(r.delivered || 0);
         return `<tr>
-          <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)} · ${esc(r.alias || "")}</div></td>
+          <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)} / ${esc(r.alias || "")}</div></td>
           <td>${sourceBadges(r.sources)}<div class="muted">book ${esc((r.subscriptions || {}).order_book_depth || "off")}</div></td>
           <td>${sourceHealthBadges(r.source_health)}</td>
           <td class="clip">${esc(unavailableSignalHint(r.signal_availability))}</td>
           <td class="num">${n(total, 0)}</td>
           <td class="num">${n(delivered, 0)}</td>
           <td class="num">${pct(total ? delivered / total : 0)}</td>
-          <td class="num">${r.avg_quality == null ? "—" : n(r.avg_quality, 1)}</td>
+          <td class="num">${r.avg_quality == null ? "-" : n(r.avg_quality, 1)}</td>
           <td>${shortTime(r.last_detected_at)}</td>
         </tr>`;
       }),
@@ -760,11 +770,11 @@
       `last ${n(source.last_price, 0)}`,
       `book ${n(source.orderbook, 0)}`,
       `info ${n(source.trading_status, 0)}`,
-    ].join(" · ");
+    ].join(" / ");
     return `<section class="panel">
       <div class="panel-head">
         <h2>Configured Detector Types</h2>
-        <span class="muted">${n(enabled.length, 0)} active / ${n(all.length, 0)} known · ${esc(sourceHint)}</span>
+        <span class="muted">${n(enabled.length, 0)} active / ${n(all.length, 0)} known / ${esc(sourceHint)}</span>
       </div>
       ${signalCatalogTable(all)}
     </section>`;
@@ -839,12 +849,12 @@
 
   async function pageFeedback() {
     const data = await api("/admin/api/feedback/overview" + params({ minutes: state.minutes }));
-    const s = data.summary || {};
+    const s = feedbackSummary(data);
     view().innerHTML = `
-      ${pageHead("Feedback Quality", "Р“РґРµ delivered-СЃРёРіРЅР°Р»С‹ С€СѓРјСЏС‚, Р° suppressed РјРѕРіР»Рё Р±С‹ Р±С‹С‚СЊ РїРѕР»РµР·РЅС‹РјРё.")}
+      ${pageHead("Feedback Quality", "Разметка useful/noise/unsure: где delivered-сигналы шумят, а suppressed могли быть полезными.")}
       ${metrics([
         { label: "Signals", value: n(s.total, 0), hint: activePeriodShort() },
-        { label: "Labeled", value: n(s.labeled, 0), hint: pct(s.coverage_rate || 0) },
+        { label: "Labeled", value: n(s.labeled, 0), hint: pct(s.coverage_rate) },
         { label: "Useful", value: n(feedbackTotal(data.totals, "useful"), 0), hint: "manual" },
         { label: "Noise", value: n(feedbackTotal(data.totals, "noise"), 0), hint: "manual" },
       ])}
@@ -871,10 +881,38 @@
     `;
   }
 
+  function feedbackSummary(data) {
+    const raw = data && data.summary ? data.summary : {};
+    const totals = feedbackRows(data && data.totals);
+    const totalFromRows = totals.reduce((acc, r) => acc + finiteNumber(r.signal_count, 0), 0);
+    const labeledFromRows = totals
+      .filter((r) => (r.feedback || "none") !== "none")
+      .reduce((acc, r) => acc + finiteNumber(r.signal_count, 0), 0);
+    const total = finiteNumber(raw.total ?? raw.total_signals, totalFromRows);
+    const labeled = finiteNumber(raw.labeled ?? raw.labeled_count, labeledFromRows);
+    const coverage = total > 0 ? labeled / total : 0;
+    return {
+      total,
+      labeled,
+      coverage_rate: finiteNumber(raw.coverage_rate, coverage),
+    };
+  }
+
+  function feedbackRows(rows) {
+    if (Array.isArray(rows)) return rows;
+    if (rows && typeof rows === "object") {
+      return Object.entries(rows).map(([feedback, signal_count]) => ({
+        feedback,
+        signal_count,
+      }));
+    }
+    return [];
+  }
+
   function feedbackTotal(rows, label) {
-    return (rows || [])
+    return feedbackRows(rows)
       .filter((r) => r.feedback === label)
-      .reduce((acc, r) => acc + Number(r.signal_count || 0), 0);
+      .reduce((acc, r) => acc + finiteNumber(r.signal_count, 0), 0);
   }
 
   function feedbackByTypeTable(rows) {
@@ -893,7 +931,7 @@
         <td class="num">${n(r.signal_count, 0)}</td>
         <td class="num">${n(r.avg_quality, 1)}</td>
       </tr>`),
-      "РџРѕРєР° РЅРµС‚ feedback-СЂР°Р·РјРµС‚РєРё"
+      "Пока нет feedback-разметки"
     );
   }
 
@@ -913,7 +951,7 @@
         <td class="num">${n(r.signal_count, 0)}</td>
         <td class="num">${n(r.avg_quality, 1)}</td>
       </tr>`),
-      "РќРµС‚ feedback РїРѕ С‚РёРєРµСЂР°Рј"
+      "Нет feedback по тикерам"
     );
   }
 
@@ -931,7 +969,7 @@
         <td class="num">${n(r.signal_count, 0)}</td>
         <td class="num">${n(r.avg_quality, 1)}</td>
       </tr>`),
-      "РќРµС‚ С‚Р°РєРёС… РјРµС‚РѕРє"
+      "Нет таких меток"
     );
   }
 
@@ -1034,7 +1072,7 @@
       ],
       rows.map((r) => `<tr>
         <td>${esc(r.horizon)}m</td>
-        <td class="num">${r.directional_hit_rate == null ? "—" : pct(r.directional_hit_rate)}</td>
+        <td class="num">${r.directional_hit_rate == null ? "-" : pct(r.directional_hit_rate)}</td>
         <td class="num">${n(r.directional_hits, 0)}</td>
         <td class="num">${n(r.directional_misses, 0)}</td>
         <td class="num">${n(r.directional_decided, 0)}</td>
@@ -1056,8 +1094,8 @@
         <td class="clip">${esc(r[key] || "unknown")}</td>
         <td>${esc(r.horizon || "")}</td>
         <td class="num">${n(r.signal_count, 0)}</td>
-        <td class="num">${r.directional_hit_rate == null ? "—" : pct(r.directional_hit_rate)}</td>
-        <td class="num">${r.median_forward_return_pct == null ? "—" : n(r.median_forward_return_pct, 3) + "%"}</td>
+        <td class="num">${r.directional_hit_rate == null ? "-" : pct(r.directional_hit_rate)}</td>
+        <td class="num">${r.median_forward_return_pct == null ? "-" : n(r.median_forward_return_pct, 3) + "%"}</td>
       </tr>`),
       "No grouped accuracy data"
     );
@@ -1092,7 +1130,7 @@
     const row = await api("/admin/api/signal/" + encodeURIComponent(id));
     const p = row.payload || {};
     view().innerHTML = `
-      ${pageHead(row.ticker + " · " + row.signal_type, row.instrument_id, `<a href="#/signals">Back to table</a>`)}
+      ${pageHead(row.ticker + " / " + row.signal_type, row.instrument_id, `<a href="#/signals">Back to table</a>`)}
       <div class="detail-grid">
         <section class="panel">
           <div class="panel-head"><h2>Signal</h2><div class="row">${deliveryBadge(row.delivery_status || p.delivery_status)} ${qualityBadge(p.quality_score)} ${severityBadge(row.severity)}</div></div>
@@ -1120,7 +1158,7 @@
             ${decisionLine("Priority", p.delivery_priority || "unknown")}
             ${decisionLine("Channel", p.delivery_channel || "unknown")}
             ${decisionLine("Explanation", p.delivery_explanation_ru || "unknown")}
-            ${decisionLine("Delivered at", p.delivered_at || "—")}
+            ${decisionLine("Delivered at", p.delivered_at || "-")}
           </div>
         </section>
       </div>
