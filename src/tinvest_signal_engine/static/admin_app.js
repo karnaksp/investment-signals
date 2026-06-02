@@ -633,7 +633,7 @@
   }
 
   async function pageDelivery() {
-    const [overview, reasons, settings, simulation] = await Promise.all([
+    const [overview, reasons, settings, simulation, rolloutSimulation] = await Promise.all([
       api("/admin/api/delivery/overview" + params({ minutes: state.minutes })),
       api("/admin/api/delivery/reasons" + params({ minutes: state.minutes })),
       api("/admin/api/settings"),
@@ -641,6 +641,11 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ preset: "conservative", minutes: Number(state.minutes || 0), limit: 200 }),
+      }),
+      api("/admin/api/delivery/simulation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset: "admin_only_rollout", minutes: Number(state.minutes || 0), limit: 200 }),
       }),
     ]);
     rememberRuntime(settings);
@@ -666,7 +671,8 @@
       </div>
       <section class="panel">
         <div class="panel-head"><h2>Dry-run Simulation</h2><span class="muted">conservative preset, no Telegram impact</span></div>
-        ${deliverySimulationPanel(simulation)}
+        ${deliverySimulationPanel(simulation, "Conservative gate")}
+        ${deliverySimulationPanel(rolloutSimulation, "Admin-only rollout")}
       </section>
       <section class="panel">
         <div class="panel-head"><h2>Recent Delivered</h2></div>
@@ -701,7 +707,7 @@
     );
   }
 
-  function deliverySimulationPanel(data) {
+  function deliverySimulationPanel(data, title) {
     const rows = data || {};
     const changed = (rows.changed_sample || []).slice(0, 10).map((r) => `<tr>
       <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)}</div></td>
@@ -711,6 +717,7 @@
       <td>${badge(r.simulated_delivery_channel || "admin_only")}</td>
     </tr>`);
     return `
+      <div class="panel-head"><h3>${esc(title || "Simulation")}</h3><span class="muted">${esc(rows.preset || "current")}</span></div>
       ${metrics([
         { label: "Sampled", value: n(rows.sampled, 0), hint: "stored rows" },
         { label: "Changed", value: n(rows.changed_count, 0), hint: "status delta" },

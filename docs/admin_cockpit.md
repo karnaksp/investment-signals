@@ -47,7 +47,7 @@ docker compose up -d api
 | `SIGNAL_DELIVERY_MIN_QUALITY` | Базовый floor качества для delivery policy. |
 | `SIGNAL_DELIVERY_MAX_PER_HOUR` | Глобальный cap Telegram/webhook-сигналов в час. |
 | `SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS` | Cooldown между delivered-сигналами по одному инструменту. |
-| `SIGNAL_DELIVERY_TYPE_RULES_JSON` | Optional per-type overrides в JSON. |
+| `SIGNAL_DELIVERY_TYPE_RULES_JSON` | Optional per-type overrides in JSON: `admin_only`, `channel=digest`, or explicit realtime promotion. |
 
 ## Delivery V2
 
