@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Iterator
@@ -18,8 +19,9 @@ from pydantic import BaseModel, Field, field_validator
 import uvicorn
 
 from ..admin_http_guard import AdminApiRateLimiter, admin_client_ip
-from ..clickhouse_context import fetch_raw_events_window
+from ..clickhouse_context import fetch_raw_events_window, fetch_source_health
 from ..config import RuntimeSettings, load_detector_config, load_instrument_configs
+from ..delivery_policy import DeliveryPolicy
 from ..market_unary import (
     RequestError as TinvestRequestError,
     fetch_market_values,
@@ -32,6 +34,8 @@ from ..market_unary import (
     resolve_instrument_registry,
 )
 from ..logging_utils import configure_logging
+from ..models import TriggerSignal
+from ..runtime_info import runtime_fingerprint
 from ..sinks import create_postgres_signal_store_with_retry
 
 _ADMIN_HTML_PATH = (
@@ -348,11 +352,326 @@ def _configured_instrument_catalog(settings: RuntimeSettings) -> dict[str, Any]:
     }
 
 
+def _source_health_response(
+    settings: RuntimeSettings,
+    *,
+    minutes: int,
+    stale_after_minutes: int,
+) -> dict[str, Any]:
+    catalog = _configured_instrument_catalog(settings)
+    raw_health_status = "unknown"
+    raw_error: str | None = None
+    raw_rows: list[dict[str, Any]] = []
+    if settings.clickhouse_http_url:
+        try:
+            raw_rows = fetch_source_health(
+                settings.clickhouse_http_url,
+                minutes=minutes,
+                username=settings.clickhouse_http_username,
+                password=settings.clickhouse_http_password,
+            )
+            raw_health_status = "ok"
+        except httpx.HTTPStatusError as exc:
+            raw_health_status = "error"
+            raw_error = f"ClickHouse HTTP {exc.response.status_code}"
+        except httpx.RequestError as exc:
+            raw_health_status = "error"
+            raw_error = f"ClickHouse недоступен: {exc}"
+
+    last_by_instrument: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in raw_rows:
+        iid = str(row.get("instrument_id") or "")
+        source = str(row.get("event_type") or "")
+        if not iid or not source:
+            continue
+        last_by_instrument.setdefault(iid, {})[source] = {
+            "last_source_time": row.get("last_source_time"),
+            "event_count": int(row.get("event_count") or 0),
+        }
+
+    now = datetime.now(timezone.utc)
+    try:
+        detector = load_detector_config(
+            settings.detector_path,
+            settings.detector_overrides_path,
+        )
+        detector_error = None
+    except Exception as exc:
+        detector = None
+        detector_error = f"{type(exc).__name__}: {exc}"
+
+    items: list[dict[str, Any]] = []
+    for raw_item in catalog.get("items", []):
+        item = dict(raw_item)
+        iid = str(item.get("instrument_id") or "")
+        subscriptions = item.get("subscriptions") if isinstance(item.get("subscriptions"), dict) else {}
+        source_status = _instrument_source_status(
+            subscriptions,
+            last_by_instrument.get(iid, {}),
+            now=now,
+            stale_after_minutes=stale_after_minutes,
+            clickhouse_status=raw_health_status,
+        )
+        availability = _instrument_signal_availability(
+            iid,
+            subscriptions,
+            source_status,
+            detector=detector,
+            detector_error=detector_error,
+        )
+        item["source_health"] = source_status
+        item["signal_availability"] = availability
+        item["impossible_signal_types"] = [
+            row for row in availability if not bool(row.get("enabled"))
+        ]
+        items.append(item)
+
+    ok_sources = sum(
+        1
+        for item in items
+        for source in (item.get("source_health") or {}).values()
+        if source.get("status") == "ok"
+    )
+    return {
+        "status": raw_health_status,
+        "error": raw_error,
+        "minutes": minutes,
+        "stale_after_minutes": stale_after_minutes,
+        "count": len(items),
+        "ok_source_count": ok_sources,
+        "items": items,
+        "config_error": catalog.get("config_error"),
+        "detector_error": detector_error,
+    }
+
+
+def _instrument_source_status(
+    subscriptions: dict[str, Any],
+    raw_events: dict[str, dict[str, Any]],
+    *,
+    now: datetime,
+    stale_after_minutes: int,
+    clickhouse_status: str,
+) -> dict[str, dict[str, Any]]:
+    subscribed = {
+        "trade": bool(subscriptions.get("trades")),
+        "last_price": bool(subscriptions.get("last_price")),
+        "orderbook": bool(subscriptions.get("order_book_depth")),
+        "trading_status": bool(subscriptions.get("info")),
+        "candle": bool(subscriptions.get("candles")),
+        "open_interest": bool(raw_events.get("open_interest")),
+    }
+    out: dict[str, dict[str, Any]] = {}
+    stale_delta = timedelta(minutes=max(1, int(stale_after_minutes)))
+    for source, is_subscribed in subscribed.items():
+        row = raw_events.get(source)
+        last_raw = row.get("last_source_time") if row else None
+        last_dt = _parse_dt(last_raw)
+        if not is_subscribed:
+            status = "not_subscribed"
+        elif clickhouse_status != "ok":
+            status = "unknown"
+        elif last_dt is None:
+            status = "missing"
+        elif now - last_dt > stale_delta:
+            status = "stale"
+        else:
+            status = "ok"
+        out[source] = {
+            "subscribed": is_subscribed,
+            "status": status,
+            "last_source_time": last_dt.isoformat() if last_dt else last_raw,
+            "event_count": int(row.get("event_count") or 0) if row else 0,
+        }
+    return out
+
+
+def _instrument_signal_availability(
+    instrument_id: str,
+    subscriptions: dict[str, Any],
+    source_status: dict[str, dict[str, Any]],
+    *,
+    detector: Any,
+    detector_error: str | None,
+) -> list[dict[str, Any]]:
+    cfg = None
+    if detector is not None:
+        cfg = detector.per_instrument.get(instrument_id, detector.default)
+    rows: list[dict[str, Any]] = []
+    for definition in _SIGNAL_TYPE_DEFINITIONS:
+        st = str(definition["signal_type"])
+        if detector_error:
+            rows.append(
+                {
+                    "signal_type": st,
+                    "enabled": False,
+                    "reason": "config_error",
+                    "source": definition.get("source"),
+                }
+            )
+            continue
+        predicate = definition["enabled"]
+        config_enabled = bool(predicate(cfg)) if cfg is not None else False
+        if definition.get("requires_lead_lag_pairs"):
+            config_enabled = config_enabled and bool(detector.lead_lag_pairs)
+        if not config_enabled:
+            rows.append(
+                {
+                    "signal_type": st,
+                    "enabled": False,
+                    "reason": "config_disabled",
+                    "source": definition.get("source"),
+                }
+            )
+            continue
+        sources_all = tuple(definition.get("sources_all") or ())
+        sources_any = tuple(definition.get("sources_any") or ())
+        required = sources_all or sources_any
+        if sources_all:
+            source_reason = _all_sources_reason(sources_all, source_status)
+        else:
+            source_reason = _any_source_reason(sources_any, source_status)
+        rows.append(
+            {
+                "signal_type": st,
+                "enabled": source_reason == "enabled",
+                "reason": source_reason,
+                "source": definition.get("source"),
+                "required_sources": list(required),
+            }
+        )
+    return rows
+
+
+def _all_sources_reason(
+    sources: tuple[str, ...],
+    source_status: dict[str, dict[str, Any]],
+) -> str:
+    statuses = [source_status.get(source, {}).get("status") for source in sources]
+    if any(status == "not_subscribed" for status in statuses):
+        return "source_not_subscribed"
+    if any(status == "unknown" for status in statuses):
+        return "source_unknown"
+    if any(status in {"missing", "stale"} for status in statuses):
+        return "source_stale"
+    return "enabled"
+
+
+def _any_source_reason(
+    sources: tuple[str, ...],
+    source_status: dict[str, dict[str, Any]],
+) -> str:
+    if not sources:
+        return "enabled"
+    statuses = [source_status.get(source, {}).get("status") for source in sources]
+    if any(status == "ok" for status in statuses):
+        return "enabled"
+    if all(status == "not_subscribed" for status in statuses):
+        return "source_not_subscribed"
+    if any(status == "unknown" for status in statuses):
+        return "source_unknown"
+    return "source_stale"
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = isoparse(str(value))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _accuracy_response_from_path(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            "status": "missing",
+            "path": str(path),
+            "summary": {
+                "horizons": [],
+                "by_type": [],
+                "by_ticker": [],
+                "by_quality_tier": [],
+                "by_delivery_status": [],
+            },
+            "raw": {},
+        }
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"Невалидный JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raw = {"value": raw}
+    return {
+        "status": "ok",
+        "path": str(path),
+        "summary": _accuracy_summary(raw),
+        "raw": raw,
+    }
+
+
+def _accuracy_summary(raw: dict[str, Any]) -> dict[str, Any]:
+    horizons: list[dict[str, Any]] = []
+    by_horizon = raw.get("by_horizon")
+    if isinstance(by_horizon, dict):
+        for horizon, block in sorted(by_horizon.items(), key=lambda x: str(x[0])):
+            if isinstance(block, dict):
+                horizons.append(
+                    {
+                        "horizon": str(horizon),
+                        "directional_hit_rate": block.get("directional_hit_rate"),
+                        "directional_hits": block.get("directional_hits"),
+                        "directional_misses": block.get("directional_misses"),
+                        "directional_decided": block.get("directional_decided"),
+                    }
+                )
+    else:
+        horizons.append(
+            {
+                "horizon": str(raw.get("forward_bars", "1")),
+                "directional_hit_rate": raw.get("directional_hit_rate"),
+                "directional_hits": raw.get("directional_hits"),
+                "directional_misses": raw.get("directional_misses"),
+                "directional_decided": raw.get("directional_decided"),
+            }
+        )
+    return {
+        "horizons": horizons,
+        "by_type": _accuracy_rows(raw, "by_type"),
+        "by_ticker": _accuracy_rows(raw, "by_ticker"),
+        "by_quality_tier": _accuracy_rows(raw, "by_quality_tier"),
+        "by_delivery_status": _accuracy_rows(raw, "by_delivery_status"),
+    }
+
+
+def _accuracy_rows(raw: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    rows = raw.get(key)
+    if isinstance(rows, list):
+        return [row for row in rows if isinstance(row, dict)]
+    by_horizon = raw.get("by_horizon")
+    if not isinstance(by_horizon, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for horizon, block in by_horizon.items():
+        if isinstance(block, dict) and isinstance(block.get(key), list):
+            for row in block[key]:
+                if isinstance(row, dict):
+                    out.append({"horizon": str(horizon), **row})
+    return out
+
+
 class HealthResponse(BaseModel):
     """Ответ проверки живости процесса (без запроса к Postgres)."""
 
     status: str = Field(
         description="Обычно `ok`, если процесс принимает HTTP.",
+    )
+    runtime: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Build/runtime fingerprint: app_version, commit_sha, build_time.",
     )
 
 
@@ -360,6 +679,7 @@ class ReadyResponse(BaseModel):
     """Готовность к трафику: проверка соединения с Postgres."""
 
     status: str = Field(description="`ready`, если БД отвечает на ping.")
+    runtime: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecentSignalsResponse(BaseModel):
@@ -420,6 +740,121 @@ class AdminFeedbackIn(BaseModel):
         return v.strip()
 
 
+class DeliverySimulationIn(BaseModel):
+    """Dry-run delivery settings over recent stored signals."""
+
+    preset: str = Field(default="current", description="current | conservative")
+    type_rules_json: str = Field(default="")
+    min_quality: int | None = Field(default=None, ge=0, le=100)
+    max_per_hour: int | None = Field(default=None, ge=0, le=1000)
+    instrument_cooldown_seconds: int | None = Field(default=None, ge=0, le=86_400)
+    minutes: int = Field(default=1440, ge=0, le=10_080)
+    limit: int = Field(default=200, ge=1, le=200)
+
+    @field_validator("preset")
+    @classmethod
+    def _preset_ok(cls, v: str) -> str:
+        value = (v or "current").strip().lower()
+        allowed = {"current", "conservative"}
+        if value not in allowed:
+            raise ValueError(f"preset must be one of: {', '.join(sorted(allowed))}")
+        return value
+
+
+def _simulation_settings(
+    settings: RuntimeSettings,
+    body: DeliverySimulationIn,
+) -> RuntimeSettings:
+    min_quality = (
+        90 if body.preset == "conservative" else settings.signal_delivery_min_quality
+    )
+    max_per_hour = settings.signal_delivery_max_per_hour
+    cooldown = settings.signal_delivery_instrument_cooldown_seconds
+    type_rules = settings.signal_delivery_type_rules_json
+    if body.min_quality is not None:
+        min_quality = int(body.min_quality)
+    if body.max_per_hour is not None:
+        max_per_hour = int(body.max_per_hour)
+    if body.instrument_cooldown_seconds is not None:
+        cooldown = int(body.instrument_cooldown_seconds)
+    if body.type_rules_json.strip():
+        type_rules = body.type_rules_json.strip()
+    return replace(
+        settings,
+        signal_delivery_enabled=True,
+        signal_delivery_min_quality=min_quality,
+        signal_delivery_min_quality_raw=str(min_quality),
+        signal_delivery_max_per_hour=max_per_hour,
+        signal_delivery_instrument_cooldown_seconds=cooldown,
+        signal_delivery_type_rules_json=type_rules,
+    )
+
+
+def _row_to_signal(row: dict[str, Any]) -> TriggerSignal:
+    detected_at = _parse_dt(row.get("detected_at")) or datetime.now(timezone.utc)
+    return TriggerSignal(
+        signal_id=str(row.get("signal_id") or uuid.uuid4()),
+        detected_at=detected_at,
+        instrument_id=str(row.get("instrument_id") or ""),
+        ticker=str(row.get("ticker") or ""),
+        class_code=str(row.get("class_code") or ""),
+        alias=str(row.get("alias") or row.get("ticker") or ""),
+        source_event_type=str(row.get("source_event_type") or ""),
+        signal_type=str(row.get("signal_type") or ""),
+        severity=int(row.get("severity") or 1),
+        metric_value=float(row.get("metric_value") or 0.0),
+        baseline_value=float(row.get("baseline_value") or 0.0),
+        z_score=float(row.get("z_score") or 0.0),
+        window_seconds=int(row.get("window_seconds") or 0),
+        summary=str(row.get("summary") or ""),
+        payload=dict(row.get("payload") or {}),
+    )
+
+
+def _delivery_simulation_summary(
+    rows: list[dict[str, Any]],
+    *,
+    total: int,
+    sampled: int,
+    preset: str,
+    minutes: int,
+) -> dict[str, Any]:
+    by_status = _count_key(rows, "simulated_delivery_status")
+    by_channel = _count_key(rows, "simulated_delivery_channel")
+    by_priority = _count_key(rows, "simulated_delivery_priority")
+    by_reason = _count_key(rows, "simulated_delivery_reason")
+    changed = [
+        row
+        for row in rows
+        if row.get("current_delivery_status") != row.get("simulated_delivery_status")
+        or row.get("current_delivery_reason") != row.get("simulated_delivery_reason")
+    ]
+    return {
+        "preset": preset,
+        "minutes": minutes,
+        "total_available": total,
+        "sampled": sampled,
+        "by_status": by_status,
+        "by_channel": by_channel,
+        "by_priority": by_priority,
+        "by_reason": by_reason,
+        "changed_count": len(changed),
+        "changed_sample": changed[:20],
+        "items": rows[:50],
+    }
+
+
+def _count_key(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return [
+        {"key": key_value, "count": count}
+        for key_value, count in sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    ]
+
+
 def require_admin(
     request: Request,
     token: Annotated[str | None, Query(description="Значение ADMIN_API_TOKEN")] = None,
@@ -448,10 +883,11 @@ def require_admin(
 
 def create_app() -> FastAPI:
     settings = RuntimeSettings.from_env()
+    runtime = runtime_fingerprint()
     configure_logging(settings.log_level)
     fastapi_app = FastAPI(
         title="T-Invest Signal API",
-        version="0.1.0",
+        version=str(runtime.get("app_version") or "0.1.0"),
         description=(
             "Чтение накопленных аномалий рынка (сигналов), "
             "записанных сервисом детектора в Postgres. "
@@ -482,6 +918,7 @@ def create_app() -> FastAPI:
     @fastapi_app.on_event("startup")
     def startup() -> None:
         fastapi_app.state.settings = settings
+        fastapi_app.state.runtime = runtime
         fastapi_app.state.signal_store = create_postgres_signal_store_with_retry(
             settings,
             service_name="api",
@@ -523,7 +960,7 @@ def create_app() -> FastAPI:
     )
     def health() -> HealthResponse:
         """Возвращает статус без обращения к базе данных."""
-        return HealthResponse(status="ok")
+        return HealthResponse(status="ok", runtime=runtime)
 
     @fastapi_app.get(
         "/ready",
@@ -547,7 +984,7 @@ def create_app() -> FastAPI:
                 status_code=503,
                 detail="postgres_unavailable",
             )
-        return ReadyResponse(status="ready")
+        return ReadyResponse(status="ready", runtime=runtime)
 
     @fastapi_app.get(
         "/signals/recent",
@@ -776,6 +1213,55 @@ def create_app() -> FastAPI:
             minutes=minutes
         )
 
+    @fastapi_app.post(
+        "/admin/api/delivery/simulation",
+        tags=["admin"],
+        summary="Dry-run delivery policy over stored signals",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_delivery_simulation(
+        request: Request,
+        body: DeliverySimulationIn,
+    ) -> dict[str, Any]:
+        settings = request.app.state.settings
+        sim_settings = _simulation_settings(settings, body)
+        items, total = fastapi_app.state.signal_store.fetch_admin_signals_page(
+            limit=body.limit,
+            offset=0,
+            minutes=body.minutes,
+        )
+        policy = DeliveryPolicy(sim_settings)
+        rows = sorted(items, key=lambda row: str(row.get("detected_at") or ""))
+        simulated: list[dict[str, Any]] = []
+        for row in rows:
+            signal = _row_to_signal(row)
+            out = policy.apply(signal)
+            p = out.payload or {}
+            simulated.append(
+                {
+                    "signal_id": out.signal_id,
+                    "detected_at": out.detected_at.isoformat(),
+                    "ticker": out.ticker,
+                    "instrument_id": out.instrument_id,
+                    "signal_type": out.signal_type,
+                    "quality_score": p.get("quality_score"),
+                    "current_delivery_status": row.get("delivery_status"),
+                    "current_delivery_reason": row.get("delivery_reason"),
+                    "simulated_delivery_status": p.get("delivery_status"),
+                    "simulated_delivery_reason": p.get("delivery_reason"),
+                    "simulated_delivery_rule": p.get("delivery_rule"),
+                    "simulated_delivery_channel": p.get("delivery_channel"),
+                    "simulated_delivery_priority": p.get("delivery_priority"),
+                }
+            )
+        return _delivery_simulation_summary(
+            simulated,
+            total=total,
+            sampled=len(items),
+            preset=body.preset,
+            minutes=body.minutes,
+        )
+
     @fastapi_app.get(
         "/admin/api/calibration",
         tags=["admin"],
@@ -790,6 +1276,19 @@ def create_app() -> FastAPI:
         )
 
     @fastapi_app.get(
+        "/admin/api/feedback/overview",
+        tags=["admin"],
+        summary="Feedback quality by type/ticker/delivery",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_feedback_overview(
+        minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
+    ) -> dict[str, Any]:
+        return fastapi_app.state.signal_store.fetch_admin_feedback_overview(
+            minutes=minutes
+        )
+
+    @fastapi_app.get(
         "/admin/api/settings",
         tags=["admin"],
         summary="Read-only runtime settings for the cockpit",
@@ -798,6 +1297,7 @@ def create_app() -> FastAPI:
     def admin_settings(request: Request) -> dict[str, Any]:
         s = request.app.state.settings
         return {
+            "runtime": request.app.state.runtime,
             "delivery": {
                 "enabled": s.signal_delivery_enabled,
                 "min_quality": s.signal_delivery_min_quality,
@@ -832,20 +1332,24 @@ def create_app() -> FastAPI:
     )
     def admin_accuracy(request: Request) -> dict[str, Any]:
         path = request.app.state.settings.signal_accuracy_json_path
-        if not path.is_file():
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"Файл не найден: {path}. Задайте SIGNAL_ACCURACY_JSON_PATH "
-                    "или смонтируйте каталог с JSON."
-                ),
-            )
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=500, detail=f"Невалидный JSON: {exc}"
-            ) from exc
+        return _accuracy_response_from_path(path)
+
+    @fastapi_app.get(
+        "/admin/api/source-health",
+        tags=["admin"],
+        summary="Raw source freshness by instrument",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_source_health(
+        request: Request,
+        minutes: Annotated[int, Query(ge=1, le=10_080)] = 1440,
+        stale_after_minutes: Annotated[int, Query(ge=1, le=1440)] = 15,
+    ) -> dict[str, Any]:
+        return _source_health_response(
+            request.app.state.settings,
+            minutes=minutes,
+            stale_after_minutes=stale_after_minutes,
+        )
 
     @fastapi_app.get(
         "/admin/api/signal/{signal_id}",
@@ -1231,13 +1735,18 @@ def create_app() -> FastAPI:
                 if not items:
                     break
                 for r in items:
+                    p = r.get("payload")
+                    if not isinstance(p, dict):
+                        p = {}
                     yield [
                         r.get("signal_id", ""),
                         r.get("detected_at", ""),
+                        r.get("instrument_id", ""),
                         r.get("ticker", ""),
                         r.get("signal_type", ""),
                         str(r.get("severity", "")),
                         str(r.get("z_score", "")),
+                        str(r.get("quality_score") or p.get("quality_score") or ""),
                         r.get("delivery_status") or "",
                         r.get("delivery_reason") or "",
                         (r.get("summary") or "").replace("\r", " ").replace("\n", " "),
@@ -1254,10 +1763,12 @@ def create_app() -> FastAPI:
                 [
                     "signal_id",
                     "detected_at",
+                    "instrument_id",
                     "ticker",
                     "signal_type",
                     "severity",
                     "z_score",
+                    "quality_score",
                     "delivery_status",
                     "delivery_reason",
                     "summary",

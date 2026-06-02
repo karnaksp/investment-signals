@@ -32,8 +32,12 @@ def client_ok(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_health_and_ready(client_ok: TestClient) -> None:
-    assert client_ok.get("/health").json() == {"status": "ok"}
-    assert client_ok.get("/ready").json() == {"status": "ready"}
+    health = client_ok.get("/health").json()
+    ready = client_ok.get("/ready").json()
+    assert health["status"] == "ok"
+    assert ready["status"] == "ready"
+    assert health["runtime"]["app_version"]
+    assert ready["runtime"]["commit_sha"]
 
 
 def test_admin_requires_token(client_ok: TestClient) -> None:
@@ -198,6 +202,130 @@ def test_admin_delivery_and_calibration_endpoints(monkeypatch: pytest.MonkeyPatc
         assert client.get("/admin/api/calibration", headers=hdrs).status_code == 200
 
 
+def test_admin_feedback_overview_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_feedback_overview.return_value = {
+        "summary": {"total": 2, "labeled": 1, "coverage_rate": 0.5},
+        "by_type": [],
+    }
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.get(
+            "/admin/api/feedback/overview?minutes=1440",
+            headers={"X-Admin-Token": "test-secret-token"},
+        )
+
+    assert r.status_code == 200
+    assert r.json()["summary"]["coverage_rate"] == 0.5
+    assert mock_store.fetch_admin_feedback_overview.call_args.kwargs["minutes"] == 1440
+
+
+def test_admin_source_health_without_clickhouse_is_safe(
+    client_ok: TestClient,
+) -> None:
+    r = client_ok.get(
+        "/admin/api/source-health?minutes=1440",
+        headers={"X-Admin-Token": "test-secret-token"},
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "unknown"
+    assert data["count"] >= 50
+    assert data["items"][0]["source_health"]
+    assert data["items"][0]["signal_availability"]
+
+
+def test_admin_accuracy_missing_returns_empty_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("SIGNAL_ACCURACY_JSON_PATH", str(tmp_path / "missing.json"))
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.get(
+            "/admin/api/accuracy",
+            headers={"X-Admin-Token": "test-secret-token"},
+        )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "missing"
+    assert data["summary"]["horizons"] == []
+
+
+def test_admin_delivery_simulation_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS", "0")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_signals_page.return_value = (
+        [
+            {
+                "signal_id": "00000000-0000-4000-8000-000000000001",
+                "detected_at": "2026-01-01T12:00:00+00:00",
+                "instrument_id": "SBER_TQBR",
+                "ticker": "SBER",
+                "class_code": "TQBR",
+                "alias": "sber",
+                "source_event_type": "trade",
+                "signal_type": "volume_spike",
+                "severity": 3,
+                "metric_value": 100.0,
+                "baseline_value": 10.0,
+                "z_score": 7.0,
+                "window_seconds": 60,
+                "summary": "x",
+                "payload": {"quality_score": 95},
+                "delivery_status": "unknown",
+                "delivery_reason": "unknown",
+            }
+        ],
+        1,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.post(
+            "/admin/api/delivery/simulation",
+            headers={"X-Admin-Token": "test-secret-token"},
+            json={"preset": "current", "minutes": 1440, "limit": 10},
+        )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["sampled"] == 1
+    assert data["items"][0]["simulated_delivery_status"] == "delivered"
+
+
 def test_admin_settings_exposes_configured_signal_catalog(
     client_ok: TestClient,
 ) -> None:
@@ -207,7 +335,9 @@ def test_admin_settings_exposes_configured_signal_catalog(
     )
 
     assert r.status_code == 200
-    signals = r.json()["signals"]
+    payload = r.json()
+    assert payload["runtime"]["app_version"]
+    signals = payload["signals"]
     enabled = {row["signal_type"] for row in signals["enabled_types"]}
     assert signals["enabled_count"] > 1
     assert {

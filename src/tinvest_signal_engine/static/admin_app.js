@@ -8,6 +8,7 @@
     minutes: localStorage.getItem("tinvest_admin_minutes") || "1440",
     auto: localStorage.getItem("tinvest_admin_auto") !== "0",
     offset: 0,
+    runtime: null,
     filters: {
       instrument: "",
       type: "",
@@ -24,6 +25,7 @@
     ["signals", "Signals", "SG"],
     ["delivery", "Delivery", "DL"],
     ["calibration", "Calibration", "CL"],
+    ["feedback", "Feedback", "FB"],
     ["instruments", "Instruments", "IN"],
     ["accuracy", "Accuracy", "AC"],
     ["settings", "Settings", "ST"],
@@ -185,6 +187,7 @@
           <div class="topbar">
             <div class="topbar-left">
               <span class="status-dot"></span>
+              <span id="runtimeBadge" class="runtime-badge"></span>
               <span class="status-text"><strong>${esc(activeLabel(active))}</strong> · ${esc(periodLabel())}</span>
             </div>
             <div class="topbar-right">
@@ -219,6 +222,28 @@
       localStorage.setItem("tinvest_admin_auto", state.auto ? "1" : "0");
     };
     document.getElementById("refreshBtn").onclick = () => loadCurrent();
+    updateRuntimeBadge();
+  }
+
+  function rememberRuntime(data) {
+    if (data && data.runtime) {
+      state.runtime = data.runtime;
+      updateRuntimeBadge();
+    }
+  }
+
+  function runtimeLabel() {
+    const rt = state.runtime || {};
+    const sha = String(rt.commit_sha || "unknown");
+    const shortSha = sha === "unknown" ? sha : sha.slice(0, 12);
+    const version = rt.app_version || "0.1.0";
+    const built = rt.build_time && rt.build_time !== "unknown" ? " · " + rt.build_time : "";
+    return "v" + version + " · " + shortSha + built;
+  }
+
+  function updateRuntimeBadge() {
+    const el = document.getElementById("runtimeBadge");
+    if (el && state.runtime) el.textContent = runtimeLabel();
   }
 
   function periodOption(value, label) {
@@ -239,6 +264,11 @@
       state.minutes === "360" ? "6h" :
       state.minutes === "1440" ? "24h" :
       state.minutes === "10080" ? "7d" : "all";
+  }
+
+  function sourceHealthMinutes() {
+    const m = Number(state.minutes || 1440);
+    return m > 0 ? m : 1440;
   }
 
   function view() {
@@ -302,11 +332,13 @@
   }
 
   async function pageTriage() {
-    const [ov, delivery, signals] = await Promise.all([
+    const [ov, delivery, signals, settings] = await Promise.all([
       api("/admin/api/overview" + params({ minutes: state.minutes })),
       api("/admin/api/delivery/overview" + params({ minutes: state.minutes })),
       api("/admin/api/signals" + params({ minutes: state.minutes, limit: 40 })),
+      api("/admin/api/settings"),
     ]);
+    rememberRuntime(settings);
     const totals = delivery.totals || {};
     const all = totals.total || 0;
     const ranked = (signals.items || []).slice().sort((a, b) => signalScore(b) - signalScore(a)).slice(0, 14);
@@ -432,11 +464,35 @@
     return list.map((name) => badge(name)).join(" ");
   }
 
+  function sourceHealthBadges(sourceHealth) {
+    const data = sourceHealth || {};
+    const rows = Object.entries(data).filter(([, info]) => info && info.subscribed);
+    if (!rows.length) return `<span class="muted">not subscribed</span>`;
+    return rows.map(([name, info]) => {
+      const status = info.status || "unknown";
+      const cls = status === "ok" ? "b-high" :
+        status === "stale" || status === "missing" ? "b-medium" :
+        status === "not_subscribed" ? "b-unknown" : "b-low";
+      const last = info.last_source_time ? shortTime(info.last_source_time) : status;
+      return `${badge(name + ":" + status, cls)}<div class="muted clip">${esc(last)}</div>`;
+    }).join("");
+  }
+
+  function unavailableSignalHint(rows) {
+    const blocked = (Array.isArray(rows) ? rows : [])
+      .filter((r) => !r.enabled)
+      .slice(0, 3)
+      .map((r) => (r.signal_type || "") + ":" + (r.reason || "blocked"));
+    return blocked.length ? blocked.join(" · ") : "all configured signals possible";
+  }
+
   function instrumentUniverseTable(rows) {
     return table(
       [
         { label: "Instrument" },
         { label: "Sources" },
+        { label: "Freshness" },
+        { label: "Blocked" },
         { label: "Signals", cls: "num" },
         { label: "Delivered", cls: "num" },
         { label: "Rate", cls: "num" },
@@ -449,6 +505,8 @@
         return `<tr>
           <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)} · ${esc(r.alias || "")}</div></td>
           <td>${sourceBadges(r.sources)}<div class="muted">book ${esc((r.subscriptions || {}).order_book_depth || "off")}</div></td>
+          <td>${sourceHealthBadges(r.source_health)}</td>
+          <td class="clip">${esc(unavailableSignalHint(r.signal_availability))}</td>
           <td class="num">${n(total, 0)}</td>
           <td class="num">${n(delivered, 0)}</td>
           <td class="num">${pct(total ? delivered / total : 0)}</td>
@@ -565,11 +623,17 @@
   }
 
   async function pageDelivery() {
-    const [overview, reasons, settings] = await Promise.all([
+    const [overview, reasons, settings, simulation] = await Promise.all([
       api("/admin/api/delivery/overview" + params({ minutes: state.minutes })),
       api("/admin/api/delivery/reasons" + params({ minutes: state.minutes })),
       api("/admin/api/settings"),
+      api("/admin/api/delivery/simulation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset: "conservative", minutes: Number(state.minutes || 0), limit: 200 }),
+      }),
     ]);
+    rememberRuntime(settings);
     const t = overview.totals || {};
     view().innerHTML = `
       ${pageHead("Delivery", "Что ушло наружу, что подавлено и почему.")}
@@ -590,6 +654,10 @@
           ${deliveryReasonTable(reasons.items || [])}
         </section>
       </div>
+      <section class="panel">
+        <div class="panel-head"><h2>Dry-run Simulation</h2><span class="muted">conservative preset, no Telegram impact</span></div>
+        ${deliverySimulationPanel(simulation)}
+      </section>
       <section class="panel">
         <div class="panel-head"><h2>Recent Delivered</h2></div>
         ${table(signalHeaders(), (overview.recent_delivered || []).map(signalRow), "Нет delivered сигналов")}
@@ -621,6 +689,46 @@
       }),
       "Нет delivery статистики"
     );
+  }
+
+  function deliverySimulationPanel(data) {
+    const rows = data || {};
+    const changed = (rows.changed_sample || []).slice(0, 10).map((r) => `<tr>
+      <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)}</div></td>
+      <td class="clip">${esc(r.signal_type)}</td>
+      <td>${deliveryBadge(r.current_delivery_status)}</td>
+      <td>${deliveryBadge(r.simulated_delivery_status)}<div class="muted clip">${esc(r.simulated_delivery_reason)}</div></td>
+      <td>${badge(r.simulated_delivery_channel || "admin_only")}</td>
+    </tr>`);
+    return `
+      ${metrics([
+        { label: "Sampled", value: n(rows.sampled, 0), hint: "stored rows" },
+        { label: "Changed", value: n(rows.changed_count, 0), hint: "status delta" },
+        { label: "Preset", value: esc(rows.preset || "current"), hint: "dry-run" },
+        { label: "Window", value: esc(rows.minutes === 0 ? "all" : String(rows.minutes || state.minutes)), hint: "minutes" },
+      ])}
+      ${table(
+        [
+          { label: "Ticker" },
+          { label: "Type" },
+          { label: "Current" },
+          { label: "Simulated" },
+          { label: "Channel" },
+        ],
+        changed,
+        "No status changes in the sampled set"
+      )}
+      <div class="grid-2">
+        <section class="mini-panel">
+          <h3>By Status</h3>
+          ${barList((rows.by_status || []).map((r) => [r.key, r.count, Math.max(1, rows.sampled || 1)]))}
+        </section>
+        <section class="mini-panel">
+          <h3>By Channel</h3>
+          ${barList((rows.by_channel || []).map((r) => [r.key, r.count, Math.max(1, rows.sampled || 1)]))}
+        </section>
+      </div>
+    `;
   }
 
   function deliveryReasonTable(rows) {
@@ -695,6 +803,7 @@
       api("/admin/api/calibration" + params({ minutes: state.minutes })),
       api("/admin/api/settings"),
     ]);
+    rememberRuntime(settings);
     const rows = data.items || [];
     view().innerHTML = `
       ${pageHead("Calibration", "Матрица качества, доставки и ручной разметки.")}
@@ -728,9 +837,116 @@
     );
   }
 
+  async function pageFeedback() {
+    const data = await api("/admin/api/feedback/overview" + params({ minutes: state.minutes }));
+    const s = data.summary || {};
+    view().innerHTML = `
+      ${pageHead("Feedback Quality", "Р“РґРµ delivered-СЃРёРіРЅР°Р»С‹ С€СѓРјСЏС‚, Р° suppressed РјРѕРіР»Рё Р±С‹ Р±С‹С‚СЊ РїРѕР»РµР·РЅС‹РјРё.")}
+      ${metrics([
+        { label: "Signals", value: n(s.total, 0), hint: activePeriodShort() },
+        { label: "Labeled", value: n(s.labeled, 0), hint: pct(s.coverage_rate || 0) },
+        { label: "Useful", value: n(feedbackTotal(data.totals, "useful"), 0), hint: "manual" },
+        { label: "Noise", value: n(feedbackTotal(data.totals, "noise"), 0), hint: "manual" },
+      ])}
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>By Type</h2></div>
+          ${feedbackByTypeTable(data.by_type || [])}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>By Ticker</h2></div>
+          ${feedbackByTickerTable(data.by_ticker || [])}
+        </section>
+      </div>
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Delivered Marked Noise</h2></div>
+          ${feedbackReasonTable(data.noise_delivered || [])}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Suppressed Marked Useful</h2></div>
+          ${feedbackReasonTable(data.useful_suppressed || [])}
+        </section>
+      </div>
+    `;
+  }
+
+  function feedbackTotal(rows, label) {
+    return (rows || [])
+      .filter((r) => r.feedback === label)
+      .reduce((acc, r) => acc + Number(r.signal_count || 0), 0);
+  }
+
+  function feedbackByTypeTable(rows) {
+    return table(
+      [
+        { label: "Type" },
+        { label: "Delivery" },
+        { label: "Feedback" },
+        { label: "Count", cls: "num" },
+        { label: "Avg q", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td class="clip">${esc(r.signal_type)}</td>
+        <td>${deliveryBadge(r.delivery_status)}</td>
+        <td>${badge(r.feedback || "none")}</td>
+        <td class="num">${n(r.signal_count, 0)}</td>
+        <td class="num">${n(r.avg_quality, 1)}</td>
+      </tr>`),
+      "РџРѕРєР° РЅРµС‚ feedback-СЂР°Р·РјРµС‚РєРё"
+    );
+  }
+
+  function feedbackByTickerTable(rows) {
+    return table(
+      [
+        { label: "Ticker" },
+        { label: "Delivery" },
+        { label: "Feedback" },
+        { label: "Count", cls: "num" },
+        { label: "Avg q", cls: "num" },
+      ],
+      rows.slice(0, 80).map((r) => `<tr>
+        <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)}</div></td>
+        <td>${deliveryBadge(r.delivery_status)}</td>
+        <td>${badge(r.feedback || "none")}</td>
+        <td class="num">${n(r.signal_count, 0)}</td>
+        <td class="num">${n(r.avg_quality, 1)}</td>
+      </tr>`),
+      "РќРµС‚ feedback РїРѕ С‚РёРєРµСЂР°Рј"
+    );
+  }
+
+  function feedbackReasonTable(rows) {
+    return table(
+      [
+        { label: "Type" },
+        { label: "Reason" },
+        { label: "Count", cls: "num" },
+        { label: "Avg q", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td class="clip">${esc(r.signal_type)}</td>
+        <td class="clip">${esc(r.delivery_reason)}</td>
+        <td class="num">${n(r.signal_count, 0)}</td>
+        <td class="num">${n(r.avg_quality, 1)}</td>
+      </tr>`),
+      "РќРµС‚ С‚Р°РєРёС… РјРµС‚РѕРє"
+    );
+  }
+
   async function pageInstruments() {
-    const data = await api("/admin/api/instruments" + params({ minutes: state.minutes }));
-    const items = data.items || [];
+    const [data, sourceHealth] = await Promise.all([
+      api("/admin/api/instruments" + params({ minutes: state.minutes })),
+      api("/admin/api/source-health" + params({ minutes: sourceHealthMinutes() })),
+    ]);
+    const healthById = {};
+    (sourceHealth.items || []).forEach((row) => { healthById[row.instrument_id] = row; });
+    const items = (data.items || []).map((row) => ({
+      ...row,
+      source_health: (healthById[row.instrument_id] || {}).source_health || {},
+      signal_availability: (healthById[row.instrument_id] || {}).signal_availability || [],
+    }));
     const totals = items.reduce((acc, row) => {
       acc.signals += Number(row.total || 0);
       acc.delivered += Number(row.delivered || 0);
@@ -745,6 +961,7 @@
         { label: "Signals", value: n(totals.signals, 0), hint: "stored" },
         { label: "Delivered", value: n(totals.delivered, 0), hint: pct(totals.signals ? totals.delivered / totals.signals : 0) },
         { label: "Orderbook", value: n(coverage.orderbook, 0), hint: "L2 subscriptions" },
+        { label: "Raw source", value: esc(sourceHealth.status || "unknown"), hint: n(sourceHealth.ok_source_count, 0) + " fresh" },
       ])}
       <section class="panel">
         <div class="panel-head"><h2>Configured Instruments</h2><span class="muted">Rows with 0 signals are still monitored</span></div>
@@ -756,6 +973,9 @@
   async function pageAccuracy() {
     try {
       const data = await api("/admin/api/accuracy");
+      const summary = data.summary || {};
+      view().innerHTML = accuracyHtml(data, summary);
+      return;
       view().innerHTML = `
         ${pageHead("Accuracy", "Офлайн JSON из duckdb_label_signals.")}
         <section class="panel"><div class="panel-body"><pre class="json">${esc(JSON.stringify(data, null, 2))}</pre></div></section>
@@ -768,8 +988,84 @@
     }
   }
 
+  function accuracyHtml(data, summary) {
+    return `
+      ${pageHead("Accuracy", "Offline DuckDB accuracy report from signal_accuracy.json.")}
+      ${data.status === "missing" ? `<div class="empty">Accuracy JSON is not built yet: ${esc(data.path || "")}</div>` : ""}
+      <section class="panel">
+        <div class="panel-head"><h2>Forward Horizons</h2></div>
+        ${accuracyHorizonTable(summary.horizons || [])}
+      </section>
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>By Type</h2></div>
+          ${accuracyMetricTable(summary.by_type || [], "signal_type")}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>By Quality Tier</h2></div>
+          ${accuracyMetricTable(summary.by_quality_tier || [], "quality_tier")}
+        </section>
+      </div>
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Delivered vs Suppressed</h2></div>
+          ${accuracyMetricTable(summary.by_delivery_status || [], "delivery_status")}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Noisiest Tickers</h2></div>
+          ${accuracyMetricTable((summary.by_ticker || []).slice(0, 80), "ticker")}
+        </section>
+      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>Raw JSON</h2></div>
+        <div class="panel-body"><pre class="json">${esc(JSON.stringify(data.raw || {}, null, 2))}</pre></div>
+      </section>
+    `;
+  }
+
+  function accuracyHorizonTable(rows) {
+    return table(
+      [
+        { label: "Horizon" },
+        { label: "Hit-rate", cls: "num" },
+        { label: "Hits", cls: "num" },
+        { label: "Misses", cls: "num" },
+        { label: "Decided", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td>${esc(r.horizon)}m</td>
+        <td class="num">${r.directional_hit_rate == null ? "—" : pct(r.directional_hit_rate)}</td>
+        <td class="num">${n(r.directional_hits, 0)}</td>
+        <td class="num">${n(r.directional_misses, 0)}</td>
+        <td class="num">${n(r.directional_decided, 0)}</td>
+      </tr>`),
+      "No accuracy horizons yet"
+    );
+  }
+
+  function accuracyMetricTable(rows, key) {
+    return table(
+      [
+        { label: key },
+        { label: "H" },
+        { label: "Count", cls: "num" },
+        { label: "Hit-rate", cls: "num" },
+        { label: "Median move", cls: "num" },
+      ],
+      rows.map((r) => `<tr>
+        <td class="clip">${esc(r[key] || "unknown")}</td>
+        <td>${esc(r.horizon || "")}</td>
+        <td class="num">${n(r.signal_count, 0)}</td>
+        <td class="num">${r.directional_hit_rate == null ? "—" : pct(r.directional_hit_rate)}</td>
+        <td class="num">${r.median_forward_return_pct == null ? "—" : n(r.median_forward_return_pct, 3) + "%"}</td>
+      </tr>`),
+      "No grouped accuracy data"
+    );
+  }
+
   async function pageSettings() {
     const data = await api("/admin/api/settings");
+    rememberRuntime(data);
     view().innerHTML = `
       ${pageHead("Settings", "Read-only runtime configuration.")}
       <div class="grid-3">
@@ -821,6 +1117,9 @@
             ${decisionLine("Reason", row.delivery_reason || p.delivery_reason || "unknown")}
             ${decisionLine("Rule", p.delivery_rule || "unknown")}
             ${decisionLine("Policy", p.delivery_policy_version || "unknown")}
+            ${decisionLine("Priority", p.delivery_priority || "unknown")}
+            ${decisionLine("Channel", p.delivery_channel || "unknown")}
+            ${decisionLine("Explanation", p.delivery_explanation_ru || "unknown")}
             ${decisionLine("Delivered at", p.delivered_at || "—")}
           </div>
         </section>
@@ -885,6 +1184,7 @@
       if (r.name === "signals") await pageSignals();
       else if (r.name === "delivery") await pageDelivery();
       else if (r.name === "calibration") await pageCalibration();
+      else if (r.name === "feedback") await pageFeedback();
       else if (r.name === "instruments") await pageInstruments();
       else if (r.name === "accuracy") await pageAccuracy();
       else if (r.name === "settings") await pageSettings();

@@ -1019,6 +1019,130 @@ class PostgresSignalStore:
             "count": len(rows),
         }
 
+    def fetch_admin_feedback_overview(self, *, minutes: int) -> dict[str, Any]:
+        time_sql, time_params, all_time = self._admin_time_sql(minutes)
+        time_sql = time_sql.replace("detected_at", "ms.detected_at")
+        tbl = self._table_name
+        status_sql = _delivery_status_sql()
+        q_sql = _quality_sql()
+        feedback_sql = "coalesce(fb.label, 'none')"
+        with self._cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    {feedback_sql} AS feedback,
+                    count(*)::bigint AS signal_count,
+                    avg({q_sql}) AS avg_quality
+                FROM {tbl} AS ms
+                LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id
+                WHERE {time_sql}
+                GROUP BY 1
+                ORDER BY signal_count DESC, feedback ASC
+                """,
+                time_params,
+            )
+            totals = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.signal_type,
+                    {status_sql} AS delivery_status,
+                    {feedback_sql} AS feedback,
+                    count(*)::bigint AS signal_count,
+                    avg({q_sql}) AS avg_quality
+                FROM {tbl} AS ms
+                LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id
+                WHERE {time_sql}
+                GROUP BY 1, 2, 3
+                ORDER BY signal_count DESC, ms.signal_type ASC, feedback ASC
+                LIMIT 200
+                """,
+                time_params,
+            )
+            by_type = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.ticker,
+                    ms.instrument_id,
+                    {status_sql} AS delivery_status,
+                    {feedback_sql} AS feedback,
+                    count(*)::bigint AS signal_count,
+                    avg({q_sql}) AS avg_quality,
+                    max(ms.detected_at) AS last_detected_at
+                FROM {tbl} AS ms
+                LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id
+                WHERE {time_sql}
+                GROUP BY 1, 2, 3, 4
+                ORDER BY signal_count DESC, ms.ticker ASC, feedback ASC
+                LIMIT 200
+                """,
+                time_params,
+            )
+            by_ticker = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.signal_type,
+                    {_delivery_reason_sql()} AS delivery_reason,
+                    count(*)::bigint AS signal_count,
+                    avg({q_sql}) AS avg_quality
+                FROM {tbl} AS ms
+                LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id
+                WHERE {time_sql}
+                  AND {status_sql} = 'delivered'
+                  AND fb.label = 'noise'
+                GROUP BY 1, 2
+                ORDER BY signal_count DESC, ms.signal_type ASC
+                LIMIT 40
+                """,
+                time_params,
+            )
+            noise_delivered = [dict(r) for r in cursor.fetchall()]
+            cursor.execute(
+                f"""
+                SELECT
+                    ms.signal_type,
+                    {_delivery_reason_sql()} AS delivery_reason,
+                    count(*)::bigint AS signal_count,
+                    avg({q_sql}) AS avg_quality
+                FROM {tbl} AS ms
+                LEFT JOIN {self._feedback_table} AS fb ON fb.signal_id = ms.signal_id
+                WHERE {time_sql}
+                  AND {status_sql} = 'suppressed'
+                  AND fb.label = 'useful'
+                GROUP BY 1, 2
+                ORDER BY signal_count DESC, ms.signal_type ASC
+                LIMIT 40
+                """,
+                time_params,
+            )
+            useful_suppressed = [dict(r) for r in cursor.fetchall()]
+        for row in by_ticker:
+            last = row.get("last_detected_at")
+            if last is not None:
+                row["last_detected_at"] = last.isoformat()
+        total_count = sum(int(row.get("signal_count") or 0) for row in totals)
+        labeled_count = sum(
+            int(row.get("signal_count") or 0)
+            for row in totals
+            if row.get("feedback") != "none"
+        )
+        return {
+            "minutes": 0 if all_time else int(time_params.get("m", 0)),
+            "all_time": all_time,
+            "summary": {
+                "total": total_count,
+                "labeled": labeled_count,
+                "coverage_rate": (labeled_count / total_count) if total_count else 0.0,
+            },
+            "totals": totals,
+            "by_type": by_type,
+            "by_ticker": by_ticker,
+            "noise_delivered": noise_delivered,
+            "useful_suppressed": useful_suppressed,
+        }
+
 
 class WebhookAlertSink:
     def __init__(self, webhook_url: str | None):

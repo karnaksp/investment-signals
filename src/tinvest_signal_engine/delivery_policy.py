@@ -14,7 +14,7 @@ from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
 
-POLICY_VERSION = "delivery_v2"
+POLICY_VERSION = "delivery_v3"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
@@ -89,6 +89,9 @@ class DeliveryPolicy:
             "delivery_reason": decision.reason,
             "delivery_rule": decision.rule,
             "delivery_policy_version": POLICY_VERSION,
+            "delivery_priority": self._priority(signal, decision),
+            "delivery_channel": self._channel(decision),
+            "delivery_explanation_ru": self._explanation_ru(decision),
             "delivered_at": (
                 decision.delivered_at.isoformat()
                 if decision.delivered_at is not None
@@ -379,6 +382,31 @@ class DeliveryPolicy:
         cutoff = now - timedelta(minutes=5)
         return any(ts >= cutoff for ts, _ in dq)
 
+    def _priority(self, signal: TriggerSignal, decision: DeliveryDecision) -> str:
+        if decision.should_send:
+            return "high"
+        quality = _quality(signal)
+        abs_z = abs(float(signal.z_score))
+        if quality >= self.min_quality or abs_z >= 6.0 or int(signal.severity) >= 3:
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _channel(decision: DeliveryDecision) -> str:
+        return "realtime" if decision.should_send else "admin_only"
+
+    @staticmethod
+    def _explanation_ru(decision: DeliveryDecision) -> str:
+        if decision.status == DELIVERY_DELIVERED:
+            return _REASON_RU.get(
+                decision.reason,
+                "Сигнал прошёл delivery policy и отправлен в realtime-канал.",
+            )
+        return _REASON_RU.get(
+            decision.reason,
+            "Сигнал сохранён для анализа, но не отправлен в Telegram.",
+        )
+
 
 def _parse_type_rules(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
@@ -403,3 +431,27 @@ def _payload_number(signal: TriggerSignal, key: str) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     return 0.0
+
+
+_REASON_RU: dict[str, str] = {
+    "combo_score_ge_6": "Комбо-сигнал набрал проходной score и отправлен в realtime.",
+    "status_or_access_change": "Режим торгов или доступ к заявкам изменился; статусные события отправляются в realtime.",
+    "price_extreme_quality_and_z": "Сильное движение цены прошло строгий порог качества и |z|.",
+    "price_near_activity": "Движение цены подтверждено недавней активностью по тому же инструменту.",
+    "momentum_quality_and_z": "Momentum-сигнал прошёл одновременно порог качества и |z|.",
+    "momentum_extreme_z": "Momentum-сигнал прошёл как экстремальный |z|.",
+    "large_trade_high_quality_or_z": "Крупный принт прошёл высокий quality или экстремальный |z|.",
+    "liquidity_near_activity": "Liquidity-сигнал подтверждён недавней активностью.",
+    "quality_floor": "Сигнал прошёл общий высокий порог качества.",
+    "delivery_disabled": "Delivery выключен: сигнал сохранён, но внешний канал не используется.",
+    "combo_score_below_6": "Комбо-сигнал сохранён, но score ниже проходного realtime-порога.",
+    "large_trade_below_quality_and_z": "Крупный принт сохранён, но не прошёл realtime-порог качества или |z|.",
+    "momentum_below_quality_and_z": "Momentum-сигнал сохранён, но не прошёл одновременно quality и |z|.",
+    "price_without_confirmation": "Price jump сохранён, но для Telegram не хватило экстремальности или соседней активности.",
+    "liquidity_without_context": "Liquidity-сигнал сохранён, но без соседнего volume/trade/combo не отправляется.",
+    "quality_below_floor": "Сигнал сохранён, но quality ниже общего realtime-порога.",
+    "rate_limit_per_hour": "Сигнал сохранён, но подавлен глобальным лимитом сообщений в час.",
+    "instrument_cooldown": "Сигнал сохранён, но подавлен cooldown по инструменту.",
+    "status_cooldown": "Статусный сигнал сохранён, но повтор подавлен часовым cooldown.",
+    "custom_type_rule_not_matched": "Сигнал сохранён, но custom type rule не дал realtime-доставку.",
+}

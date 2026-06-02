@@ -56,6 +56,10 @@ def test_combo_score_six_is_delivered(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "combo_score_ge_6"
+    assert out.payload["delivery_policy_version"] == "delivery_v3"
+    assert out.payload["delivery_priority"] == "high"
+    assert out.payload["delivery_channel"] == "realtime"
+    assert out.payload["delivery_explanation_ru"]
 
 
 def test_low_quality_spread_is_suppressed_without_context(monkeypatch) -> None:
@@ -71,6 +75,9 @@ def test_low_quality_spread_is_suppressed_without_context(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "suppressed"
     assert out.payload["delivery_reason"] == "liquidity_without_context"
+    assert out.payload["delivery_priority"] in {"low", "medium"}
+    assert out.payload["delivery_channel"] == "admin_only"
+    assert out.payload["delivery_explanation_ru"]
 
 
 def test_liquidity_signal_delivered_near_activity_context(monkeypatch) -> None:

@@ -62,3 +62,43 @@ def fetch_raw_events_window(
         except json.JSONDecodeError:
             continue
     return rows
+
+
+def fetch_source_health(
+    base_url: str,
+    *,
+    minutes: int = 1440,
+    username: str | None = None,
+    password: str | None = None,
+) -> list[dict[str, Any]]:
+    """Latest raw-event timestamp per instrument/source from ClickHouse."""
+    bu = base_url.rstrip("/")
+    m = max(1, min(int(minutes), 10_080))
+    query = (
+        "SELECT instrument_id, event_type, max(source_time) AS last_source_time, "
+        "count() AS event_count "
+        "FROM signal_engine.market_raw_events "
+        f"WHERE source_time >= now() - INTERVAL {m} MINUTE "
+        "GROUP BY instrument_id, event_type "
+        "ORDER BY instrument_id ASC, event_type ASC "
+        "FORMAT JSONEachRow"
+    )
+    auth = None
+    if username and password:
+        auth = (username.strip(), password)
+    with httpx.Client(timeout=20.0, auth=auth) as client:
+        response = client.post(bu, content=query.encode("utf-8"))
+        response.raise_for_status()
+    text = response.text.strip()
+    if not text:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
