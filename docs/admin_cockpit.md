@@ -93,7 +93,8 @@ Rate-limit и instrument cooldown проверяются не только в п
 
 | Раздел | Route | Для чего |
 |---|---|---|
-| Triage | `#/triage` | Очередь внимания: важные suppressed/delivered сигналы, funnel, причины подавления, hot tickers. |
+| Radar | `#/radar` | Торговая карта POI: setup, bias, score, уровни входа/отмены/целей, drivers и быстрый journal. |
+| Triage | `#/triage` | Разбор сырых сигналов: unlabeled feedback queue, high-quality suppressed, recent delivered, funnel и причины delivery gate. |
 | Signals | `#/signals` | Плотная таблица всех сигналов с фильтрами по delivery, type, ticker, quality, feedback. |
 | Delivery | `#/delivery` | Сводка delivered/suppressed/unknown, причины подавления и per-type delivery rate. |
 | Calibration | `#/calibration` | Матрица `signal_type x quality tier x feedback/delivery` для настройки порогов. |
@@ -103,7 +104,7 @@ Rate-limit и instrument cooldown проверяются не только в п
 
 Quick feedback controls are available directly in `Triage` and `Signals`: `Useful`, `Noise`, and `Unsure` save `/admin/api/feedback` without opening the signal drawer. The `Signals` feedback filter supports `unlabeled` for rows that still need review.
 
-For manual POI review, treat `Triage` as the queue, `Signals` as the audit trail, `Delivery` as the suppression explanation, `Calibration` as the threshold review surface, and `Accuracy` as the evidence layer before promoting a POI family to wider delivery.
+For manual POI review, treat `Radar` as the setup queue, `Triage` as the raw alert review queue, `Signals` as the audit trail, `Delivery` as the suppression explanation, `Calibration` as the threshold review surface, and `Accuracy` as the evidence layer before promoting a POI family to wider delivery.
 
 <a id="screens"></a>
 
@@ -158,7 +159,7 @@ For manual POI review, treat `Triage` as the queue, `Signals` as the audit trail
 
 | Surface | Purpose |
 |---|---|
-| `#/radar` | Default Trading Radar: POI queue, tickers in play, bias/score/levels, POI delivery dry-run, quick journal actions. |
+| `#/radar` | Default Trading Radar: trading setups, execution levels, tickers in play, POI delivery dry-run, quick journal actions. |
 | `#/poi?id=...` | POI detail: scenario, source health, drivers, nearby raw signals, journal form, and raw POI JSON. |
 | `#/journal` | Manual POI actions and paper-trading results. |
 | `/admin/api/poi` | Read-time POI queue built from stored signals. |

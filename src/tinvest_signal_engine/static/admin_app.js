@@ -157,6 +157,34 @@
     return delivered + q + Number(row.severity || 0) * 8 + Math.abs(Number(row.z_score || 0));
   }
 
+  function signalQuality(row) {
+    const p = row.payload || {};
+    return finiteNumber(p.quality_score, 0);
+  }
+
+  function signalDeliveryStatus(row) {
+    const p = row.payload || {};
+    return row.delivery_status || p.delivery_status || "unknown";
+  }
+
+  function signalDeliveryReason(row) {
+    const p = row.payload || {};
+    return row.delivery_reason || p.delivery_reason || "unknown";
+  }
+
+  function isDeliveredSignal(row) {
+    const status = signalDeliveryStatus(row);
+    return status === "delivered" || status === "delivered_candidate";
+  }
+
+  function isSuppressedSignal(row) {
+    return signalDeliveryStatus(row) === "suppressed";
+  }
+
+  function isUnlabeledSignal(row) {
+    return !row.admin_feedback_label;
+  }
+
   function humanLine(row) {
     const p = row.payload || {};
     const i = p.interpretation || {};
@@ -534,6 +562,44 @@
     `;
   }
 
+  function poiPlanText(poi) {
+    const entry = entryZoneText(poi.entry_zone);
+    const invalid = levelValue(poi.invalidation_price);
+    const targets = levelValue(poi.target_1) + " / " + levelValue(poi.target_2);
+    return "entry " + entry + " | invalid " + invalid + " | targets " + targets;
+  }
+
+  function poiSetupRow(poi) {
+    const terminalUrl = terminalUrlForPoi(poi);
+    return `<tr>
+      <td>
+        <a href="#/poi?id=${encodeURIComponent(poi.poi_id)}"><strong>${esc(poi.ticker || poi.instrument_id)}</strong></a>
+        <div class="muted">${esc(poi.instrument_id || "")}</div>
+      </td>
+      <td>${poiBiasBadge(poi.bias)}<div>${confidenceBadge(poi.confidence)}</div></td>
+      <td class="clip">${esc(poi.setup_type || "")}<div class="muted">${esc(poi.horizon || "")}</div></td>
+      <td>${scoreBadge(poi.interest_score)}</td>
+      <td class="clip">${esc(poi.human_summary_ru || poiPlanText(poi))}</td>
+      <td class="clip">${esc(poiDriversText(poi))}</td>
+      <td>${terminalUrl ? `<a href="${esc(terminalUrl)}" target="_blank">Tbank</a>` : "-"}</td>
+      <td>${poiJournalButtons(poi)}</td>
+    </tr>`;
+  }
+
+  function poiPlanRow(poi) {
+    return `<tr>
+      <td>
+        <a href="#/poi?id=${encodeURIComponent(poi.poi_id)}"><strong>${esc(poi.ticker || poi.instrument_id)}</strong></a>
+        <div class="muted">${shortTime(poi.updated_at)}</div>
+      </td>
+      <td>${poiBiasBadge(poi.bias)}</td>
+      <td class="num">${esc(entryZoneText(poi.entry_zone))}</td>
+      <td class="num">${esc(levelValue(poi.invalidation_price))}</td>
+      <td class="num">${esc(levelValue(poi.target_1))}<div class="muted">${esc(levelValue(poi.target_2))}</div></td>
+      <td class="clip">${esc((poi.drivers || []).slice(0, 3).map((d) => d.signal_type || "unknown").join(" / ") || "-")}</td>
+    </tr>`;
+  }
+
   function tickerRowsInPlay(items) {
     const byTicker = {};
     (items || []).forEach((poi) => {
@@ -582,18 +648,50 @@
     const medium = items.filter((p) => p.confidence === "medium").length;
     const longCount = items.filter((p) => p.bias === "long").length;
     const shortCount = items.filter((p) => p.bias === "short").length;
+    const watchCount = items.filter((p) => (p.bias || "watch") === "watch").length;
+    const realtimeCandidates = Number((poiSimulation.by_channel || {}).realtime || 0);
+    const topSetups = items.slice().sort((a, b) => finiteNumber(b.interest_score, 0) - finiteNumber(a.interest_score, 0));
+    const actionPlans = topSetups.filter((p) => p.confidence === "high" || finiteNumber(p.interest_score, 0) >= 72).slice(0, 12);
     view().innerHTML = `
-      ${pageHead("Trading Radar", "Точки интереса из кластеров аномальных сигналов.", `<a href="#/signals">Raw signals</a>`)}
+      ${pageHead("Trading Radar", "POI setups, bias, levels and journal actions.", `<a href="#/triage">Raw triage</a>`)}
       ${metrics([
-        { label: "POI", value: n(data.total, 0), hint: activePeriodShort() },
-        { label: "High", value: n(high, 0), hint: "confidence" },
-        { label: "Medium", value: n(medium, 0), hint: "watchlist" },
-        { label: "Bias", value: n(longCount, 0) + "L / " + n(shortCount, 0) + "S", hint: data.contract_version || "poi_v1" },
+        { label: "Setups", value: n(data.total, 0), hint: activePeriodShort() },
+        { label: "High conf", value: n(high, 0), hint: n(realtimeCandidates, 0) + " realtime sim" },
+        { label: "Bias map", value: n(longCount, 0) + "L / " + n(shortCount, 0) + "S", hint: n(watchCount, 0) + " watch" },
+        { label: "Raw clustered", value: n(data.source_signal_total, 0), hint: data.contract_version || "poi_v1" },
       ])}
+      <section class="panel">
+        <div class="panel-head"><h2>Trading Setups</h2><span class="muted">ranked POI, not raw alerts</span></div>
+        ${table(
+          [
+            { label: "Ticker" },
+            { label: "Bias" },
+            { label: "Setup" },
+            { label: "Score" },
+            { label: "Scenario" },
+            { label: "Drivers" },
+            { label: "Terminal" },
+            { label: "Journal" },
+          ],
+          topSetups.map(poiSetupRow),
+          "No POI setups for the selected period"
+        )}
+      </section>
       <div class="grid-2">
         <section class="panel">
-          <div class="panel-head"><h2>POI Queue</h2><span class="muted">${esc(n(data.source_signal_total, 0))} raw signals sampled</span></div>
-          ${table(poiHeaders(), items.map(poiRow), "Нет точек интереса за выбранный период")}
+          <div class="panel-head"><h2>Execution Levels</h2><span class="muted">high-score plans</span></div>
+          ${table(
+            [
+              { label: "Ticker" },
+              { label: "Bias" },
+              { label: "Entry", cls: "num" },
+              { label: "Invalid", cls: "num" },
+              { label: "Targets", cls: "num" },
+              { label: "Drivers" },
+            ],
+            actionPlans.map(poiPlanRow),
+            "No high-confidence execution plans yet"
+          )}
         </section>
         <section class="panel">
           <div class="panel-head"><h2>Tickers In Play</h2><span class="muted">ranked by max score</span></div>
@@ -797,32 +895,82 @@
     return Number.isFinite(num) ? num : null;
   }
 
+  function triageRawHeaders(includeReason) {
+    const headers = [
+      { label: "Time" },
+      { label: "Ticker" },
+      { label: "Raw type" },
+      { label: "Q" },
+      { label: "z", cls: "num" },
+      { label: "Feedback" },
+      { label: "Summary" },
+    ];
+    if (includeReason) headers.splice(5, 0, { label: "Gate reason" });
+    return headers;
+  }
+
+  function triageRawRow(row, includeReason) {
+    const reason = signalDeliveryReason(row);
+    const cells = [
+      `<td class="mono">${shortTime(row.detected_at)}</td>`,
+      `<td><a href="#/signal?id=${encodeURIComponent(row.signal_id)}"><strong>${esc(row.ticker)}</strong></a><div class="muted">${esc(row.instrument_id)}</div></td>`,
+      `<td class="clip">${esc(row.signal_type || "")}<div class="muted">${deliveryBadge(signalDeliveryStatus(row))}</div></td>`,
+      `<td>${qualityBadge(signalQuality(row))}</td>`,
+      `<td class="num">${n(row.z_score, 2)}</td>`,
+    ];
+    if (includeReason) cells.push(`<td class="clip">${esc(reason)}</td>`);
+    cells.push(`<td>${feedbackControls(row)}</td>`);
+    cells.push(`<td class="clip">${esc(humanLine(row))}</td>`);
+    return `<tr>${cells.join("")}</tr>`;
+  }
+
+  function compactSignalRow(row) {
+    return `<tr>
+      <td class="mono">${shortTime(row.detected_at)}</td>
+      <td><a href="#/signal?id=${encodeURIComponent(row.signal_id)}"><strong>${esc(row.ticker)}</strong></a><div class="muted">${esc(row.instrument_id)}</div></td>
+      <td class="clip">${esc(row.signal_type || "")}</td>
+      <td>${qualityBadge(signalQuality(row))}</td>
+      <td>${deliveryBadge(signalDeliveryStatus(row))}<div class="muted clip">${esc(signalDeliveryReason(row))}</div></td>
+    </tr>`;
+  }
+
   async function pageTriage() {
     const [ov, delivery, signals, settings] = await Promise.all([
       api("/admin/api/overview" + params({ minutes: state.minutes })),
       api("/admin/api/delivery/overview" + params({ minutes: state.minutes })),
-      api("/admin/api/signals" + params({ minutes: state.minutes, limit: 40 })),
+      api("/admin/api/signals" + params({ minutes: state.minutes, limit: 80 })),
       api("/admin/api/settings"),
     ]);
     rememberRuntime(settings);
     rememberSignalRows(signals.items || []);
     const totals = delivery.totals || {};
     const all = totals.total || 0;
-    const ranked = (signals.items || []).slice().sort((a, b) => signalScore(b) - signalScore(a)).slice(0, 14);
+    const rows = signals.items || [];
+    const ranked = rows.slice().sort((a, b) => signalScore(b) - signalScore(a));
+    const unlabeled = ranked.filter(isUnlabeledSignal).slice(0, 12);
+    const suppressed = ranked.filter(isSuppressedSignal).slice(0, 12);
+    const delivered = ranked.filter(isDeliveredSignal).slice(0, 10);
+    const noisy = ranked.filter((row) => isSuppressedSignal(row) && signalQuality(row) < 65).slice(0, 10);
     const last = (ov.totals || {}).last_detected_at;
     view().innerHTML = `
-      ${pageHead("Triage", "Очередь внимания, доставка и шум за выбранный период.")}
+      ${pageHead("Signal Triage", "Raw alert review, feedback gaps and delivery gate.", `<a href="#/radar">Trading Radar</a>`)}
       ${metrics([
-        { label: "Generated", value: n(all, 0), hint: "saved signals" },
+        { label: "Raw alerts", value: n(all, 0), hint: "stored signals" },
+        { label: "Needs label", value: n(unlabeled.length, 0), hint: "sampled queue" },
+        { label: "Suppressed", value: n(totals.suppressed, 0), hint: "review gate" },
         { label: "Delivered", value: n(totals.delivered, 0), hint: pct(totals.delivery_rate) },
-        { label: "Suppressed", value: n(totals.suppressed, 0), hint: "visible in cockpit" },
-        { label: "Last signal", value: shortTime(last), hint: "exchange stream" },
       ])}
       <div class="grid-2">
         <section class="panel">
-          <div class="panel-head"><h2>Priority Queue</h2><a href="#/signals">Open table</a></div>
-          ${table(priorityHeaders(), ranked.map(priorityRow), "Нет сигналов за период")}
+          <div class="panel-head"><h2>Needs Feedback</h2><a href="#/signals">Open all raw</a></div>
+          ${table(triageRawHeaders(false), unlabeled.map((row) => triageRawRow(row, false)), "No unlabeled raw signals in the sampled period")}
         </section>
+        <section class="panel">
+          <div class="panel-head"><h2>High-Quality Suppressed</h2><a href="#/delivery">Gate details</a></div>
+          ${table(triageRawHeaders(true), suppressed.map((row) => triageRawRow(row, true)), "No suppressed signals in the sampled period")}
+        </section>
+      </div>
+      <div class="grid-2">
         <div class="stack">
           <section class="panel">
             <div class="panel-head"><h2>Delivery Funnel</h2></div>
@@ -835,6 +983,36 @@
           <section class="panel">
             <div class="panel-head"><h2>Hot Tickers</h2><a href="#/instruments">All</a></div>
             ${tickerTable(delivery.by_ticker || [], 8)}
+          </section>
+        </div>
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-head"><h2>Recent Delivered Raw</h2><span class="muted">${shortTime(last)}</span></div>
+            ${table(
+              [
+                { label: "Time" },
+                { label: "Ticker" },
+                { label: "Type" },
+                { label: "Q" },
+                { label: "Delivery" },
+              ],
+              delivered.map(compactSignalRow),
+              "No delivered raw signals in the sampled period"
+            )}
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Low-Value Noise Sample</h2><span class="muted">suppressed q&lt;65</span></div>
+            ${table(
+              [
+                { label: "Time" },
+                { label: "Ticker" },
+                { label: "Type" },
+                { label: "Q" },
+                { label: "Delivery" },
+              ],
+              noisy.map(compactSignalRow),
+              "No low-quality suppressed sample"
+            )}
           </section>
         </div>
       </div>
@@ -1829,6 +2007,7 @@
     }
     try {
       if (r.name === "radar") await pageRadar();
+      else if (r.name === "triage") await pageTriage();
       else if (r.name === "signals") await pageSignals();
       else if (r.name === "delivery") await pageDelivery();
       else if (r.name === "calibration") await pageCalibration();
