@@ -30,7 +30,7 @@ jobs:
           cache: pip
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Install docs dependencies
         run: python -m pip install -e ".[docs]"
@@ -53,4 +53,4 @@ jobs:
     steps:
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
