@@ -21,5 +21,6 @@ This page tracks production-hardening and portfolio-readiness work for T-Invest 
 
 - Keep screenshots close to the README/docs first path.
 - Add a short demo GIF or static image set for the admin cockpit.
+- Keep `scripts/snapshot_admin_ui.py` aligned with the current Signal Cockpit routes.
 - Document what can be verified without real market credentials.
 - Keep architecture diagrams current when topics, services, or storage roles change.
