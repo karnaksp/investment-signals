@@ -31,7 +31,14 @@ docker build \
 ```bash
 python -m pytest -q
 node --check src/tinvest_signal_engine/static/admin_app.js
-python -m mkdocs build
+python -m mkdocs build --strict
+cp .env.example .env
+docker compose config --quiet
+docker build \
+  --build-arg APP_COMMIT_SHA="${GITHUB_SHA}" \
+  --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t tinvest-signal-engine:ci .
+docker run --rm tinvest-signal-engine:ci python -c "from tinvest_signal_engine.runtime_info import runtime_fingerprint; from tinvest_signal_engine.services.api import create_app; app = create_app(); print(app.title, runtime_fingerprint())"
 ```
 
 `.github/workflows/docs.yml` remains responsible for GitHub Pages deployment from `main`.
