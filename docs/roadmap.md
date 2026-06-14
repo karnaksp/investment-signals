@@ -8,7 +8,7 @@ This page tracks production-hardening and portfolio-readiness work for T-Invest 
 - Add release notes for operationally meaningful changes.
 - Keep synthetic-event smoke tests available for local verification without live trading.
 - Expand ClickHouse and Postgres migration notes for existing volumes.
-- Add a Docker build smoke check once CI runtime is acceptable.
+- Keep Docker build and runtime smoke checks fast and non-flaky in CI.
 
 ## Observability And Quality
 
@@ -23,4 +23,3 @@ This page tracks production-hardening and portfolio-readiness work for T-Invest 
 - Add a short demo GIF or static image set for the admin cockpit.
 - Document what can be verified without real market credentials.
 - Keep architecture diagrams current when topics, services, or storage roles change.
-

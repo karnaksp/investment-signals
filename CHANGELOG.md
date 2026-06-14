@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added CI Docker/Compose smoke validation for the production runtime image.
 - Added runtime fingerprint metadata (`app_version`, `commit_sha`, `build_time`) to health, readiness, and admin settings responses.
 - Added delivery policy v3 metadata: `delivery_priority`, `delivery_channel`, and `delivery_explanation_ru`.
 - Kept experimental rollout signal types `admin_only` by default and added explicit `admin_only`/`digest` custom delivery rules.
