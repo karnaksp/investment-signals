@@ -1,26 +1,26 @@
 # Roadmap
 
-This page tracks production-hardening and portfolio-readiness work for T-Invest Signal Engine.
+Эта страница отслеживает production-hardening и portfolio-readiness задачи для T-Invest Signal Engine.
 
 ## Production Hardening
 
-- Enable branch protection and required CI checks on `main`.
-- Add release notes for operationally meaningful changes.
-- Keep synthetic-event smoke tests available for local verification without live trading.
-- Expand ClickHouse and Postgres migration notes for existing volumes.
-- Keep Docker build and runtime smoke checks fast and non-flaky in CI.
+- Поддерживать branch protection и required CI checks на `main`.
+- Поддерживать актуальные [release notes](release_notes.md) для изменений, которые влияют на эксплуатацию, delivery behavior, UI ревью или runtime verification.
+- Держать synthetic-event smoke tests доступными для локальной проверки без live trading.
+- Расширить ClickHouse и Postgres migration notes для существующих volumes.
+- Держать Docker build и runtime smoke checks быстрыми и стабильными в CI.
 
 ## Observability And Quality
 
-- Keep Prometheus/Grafana dashboards aligned with detector and delivery metrics.
-- Track signal usefulness via Signal Cockpit feedback and accuracy exports.
-- Add more documented examples of signal triage: useful signal, noisy signal, delivery failure.
-- Document expected row counts and latency ranges for local smoke runs.
+- Держать Prometheus/Grafana dashboards синхронизированными с detector и delivery metrics.
+- Отслеживать полезность сигналов через Signal Cockpit feedback и accuracy exports.
+- Добавить больше документированных примеров triage: useful signal, noisy signal, delivery failure.
+- Документировать ожидаемые row counts и latency ranges для local smoke runs.
 
 ## Portfolio Evidence
 
-- Keep screenshots close to the README/docs first path.
-- Add a short demo GIF or static image set for the admin cockpit.
-- Keep `scripts/snapshot_admin_ui.py` aligned with the current Signal Cockpit routes.
-- Document what can be verified without real market credentials.
-- Keep architecture diagrams current when topics, services, or storage roles change.
+- Держать screenshots рядом с первым README/docs path.
+- Добавить короткий demo GIF или static image set для Admin Cockpit.
+- Держать `scripts/snapshot_admin_ui.py` синхронизированным с текущими Signal Cockpit routes.
+- Документировать, что можно проверить без реальных market credentials.
+- Обновлять architecture diagrams при изменении topics, services или storage roles.
