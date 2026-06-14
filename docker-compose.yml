@@ -22,7 +22,7 @@ services:
   # Kafka-совместимый брокер; лимиты диска см. redpanda-init (сырьё коротко, сигналы дольше).
   # Память: --memory — куча Seastar; mmap сегментов логов живёт вне неё → нужен mem_limit > --memory (см. .env.example).
   redpanda:
-    image: ${REDPANDA_IMAGE:-redpandadata/redpanda:latest}
+    image: ${REDPANDA_IMAGE:-redpandadata/redpanda:v24.3.6}
     mem_limit: "${REDPANDA_CONTAINER_MEM_LIMIT:-2560m}"
     restart: unless-stopped
     command:
@@ -80,7 +80,7 @@ services:
 
   # При каждом up: создаёт топики и выставляет retention (сырые события — коротко; сигналы — дольше).
   redpanda-init:
-    image: ${REDPANDA_IMAGE:-redpandadata/redpanda:latest}
+    image: ${REDPANDA_IMAGE:-redpandadata/redpanda:v24.3.6}
     depends_on:
       - redpanda
     entrypoint:
@@ -117,7 +117,7 @@ services:
 
   # Веб-консоль для просмотра топиков и сообщений (опционально).
   redpanda-console:
-    image: ${REDPANDA_CONSOLE_IMAGE:-redpandadata/console:latest}
+    image: ${REDPANDA_CONSOLE_IMAGE:-redpandadata/console:v2.8.4}
     depends_on:
       - redpanda
     environment:
