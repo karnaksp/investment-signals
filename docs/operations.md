@@ -45,10 +45,30 @@ Every signal payload gets additional read-only metadata:
 | Field | Values |
 |---|---|
 | `delivery_priority` | `high`, `medium`, `low`. |
-| `delivery_channel` | `realtime` for delivered alerts, `admin_only` for suppressed/admin-only signals. |
+| `delivery_channel` | `realtime` for delivered alerts, `digest` for digest candidates, `admin_only` for suppressed/admin-only signals. |
 | `delivery_explanation_ru` | Human-readable Russian explanation for the decision. |
 
 `/admin/api/delivery/simulation` dry-runs a candidate policy over stored signals. It never updates payloads and never sends Telegram/webhook messages.
+
+The simulation presets are:
+
+| Preset | Purpose |
+|---|---|
+| `current` | Replays the active runtime delivery settings. |
+| `conservative` | Raises the quality floor to test a stricter Telegram gate. |
+| `admin_only_rollout` | Forces experimental rollout types to `admin_only`, even if current env rules promote them. |
+
+`SIGNAL_DELIVERY_TYPE_RULES_JSON` can be used for explicit per-type promotion or holdback:
+
+```json
+{
+  "candle_range_spike": { "admin_only": true },
+  "aggressive_trade_burst": { "channel": "digest", "min_quality": 75 },
+  "obi_dynamics": { "always": true }
+}
+```
+
+Use `always` only after feedback/accuracy review: it promotes the type to realtime. `channel=digest` keeps the signal out of realtime Telegram while marking it as a digest candidate in admin analytics.
 
 ## Feedback Loop
 

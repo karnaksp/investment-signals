@@ -421,6 +421,33 @@
     .b-low { color: #ffc6c6; border-color: rgba(240, 107, 107, 0.35); background: rgba(240, 107, 107, 0.1); }
     .b-sev3 { color: #ffc6c6; }
     .b-sev2 { color: #ffe3ad; }
+    .feedback-cell {
+      display: grid;
+      gap: 0.32rem;
+      justify-items: start;
+      min-width: 184px;
+    }
+    .feedback-actions {
+      display: flex;
+      gap: 0.25rem;
+      flex-wrap: nowrap;
+    }
+    .feedback-btn {
+      min-height: 24px;
+      padding: 0 0.45rem;
+      border-radius: 6px;
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+    .feedback-btn.is-active {
+      color: var(--text);
+      border-color: rgba(82, 168, 255, 0.5);
+      background: rgba(82, 168, 255, 0.12);
+    }
+    .feedback-btn:disabled {
+      cursor: wait;
+      opacity: 0.55;
+    }
 
     .bar {
       display: grid;
@@ -563,6 +590,6 @@
 </head>
 <body>
   <div id="app" class="boot">Loading Signal Cockpit...</div>
-  <script src="/admin/admin_app.js"></script>
+  <script src="/admin/admin_app.js" charset="utf-8"></script>
 </body>
 </html>
