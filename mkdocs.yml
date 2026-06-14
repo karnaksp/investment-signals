@@ -81,6 +81,7 @@ nav:
   - Решение проблем: troubleshooting.md
   - Signal Cockpit: admin_cockpit.md
   - Operations and rollout: operations.md
+  - Release notes: release_notes.md
   - Roadmap: roadmap.md
   - Research log: research_log.md
   - HTTP API (Swagger): openapi.md
