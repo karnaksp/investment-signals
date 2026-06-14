@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from tinvest_signal_engine.config import RuntimeSettings
@@ -236,3 +237,86 @@ def test_persistent_rate_limit_survives_restart(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "suppressed"
     assert out.payload["delivery_reason"] == "rate_limit_per_hour"
+
+
+def test_experimental_signal_is_admin_only_by_default(monkeypatch) -> None:
+    policy = DeliveryPolicy(_settings(monkeypatch))
+    out = policy.apply(
+        _signal(
+            signal_type="candle_range_spike",
+            source_event_type="candle",
+            payload={"quality_score": 99},
+            z_score=20.0,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "suppressed"
+    assert out.payload["delivery_reason"] == "experimental_admin_only"
+    assert out.payload["delivery_rule"] == "controlled_rollout_admin_only"
+    assert out.payload["delivery_channel"] == "admin_only"
+
+
+def test_custom_rule_can_explicitly_promote_experimental_signal(monkeypatch) -> None:
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_TYPE_RULES_JSON=json.dumps(
+                {"candle_range_spike": {"always": True}}
+            ),
+        )
+    )
+
+    out = policy.apply(
+        _signal(
+            signal_type="candle_range_spike",
+            source_event_type="candle",
+            payload={"quality_score": 20},
+            z_score=1.0,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "delivered"
+    assert out.payload["delivery_reason"] == "type_rule_always"
+    assert out.payload["delivery_channel"] == "realtime"
+
+
+def test_custom_rule_can_hold_signal_as_digest_candidate(monkeypatch) -> None:
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_TYPE_RULES_JSON=json.dumps(
+                {"candle_range_spike": {"channel": "digest", "min_quality": 70}}
+            ),
+        )
+    )
+
+    out = policy.apply(
+        _signal(
+            signal_type="candle_range_spike",
+            source_event_type="candle",
+            payload={"quality_score": 90},
+            z_score=3.0,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "suppressed"
+    assert out.payload["delivery_reason"] == "type_rule_digest"
+    assert out.payload["delivery_channel"] == "digest"
+    assert out.payload["delivery_priority"] == "medium"
+
+
+def test_custom_rule_can_force_admin_only(monkeypatch) -> None:
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_TYPE_RULES_JSON=json.dumps(
+                {"volume_spike": {"admin_only": True}}
+            ),
+        )
+    )
+
+    out = policy.apply(_signal(payload={"quality_score": 95}, z_score=9.0))
+
+    assert out.payload["delivery_status"] == "suppressed"
+    assert out.payload["delivery_reason"] == "type_rule_admin_only"
+    assert out.payload["delivery_channel"] == "admin_only"

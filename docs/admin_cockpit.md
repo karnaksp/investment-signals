@@ -47,7 +47,7 @@ docker compose up -d api
 | `SIGNAL_DELIVERY_MIN_QUALITY` | Базовый floor качества для delivery policy. |
 | `SIGNAL_DELIVERY_MAX_PER_HOUR` | Глобальный cap Telegram/webhook-сигналов в час. |
 | `SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS` | Cooldown между delivered-сигналами по одному инструменту. |
-| `SIGNAL_DELIVERY_TYPE_RULES_JSON` | Optional per-type overrides в JSON. |
+| `SIGNAL_DELIVERY_TYPE_RULES_JSON` | Optional per-type overrides in JSON: `admin_only`, `channel=digest`, or explicit realtime promotion. |
 
 ## Delivery V2
 
@@ -74,6 +74,8 @@ Rate-limit и instrument cooldown проверяются не только в п
 | Instruments | `#/instruments` | Полный configured universe из `conf/instruments.yaml` плюс активность по каждому тикеру. |
 | Accuracy | `#/accuracy` | JSON-метрики accuracy, если подготовлен `SIGNAL_ACCURACY_JSON_PATH`. |
 | Settings | `#/settings` | Read-only runtime config без секретов. |
+
+Quick feedback controls are available directly in `Triage` and `Signals`: `Useful`, `Noise`, and `Unsure` save `/admin/api/feedback` without opening the signal drawer. The `Signals` feedback filter supports `unlabeled` for rows that still need review.
 
 <a id="screens"></a>
 

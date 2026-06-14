@@ -8,6 +8,17 @@ version = "0.1.0"
 description = "Realtime anomaly detection pipeline for T-Invest market data."
 readme = "README.md"
 requires-python = ">=3.11"
+license = {file = "LICENSE"}
+keywords = [
+  "data-engineering",
+  "market-data",
+  "kafka",
+  "redpanda",
+  "clickhouse",
+  "postgres",
+  "fastapi",
+  "observability",
+]
 dependencies = [
   "cachetools",
   "deprecation",
@@ -50,6 +61,7 @@ orchestration = [
   "dagster-webserver>=1.8.0,<2",
 ]
 dev = [
+  "pytest>=8",
   "playwright>=1.40",
   "dagster>=1.8.0,<2",
   "dagster-webserver>=1.8.0,<2",
@@ -66,3 +78,8 @@ backtest = [
 proto = [
   "grpcio-tools>=1.62,<1.82",
 ]
+
+[project.urls]
+Documentation = "https://karnaksp.github.io/investment-signals/"
+Repository = "https://github.com/karnaksp/investment-signals"
+Issues = "https://github.com/karnaksp/investment-signals/issues"

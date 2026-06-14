@@ -2,10 +2,19 @@
 
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-0969da)](https://karnaksp.github.io/investment-signals/)
 [![Publish docs](https://github.com/karnaksp/investment-signals/actions/workflows/docs.yml/badge.svg)](https://github.com/karnaksp/investment-signals/actions/workflows/docs.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Публичная документация:** https://karnaksp.github.io/investment-signals/
 
-Конвейер обнаружения рыночных аномалий в реальном времени по данным T-Invest.
+Production-oriented конвейер обнаружения рыночных аномалий в реальном времени по данным T-Invest.
+
+## Portfolio quick scan
+
+- **Problem:** turn a live market data stream into explainable anomaly signals that can be reviewed, stored, monitored, and delivered.
+- **Data flow:** `T-Invest stream -> Redpanda/Kafka -> detector -> Postgres signals + ClickHouse raw/event analytics -> FastAPI/Admin Cockpit -> Telegram/webhook/monitoring`.
+- **Production signals:** Docker Compose stack, `.env.example`, tests, CI, MkDocs documentation, security notes, Dependabot, observability with Prometheus/Grafana, and admin cockpit screenshots.
+- **Local proof:** run the stack with Docker Compose, push synthetic `trading_status` events, then verify the signal via API/admin cockpit without touching live trading.
+- **Docs:** [architecture](docs/architecture.md), [detectors](docs/detectors.md), [Signal Cockpit](docs/admin_cockpit.md), [troubleshooting](docs/troubleshooting.md).
 
 Проект собран как небольшой data-engineering стек:
 
@@ -67,6 +76,7 @@ Observability:
 Так проект остаётся близким к реальному event pipeline, но достаточно лёгким для локального запуска.
 
 Документация: [архитектура](docs/architecture.md), [детекторы](docs/detectors.md), [Signal Cockpit](docs/admin_cockpit.md), [Dagster](docs/orchestration.md), [SQL по сигналам](docs/signal_analytics.md), [решение проблем](docs/troubleshooting.md) (Telegram, синтетический тест, ClickHouse).
+Roadmap production-hardening: [docs/roadmap.md](docs/roadmap.md).
 
 ## Структура проекта
 
