@@ -7,14 +7,41 @@
   python scripts/snapshot_admin_ui.py
 
 Переменные: ADMIN_UI_BASE (по умолчанию http://127.0.0.1:38000),
-           SNAPSHOT_DIR (по умолчанию var/ui_snapshots).
+           SNAPSHOT_DIR (по умолчанию var/ui_snapshots),
+           ADMIN_UI_ROUTES (опционально: triage,signals,delivery).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+
+
+DEFAULT_ROUTES = [
+    ("#/triage", "triage"),
+    ("#/signals", "signals"),
+    ("#/delivery", "delivery"),
+    ("#/calibration", "calibration"),
+    ("#/instruments", "instruments"),
+    ("#/accuracy", "accuracy"),
+    ("#/settings", "settings"),
+]
+
+
+def selected_routes(raw: str | None) -> list[tuple[str, str]]:
+    if not raw:
+        return DEFAULT_ROUTES
+    route_names = {name.strip().lower() for name in raw.split(",") if name.strip()}
+    known = {name for _, name in DEFAULT_ROUTES}
+    unknown = sorted(route_names - known)
+    if unknown:
+        raise ValueError(
+            "Unknown ADMIN_UI_ROUTES values: "
+            f"{', '.join(unknown)}. Expected one of: {', '.join(sorted(known))}"
+        )
+    return [(route, name) for route, name in DEFAULT_ROUTES if name in route_names]
 
 
 def main() -> int:
@@ -30,11 +57,11 @@ def main() -> int:
     out_dir = Path(os.environ.get("SNAPSHOT_DIR", "var/ui_snapshots"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    routes = [
-        ("#/overview", "overview"),
-        ("#/table", "table"),
-        ("#/slices", "slices"),
-    ]
+    try:
+        routes = selected_routes(os.environ.get("ADMIN_UI_ROUTES"))
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -43,17 +70,17 @@ def main() -> int:
                 viewport={"width": width, "height": 900},
                 device_scale_factor=1,
             )
-            page = ctx.new_page()
-            page.goto(f"{base}/admin/", wait_until="networkidle", timeout=60_000)
             if token:
-                page.evaluate(
-                    """(t) => { localStorage.setItem('tinvest_admin_token', t); }""",
-                    token,
+                ctx.add_init_script(
+                    "localStorage.setItem("
+                    f"'tinvest_admin_token', {json.dumps(token)});"
                 )
+            page = ctx.new_page()
             for h, name in routes:
-                page.evaluate(
-                    """(hash) => { window.location.hash = hash; }""",
-                    h,
+                page.goto(
+                    f"{base}/admin/{h}",
+                    wait_until="networkidle",
+                    timeout=60_000,
                 )
                 page.wait_for_timeout(1500)
                 path = out_dir / f"admin_{name}_{tag}.png"

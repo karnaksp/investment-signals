@@ -112,6 +112,16 @@ Quick feedback controls are available directly in `Triage` and `Signals`: `Usefu
   Старые записи без delivery metadata отображаются как <code>delivery_status=unknown</code>, поэтому исторические данные не ломают таблицы и графики.
 </p>
 
+Актуальные screenshots можно переснять без изменения frontend build pipeline:
+
+```bash
+ADMIN_UI_BASE=http://127.0.0.1:38000 \
+ADMIN_UI_ROUTES=triage,signals,delivery,calibration,instruments \
+python scripts/snapshot_admin_ui.py
+```
+
+По умолчанию скрипт снимает desktop и mobile варианты всех текущих разделов Cockpit: `triage`, `signals`, `delivery`, `calibration`, `instruments`, `accuracy`, `settings`.
+
 ## API
 
 Основные endpoints:
