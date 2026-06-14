@@ -521,11 +521,12 @@ class PostgresSignalStore:
             conds.append(f"{_delivery_status_sql()} = %(delivery_status)s")
             params["delivery_status"] = delivery_status.strip()
         if feedback:
-            if feedback.strip() == "none":
+            feedback_value = feedback.strip()
+            if feedback_value in {"none", "unlabeled"}:
                 conds.append("fb.label IS NULL")
             else:
                 conds.append("fb.label = %(feedback)s")
-                params["feedback"] = feedback.strip()
+                params["feedback"] = feedback_value
         if severity is not None:
             conds.append("ms.severity = %(severity)s")
             params["severity"] = int(severity)

@@ -30,6 +30,13 @@ _ACTIVITY_CONTEXT_TYPES = {
 }
 _MOMENTUM_TYPES = {"volume_spike", "trade_rate_spike", "price_jump"}
 _LIQUIDITY_TYPES = {"spread_widening", "orderbook_imbalance"}
+_EXPERIMENTAL_ADMIN_ONLY_TYPES = {
+    "candle_range_spike",
+    "obi_dynamics",
+    "open_interest_spike",
+    "aggressive_trade_burst",
+    "lead_lag_divergence",
+}
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,7 @@ class DeliveryDecision:
     reason: str
     rule: str
     delivered_at: datetime | None = None
+    channel: str | None = None
 
     @property
     def should_send(self) -> bool:
@@ -246,6 +254,14 @@ class DeliveryPolicy:
                 rule="liquidity_activity_confirmed",
             )
 
+        if st in _EXPERIMENTAL_ADMIN_ONLY_TYPES:
+            return DeliveryDecision(
+                status=DELIVERY_SUPPRESSED,
+                reason="experimental_admin_only",
+                rule="controlled_rollout_admin_only",
+                channel="admin_only",
+            )
+
         if quality >= max(90, self.min_quality):
             return DeliveryDecision(
                 status=DELIVERY_DELIVERED,
@@ -265,33 +281,47 @@ class DeliveryPolicy:
         rule = self._type_rules.get(signal.signal_type)
         if not isinstance(rule, dict):
             return None
-        if bool(rule.get("always")):
+        channel = _normalize_rule_channel(rule)
+        if bool(rule.get("admin_only")) or channel == "admin_only":
             return DeliveryDecision(
-                status=DELIVERY_DELIVERED,
-                reason="type_rule_always",
+                status=DELIVERY_SUPPRESSED,
+                reason="type_rule_admin_only",
                 rule="custom_type_rule",
-                delivered_at=now,
+                channel="admin_only",
             )
+        matched_reason: str | None = None
+        if bool(rule.get("always")):
+            matched_reason = "type_rule_always"
         min_quality = rule.get("min_quality")
         min_abs_z = rule.get("min_abs_z")
-        if min_quality is not None and _quality(signal) >= float(min_quality):
+        if matched_reason is None:
+            if min_quality is not None and _quality(signal) >= float(min_quality):
+                matched_reason = "type_rule_quality"
+            elif min_abs_z is not None and abs(float(signal.z_score)) >= float(
+                min_abs_z
+            ):
+                matched_reason = "type_rule_abs_z"
+            elif channel == "digest" and min_quality is None and min_abs_z is None:
+                matched_reason = "type_rule_digest"
+        if matched_reason is None:
             return DeliveryDecision(
-                status=DELIVERY_DELIVERED,
-                reason="type_rule_quality",
+                status=DELIVERY_SUPPRESSED,
+                reason="custom_type_rule_not_matched",
                 rule="custom_type_rule",
-                delivered_at=now,
             )
-        if min_abs_z is not None and abs(float(signal.z_score)) >= float(min_abs_z):
+        if channel == "digest":
             return DeliveryDecision(
-                status=DELIVERY_DELIVERED,
-                reason="type_rule_abs_z",
+                status=DELIVERY_SUPPRESSED,
+                reason="type_rule_digest",
                 rule="custom_type_rule",
-                delivered_at=now,
+                channel="digest",
             )
         return DeliveryDecision(
-            status=DELIVERY_SUPPRESSED,
-            reason="custom_type_rule_not_matched",
+            status=DELIVERY_DELIVERED,
+            reason=matched_reason,
             rule="custom_type_rule",
+            delivered_at=now,
+            channel="realtime",
         )
 
     def _instrument_cooldown_decision(
@@ -385,6 +415,8 @@ class DeliveryPolicy:
     def _priority(self, signal: TriggerSignal, decision: DeliveryDecision) -> str:
         if decision.should_send:
             return "high"
+        if decision.channel == "digest":
+            return "medium"
         quality = _quality(signal)
         abs_z = abs(float(signal.z_score))
         if quality >= self.min_quality or abs_z >= 6.0 or int(signal.severity) >= 3:
@@ -393,6 +425,8 @@ class DeliveryPolicy:
 
     @staticmethod
     def _channel(decision: DeliveryDecision) -> str:
+        if decision.channel:
+            return decision.channel
         return "realtime" if decision.should_send else "admin_only"
 
     @staticmethod
@@ -417,6 +451,13 @@ def _parse_type_rules(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _normalize_rule_channel(rule: dict[str, Any]) -> str | None:
+    value = str(rule.get("channel") or "").strip().lower()
+    if value in {"admin_only", "digest", "realtime"}:
+        return value
+    return None
 
 
 def _quality(signal: TriggerSignal) -> float:
@@ -450,6 +491,9 @@ _REASON_RU: dict[str, str] = {
     "price_without_confirmation": "Price jump сохранён, но для Telegram не хватило экстремальности или соседней активности.",
     "liquidity_without_context": "Liquidity-сигнал сохранён, но без соседнего volume/trade/combo не отправляется.",
     "quality_below_floor": "Сигнал сохранён, но quality ниже общего realtime-порога.",
+    "experimental_admin_only": "Новый или экспериментальный тип сигнала сохранён для анализа и не отправляется в Telegram до явного promotion.",
+    "type_rule_admin_only": "Custom type rule оставил этот тип в admin-only режиме.",
+    "type_rule_digest": "Custom type rule пометил сигнал как digest-кандидат без realtime-отправки.",
     "rate_limit_per_hour": "Сигнал сохранён, но подавлен глобальным лимитом сообщений в час.",
     "instrument_cooldown": "Сигнал сохранён, но подавлен cooldown по инструменту.",
     "status_cooldown": "Статусный сигнал сохранён, но повтор подавлен часовым cooldown.",
