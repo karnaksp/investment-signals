@@ -44,4 +44,4 @@ jobs:
         run: node --check src/tinvest_signal_engine/static/admin_app.js
 
       - name: Build docs
-        run: python -m mkdocs build
+        run: python -m mkdocs build --strict

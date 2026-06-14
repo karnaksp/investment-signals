@@ -12,6 +12,6 @@ Open a private security report through GitHub if the repository supports it. If 
 
 ## Operational Notes
 
-- Rotate `T_INVEST_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_API_TOKEN`, and database credentials after accidental exposure.
+- Rotate `TINVEST_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_API_TOKEN`, and database credentials after accidental exposure.
 - Treat `/admin` and `/admin/api/*` as private surfaces. They require `X-Admin-Token` and should stay behind trusted network access in production.
 - Runtime fingerprint fields are safe to expose in health/admin responses; they intentionally include version, commit SHA, and build time, not secrets.
