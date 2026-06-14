@@ -743,7 +743,10 @@ class AdminFeedbackIn(BaseModel):
 class DeliverySimulationIn(BaseModel):
     """Dry-run delivery settings over recent stored signals."""
 
-    preset: str = Field(default="current", description="current | conservative")
+    preset: str = Field(
+        default="current",
+        description="current | conservative | admin_only_rollout",
+    )
     type_rules_json: str = Field(default="")
     min_quality: int | None = Field(default=None, ge=0, le=100)
     max_per_hour: int | None = Field(default=None, ge=0, le=1000)
@@ -755,10 +758,19 @@ class DeliverySimulationIn(BaseModel):
     @classmethod
     def _preset_ok(cls, v: str) -> str:
         value = (v or "current").strip().lower()
-        allowed = {"current", "conservative"}
+        allowed = {"current", "conservative", "admin_only_rollout"}
         if value not in allowed:
             raise ValueError(f"preset must be one of: {', '.join(sorted(allowed))}")
         return value
+
+
+_ADMIN_ONLY_ROLLOUT_RULES = {
+    "candle_range_spike": {"admin_only": True},
+    "obi_dynamics": {"admin_only": True},
+    "open_interest_spike": {"admin_only": True},
+    "aggressive_trade_burst": {"admin_only": True},
+    "lead_lag_divergence": {"admin_only": True},
+}
 
 
 def _simulation_settings(
@@ -771,6 +783,15 @@ def _simulation_settings(
     max_per_hour = settings.signal_delivery_max_per_hour
     cooldown = settings.signal_delivery_instrument_cooldown_seconds
     type_rules = settings.signal_delivery_type_rules_json
+    if body.preset == "admin_only_rollout":
+        try:
+            parsed_rules = json.loads(type_rules or "{}")
+        except json.JSONDecodeError:
+            parsed_rules = {}
+        if not isinstance(parsed_rules, dict):
+            parsed_rules = {}
+        parsed_rules.update(_ADMIN_ONLY_ROLLOUT_RULES)
+        type_rules = json.dumps(parsed_rules, ensure_ascii=False)
     if body.min_quality is not None:
         min_quality = int(body.min_quality)
     if body.max_per_hour is not None:
