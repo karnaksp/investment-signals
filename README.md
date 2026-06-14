@@ -76,6 +76,7 @@ Observability:
 Так проект остаётся близким к реальному event pipeline, но достаточно лёгким для локального запуска.
 
 Документация: [архитектура](docs/architecture.md), [детекторы](docs/detectors.md), [Signal Cockpit](docs/admin_cockpit.md), [Dagster](docs/orchestration.md), [SQL по сигналам](docs/signal_analytics.md), [решение проблем](docs/troubleshooting.md) (Telegram, синтетический тест, ClickHouse).
+Roadmap production-hardening: [docs/roadmap.md](docs/roadmap.md).
 
 ## Структура проекта
 
