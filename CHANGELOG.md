@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-- Aligned the Admin Cockpit screenshot script with the current `triage`, `signals`, `delivery`, `calibration`, `instruments`, `accuracy`, and `settings` routes.
-- Added CI Docker/Compose smoke validation for the production runtime image.
-- Added runtime fingerprint metadata (`app_version`, `commit_sha`, `build_time`) to health, readiness, and admin settings responses.
-- Added delivery policy v3 metadata: `delivery_priority`, `delivery_channel`, and `delivery_explanation_ru`.
-- Kept experimental rollout signal types `admin_only` by default and added explicit `admin_only`/`digest` custom delivery rules.
-- Added quick `Useful`/`Noise`/`Unsure` feedback controls in Signal Cockpit Triage and Signals tables.
-- Added admin APIs for feedback overview, source health, delivery simulation, and accuracy empty-state summaries.
-- Added repeatable DuckDB accuracy JSON output for 1/5/15 minute horizons.
-- Added CI, Dependabot, issue templates, and security guidance.
+- Admin Cockpit screenshot script синхронизирован с текущими routes: `triage`, `signals`, `delivery`, `calibration`, `instruments`, `accuracy` и `settings`.
+- Добавлена CI smoke validation для Docker/Compose production runtime image.
+- Runtime fingerprint metadata (`app_version`, `commit_sha`, `build_time`) добавлена в health, readiness и admin settings responses.
+- Добавлена delivery policy v3 metadata: `delivery_priority`, `delivery_channel` и `delivery_explanation_ru`.
+- Experimental rollout signal types остаются `admin_only` по умолчанию; добавлены явные custom delivery rules для `admin_only`/`digest`.
+- В Signal Cockpit Triage и Signals tables добавлены быстрые feedback controls `Useful`/`Noise`/`Unsure`.
+- Добавлены admin APIs для feedback overview, source health, delivery simulation и accuracy empty-state summaries.
+- Добавлен повторяемый DuckDB accuracy JSON output для горизонтов 1/5/15 минут.
+- Добавлены CI, Dependabot, issue templates и security guidance.

@@ -1,20 +1,20 @@
 # Operations and Rollout
 
-This page documents the runtime and calibration loop used to evolve Signal Engine without returning Telegram spam.
+Эта страница описывает runtime и calibration loop, которые позволяют развивать Signal Engine без увеличения шума в delivery.
 
 ## Runtime Fingerprint
 
-`/health`, `/ready`, and `/admin/api/settings` include a runtime fingerprint:
+`/health`, `/ready` и `/admin/api/settings` возвращают runtime fingerprint:
 
 | Field | Meaning |
 |---|---|
-| `app_version` | Package/runtime version from `APP_VERSION` or package metadata. |
-| `commit_sha` | Build commit from `APP_COMMIT_SHA`, GitHub SHA, or local `git rev-parse`. |
-| `build_time` | Build timestamp from `APP_BUILD_TIME`, `BUILD_TIME`, or `unknown`. |
+| `app_version` | Версия package/runtime из `APP_VERSION` или package metadata. |
+| `commit_sha` | Build commit из `APP_COMMIT_SHA`, GitHub SHA или локального `git rev-parse`. |
+| `build_time` | Build timestamp из `APP_BUILD_TIME`, `BUILD_TIME` или `unknown`. |
 
-Signal Cockpit shows this fingerprint in the top status bar after the first settings request. Use it to verify which commit produced a Telegram alert or an admin row.
+Signal Cockpit показывает этот fingerprint в верхней status bar после первого запроса settings. Используйте его, чтобы проверить, какой commit создал Telegram alert или admin row.
 
-Docker builds can pass:
+Docker builds могут передавать:
 
 ```bash
 docker build \
@@ -26,7 +26,7 @@ docker build \
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pushes, pull requests, and manual dispatch:
+`.github/workflows/ci.yml` запускается на pushes, pull requests и manual dispatch:
 
 ```bash
 python -m pytest -q
@@ -41,31 +41,31 @@ docker build \
 docker run --rm tinvest-signal-engine:ci python -c "from tinvest_signal_engine.runtime_info import runtime_fingerprint; from tinvest_signal_engine.services.api import create_app; app = create_app(); print(app.title, runtime_fingerprint())"
 ```
 
-`.github/workflows/docs.yml` remains responsible for GitHub Pages deployment from `main`.
+`.github/workflows/docs.yml` отвечает за GitHub Pages deployment из `main`.
 
 ## Delivery Policy v3
 
-Delivery v3 keeps the storage-first rule: detector and enrichment save signals, delivery decides what can leave the system.
+Delivery v3 сохраняет storage-first rule: detector и enrichment сохраняют signals, а delivery решает, что может выйти из системы наружу.
 
-Every signal payload gets additional read-only metadata:
+Каждый signal payload получает дополнительную read-only metadata:
 
 | Field | Values |
 |---|---|
 | `delivery_priority` | `high`, `medium`, `low`. |
-| `delivery_channel` | `realtime` for delivered alerts, `digest` for digest candidates, `admin_only` for suppressed/admin-only signals. |
-| `delivery_explanation_ru` | Human-readable Russian explanation for the decision. |
+| `delivery_channel` | `realtime` для доставленных alerts, `digest` для digest candidates, `admin_only` для suppressed/admin-only signals. |
+| `delivery_explanation_ru` | Человекочитаемое русское объяснение решения. |
 
-`/admin/api/delivery/simulation` dry-runs a candidate policy over stored signals. It never updates payloads and never sends Telegram/webhook messages.
+`/admin/api/delivery/simulation` dry-runs candidate policy поверх сохраненных signals. Endpoint не обновляет payloads и не отправляет Telegram/webhook messages.
 
-The simulation presets are:
+Simulation presets:
 
 | Preset | Purpose |
 |---|---|
-| `current` | Replays the active runtime delivery settings. |
-| `conservative` | Raises the quality floor to test a stricter Telegram gate. |
-| `admin_only_rollout` | Forces experimental rollout types to `admin_only`, even if current env rules promote them. |
+| `current` | Повторяет активные runtime delivery settings. |
+| `conservative` | Поднимает quality floor, чтобы проверить более строгий Telegram gate. |
+| `admin_only_rollout` | Принудительно переводит experimental rollout types в `admin_only`, даже если текущие env rules продвигают их выше. |
 
-`SIGNAL_DELIVERY_TYPE_RULES_JSON` can be used for explicit per-type promotion or holdback:
+`SIGNAL_DELIVERY_TYPE_RULES_JSON` можно использовать для явного per-type promotion или holdback:
 
 ```json
 {
@@ -75,38 +75,38 @@ The simulation presets are:
 }
 ```
 
-Use `always` only after feedback/accuracy review: it promotes the type to realtime. `channel=digest` keeps the signal out of realtime Telegram while marking it as a digest candidate in admin analytics.
+Используйте `always` только после feedback/accuracy review: это продвигает тип в realtime. `channel=digest` оставляет signal вне realtime Telegram, но помечает его как digest candidate в admin analytics.
 
 ## Feedback Loop
 
-`/admin/api/feedback/overview` aggregates existing admin feedback labels without a required SQL migration:
+`/admin/api/feedback/overview` агрегирует существующие admin feedback labels и не требует отдельной migration для чтения summary:
 
-- useful/noise/unsure totals;
+- totals по useful/noise/unsure;
 - type x delivery x feedback;
 - ticker x delivery x feedback;
-- delivered signals marked noise;
-- suppressed signals marked useful.
+- delivered signals, отмеченные как noise;
+- suppressed signals, отмеченные как useful.
 
-Use the Feedback page before changing thresholds. A useful suppressed signal is a candidate for digest or realtime review; a noisy delivered signal is a candidate for stricter delivery.
+Используйте страницу Feedback перед изменением thresholds. Useful suppressed signal - кандидат на digest или realtime review; noisy delivered signal - кандидат на более строгую delivery policy.
 
 ## Source Health
 
-`/admin/api/source-health` combines `conf/instruments.yaml`, detector config, and ClickHouse raw-event freshness.
+`/admin/api/source-health` объединяет `conf/instruments.yaml`, detector config и ClickHouse raw-event freshness.
 
-For each instrument it reports recent `trade`, `last_price`, `orderbook`, `candle`, `trading_status`, and `open_interest` availability. It also explains why a signal type is impossible now:
+Для каждого instrument endpoint показывает availability последних `trade`, `last_price`, `orderbook`, `candle`, `trading_status` и `open_interest`. Также он объясняет, почему signal type сейчас невозможен:
 
 | Reason | Meaning |
 |---|---|
-| `source_not_subscribed` | The required source is not enabled for the instrument. |
-| `source_stale` | The source is configured but no recent raw events were found. |
-| `source_unknown` | ClickHouse is unavailable or not configured. |
-| `config_disabled` | Detector config disables the signal type. |
+| `source_not_subscribed` | Required source не включен для instrument. |
+| `source_stale` | Source настроен, но recent raw events не найдены. |
+| `source_unknown` | ClickHouse недоступен или не настроен. |
+| `config_disabled` | Detector config отключает signal type. |
 
-If ClickHouse is unavailable, the endpoint returns `status=unknown` and the admin remains usable.
+Если ClickHouse недоступен, endpoint возвращает `status=unknown`, а admin остается usable.
 
 ## Accuracy Job
 
-`scripts/duckdb_label_signals.py` can produce the admin accuracy JSON:
+`scripts/duckdb_label_signals.py` может сформировать admin accuracy JSON:
 
 ```bash
 python scripts/duckdb_label_signals.py \
@@ -116,18 +116,18 @@ python scripts/duckdb_label_signals.py \
   --output var/accuracy/signal_accuracy.json
 ```
 
-The report groups forward VWAP metrics by signal type, ticker, quality tier, and delivery status. `/admin/api/accuracy` reads `SIGNAL_ACCURACY_JSON_PATH`; when the file is missing, it returns an empty state instead of failing the page.
+Report группирует forward VWAP metrics по signal type, ticker, quality tier и delivery status. `/admin/api/accuracy` читает `SIGNAL_ACCURACY_JSON_PATH`; если файла нет, endpoint возвращает empty state вместо ошибки страницы.
 
 ## Controlled Rollout
 
-New or previously disabled signals should start as storage/admin-only data:
+Новые или ранее отключенные signals должны начинаться как storage/admin-only data:
 
 | Stage | Signal type | Initial channel |
 |---|---|---|
-| 1 | `candle_range_spike` on 5-10 liquid TQBR instruments with candles enabled | `admin_only` |
-| 2 | `obi_dynamics` on core equities/futures with stable orderbook | `admin_only` |
-| 3 | `open_interest_spike` only for futures with real source data | `admin_only` |
-| 4 | `aggressive_trade_burst` on the most liquid instruments | `admin_only` |
-| 5 | `lead_lag_divergence` only for explicitly configured pairs | `admin_only` |
+| 1 | `candle_range_spike` на 5-10 liquid TQBR instruments с включенными candles | `admin_only` |
+| 2 | `obi_dynamics` на core equities/futures со стабильным orderbook | `admin_only` |
+| 3 | `open_interest_spike` только для futures с реальными source data | `admin_only` |
+| 4 | `aggressive_trade_burst` на самых liquid instruments | `admin_only` |
+| 5 | `lead_lag_divergence` только для явно настроенных pairs | `admin_only` |
 
-Promote a signal from admin-only to digest or realtime only after source health, feedback, and accuracy data support the change.
+Продвигайте signal из admin-only в digest или realtime только после того, как source health, feedback и accuracy data подтверждают изменение.
