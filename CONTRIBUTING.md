@@ -1,6 +1,6 @@
 # Contributing
 
-This project is a portfolio-grade data engineering service. Contributions should keep the local stack reproducible and avoid committing secrets or user-specific market data.
+Это production-ориентированный data engineering сервис для realtime market signals. Изменения должны сохранять воспроизводимость локального стека и не добавлять секреты или пользовательские рыночные данные.
 
 ## Development Setup
 
@@ -33,4 +33,3 @@ PRs should include:
 - verification commands;
 - any migration or local data reset steps;
 - screenshots when touching Signal Cockpit or docs visuals.
-

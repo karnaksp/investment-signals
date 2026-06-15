@@ -1,17 +1,17 @@
-# Security Policy
+# Политика безопасности
 
-## Secrets
+## Секреты
 
-Never commit T-Invest tokens, Telegram bot tokens, chat IDs, Postgres passwords, or admin tokens.
+Не коммитьте T-Invest tokens, Telegram bot tokens, chat IDs, Postgres passwords или admin tokens.
 
-Keep runtime secrets in `.env`, Docker secrets, CI secrets, or a private deployment environment. Public docs and screenshots must not include real tokens, account IDs, chat IDs, portfolio IDs, or broker API payloads that identify a user.
+Храните runtime-секреты в `.env`, Docker secrets, CI secrets или приватном deployment environment. Публичные docs и screenshots не должны содержать реальные tokens, account IDs, chat IDs, deployment IDs или broker API payloads, по которым можно идентифицировать пользователя.
 
-## Reporting
+## Как сообщать о проблемах
 
-Open a private security report through GitHub if the repository supports it. If not, contact the repository owner directly and do not publish exploit details in an issue.
+Откройте private security report через GitHub, если repository это поддерживает. Если нет, свяжитесь с owner напрямую и не публикуйте exploit details в issue.
 
-## Operational Notes
+## Эксплуатационные заметки
 
-- Rotate `TINVEST_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_API_TOKEN`, and database credentials after accidental exposure.
-- Treat `/admin` and `/admin/api/*` as private surfaces. They require `X-Admin-Token` and should stay behind trusted network access in production.
-- Runtime fingerprint fields are safe to expose in health/admin responses; they intentionally include version, commit SHA, and build time, not secrets.
+- Ротируйте `TINVEST_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_API_TOKEN` и database credentials после случайной публикации.
+- Считайте `/admin` и `/admin/api/*` приватными surfaces. Они требуют `X-Admin-Token` и в production должны оставаться за trusted network access.
+- Runtime fingerprint fields безопасно отдавать в health/admin responses: они намеренно включают version, commit SHA и build time, но не secrets.
