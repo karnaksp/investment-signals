@@ -1,6 +1,6 @@
 # Roadmap
 
-Эта страница отслеживает production-hardening и portfolio-readiness задачи для T-Invest Signal Engine.
+Эта страница отслеживает production-hardening и product-readiness задачи для T-Invest Signal Engine.
 
 ## Production Hardening
 
@@ -17,7 +17,7 @@
 - Добавить больше документированных примеров triage: useful signal, noisy signal, delivery failure.
 - Документировать ожидаемые row counts и latency ranges для local smoke runs.
 
-## Portfolio Evidence
+## Product Evidence
 
 - Держать screenshots рядом с первым README/docs path.
 - Добавить короткий demo GIF или static image set для Admin Cockpit.
