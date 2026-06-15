@@ -29,6 +29,5 @@
 
 ### Документация и сопровождение
 
-- README, roadmap, operations docs и Admin Cockpit docs приведены к production-oriented portfolio framing: архитектура, запуск, smoke-проверки, screenshots и troubleshooting находятся в первом пути чтения.
-- Добавлены contributing guide, code of conduct, PR template, security notes и Dependabot. Это делает репозиторий понятнее для внешнего reviewer и безопаснее для публичной витрины.
-
+- README, roadmap, operations docs и Admin Cockpit docs приведены к production/product-purpose wording: архитектура, запуск, smoke-проверки, screenshots и troubleshooting находятся в первом пути чтения.
+- Добавлены contributing guide, code of conduct, PR template, security notes и Dependabot. Это делает репозиторий понятнее для внешнего reviewer и безопаснее для публичной документации.

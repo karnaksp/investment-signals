@@ -8,7 +8,7 @@
 
 Production-oriented конвейер обнаружения рыночных аномалий в реальном времени по данным T-Invest.
 
-## Быстрый портфельный обзор
+## Быстрый production-обзор
 
 - **Задача:** превратить live market data stream в объяснимые anomaly signals, которые можно проверить, сохранить, мониторить и доставить пользователю.
 - **Data flow:** `T-Invest stream -> Redpanda/Kafka -> detector -> Postgres signals + ClickHouse raw/event analytics -> FastAPI/Admin Cockpit -> Telegram/webhook/monitoring`.
