@@ -7,5 +7,4 @@ This project follows a simple professional standard:
 - do not publish secrets, private tokens, account identifiers, or user-specific data;
 - report security concerns privately using `SECURITY.md`.
 
-Maintainers may remove comments or contributions that are abusive, disclose sensitive information, or make the repository unsafe for public portfolio review.
-
+Maintainers may remove comments or contributions that are abusive, disclose sensitive information, or make the public repository unsafe for review and operation.
