@@ -1210,7 +1210,11 @@ class WebhookAlertSink:
     def send(self, signal: TriggerSignal) -> None:
         if not self._webhook_url or self._client is None:
             return
-        self._client.post(self._webhook_url, json=_webhook_payload(signal))
+        response = self._client.post(
+            self._webhook_url,
+            json=_webhook_payload(signal),
+        )
+        response.raise_for_status()
 
     def close(self) -> None:
         if self._client is not None:

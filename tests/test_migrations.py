@@ -144,7 +144,10 @@ def test_missing_migration_directory_cannot_succeed_silently(tmp_path: Path) -> 
 def test_core_migration_directories_are_utf8_and_sequential() -> None:
     root = Path(__file__).resolve().parents[1] / "sql"
     expected = {
-        "postgresql": (root / "postgres" / "migrations", (100, 101, 102)),
+        "postgresql": (
+            root / "postgres" / "migrations",
+            (100, 101, 102, 103),
+        ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
             (100, 101, 102, 103, 104),
@@ -165,3 +168,20 @@ def test_clickhouse_splitter_preserves_semicolons_in_literals() -> None:
         "SELECT 'a;b'",
         "-- comment; stays\nSELECT 2",
     )
+
+
+def test_reliable_processing_migration_contains_inbox_and_outbox() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0103_add_reliable_processing.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS processed_events" in sql
+    assert "UNIQUE (topic, partition_id, offset_id)" in sql
+    assert "CREATE TABLE IF NOT EXISTS delivery_outbox" in sql
+    assert "REFERENCES market_signals(signal_id) ON DELETE CASCADE" in sql
+    assert "WHERE status = 'delivering'" in sql

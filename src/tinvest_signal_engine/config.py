@@ -30,6 +30,13 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
             "TELEGRAM_BOT_TOKEN",
         }
     ),
+    "delivery_worker": frozenset(
+        {
+            "ALERT_WEBHOOK_URL",
+            "POSTGRES_PASSWORD",
+            "TELEGRAM_BOT_TOKEN",
+        }
+    ),
     "ingestor": frozenset({"TINVEST_TOKEN"}),
     "local_notifier": frozenset(),
     "market_unary_emitter": frozenset({"TINVEST_TOKEN"}),
@@ -285,6 +292,13 @@ class RuntimeSettings:
     detector_config_version: str | None
     delivery_config_version: str | None
     cost_model_version: str | None
+    kafka_raw_dlq_topic: str
+    delivery_worker_poll_seconds: float
+    delivery_worker_claim_lease_seconds: int
+    delivery_worker_max_attempts: int
+    delivery_worker_retry_base_seconds: int
+    delivery_worker_retry_max_seconds: int
+    delivery_worker_metrics_listen_port: int | None
 
     @classmethod
     def from_env(
@@ -518,6 +532,29 @@ class RuntimeSettings:
             ),
             cost_model_version=(
                 (os.getenv("COST_MODEL_VERSION") or "").strip() or None
+            ),
+            kafka_raw_dlq_topic=(
+                os.getenv("KAFKA_RAW_DLQ_TOPIC", "marketdata.raw.dlq").strip()
+                or "marketdata.raw.dlq"
+            ),
+            delivery_worker_poll_seconds=max(
+                0.05,
+                float(os.getenv("DELIVERY_WORKER_POLL_SECONDS", "1")),
+            ),
+            delivery_worker_claim_lease_seconds=int(
+                os.getenv("DELIVERY_WORKER_CLAIM_LEASE_SECONDS", "60")
+            ),
+            delivery_worker_max_attempts=int(
+                os.getenv("DELIVERY_WORKER_MAX_ATTEMPTS", "8")
+            ),
+            delivery_worker_retry_base_seconds=int(
+                os.getenv("DELIVERY_WORKER_RETRY_BASE_SECONDS", "5")
+            ),
+            delivery_worker_retry_max_seconds=int(
+                os.getenv("DELIVERY_WORKER_RETRY_MAX_SECONDS", "900")
+            ),
+            delivery_worker_metrics_listen_port=_env_optional_int(
+                "DELIVERY_WORKER_METRICS_LISTEN_PORT"
             ),
         )
 

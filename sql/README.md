@@ -17,3 +17,7 @@ changed checksum stops the upgrade.
 The `*/init` directories remain only for compatibility with the development
 Compose baseline. Product upgrades must use the versioned runner and never
 re-execute init-only SQL.
+
+Migration `0103` introduces the idempotent event inbox and durable delivery
+outbox. The detector commits a Kafka offset only after the inbox, signals, and
+outbox entries commit in one PostgreSQL transaction.
