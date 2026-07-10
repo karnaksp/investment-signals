@@ -62,6 +62,65 @@ def test_admin_with_header(client_ok: TestClient) -> None:
     }
 
 
+def test_admin_pipeline_status_reports_delivery_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("SIGNAL_DELIVERY_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_overview.return_value = {
+        "totals": {
+            "total": 12,
+            "last_detected_at": "2026-06-26T09:20:00+00:00",
+        }
+    }
+    mock_store.fetch_admin_delivery_overview.return_value = {
+        "totals": {
+            "delivered": 3,
+            "suppressed": 9,
+            "delivery_rate": 0.25,
+        },
+        "recent_delivered": [
+            {"detected_at": "2026-06-26T09:19:00+00:00"}
+        ],
+    }
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.get(
+            "/admin/api/pipeline/status",
+            headers={"X-Admin-Token": "test-secret-token"},
+        )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "warning"
+    assert data["metrics"]["generated"] == 12
+    assert data["metrics"]["delivered"] == 3
+    statuses = {c["id"]: c["status"] for c in data["checks"]}
+    for key, value in {
+        "postgres": "ok",
+        "telegram_config": "ok",
+        "delivery_policy": "ok",
+        "telegram_delivery": "ok",
+        "redis": "warning",
+    }.items():
+        assert statuses[key] == value
+    assert "Postgres" in data["incident_note"]
+
+
 def test_ready_degraded_when_ping_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

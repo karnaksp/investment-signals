@@ -23,13 +23,14 @@
 
   const nav = [
     ["triage", "Triage", "TR"],
+    ["status", "Status", "ST"],
     ["signals", "Signals", "SG"],
     ["delivery", "Delivery", "DL"],
     ["calibration", "Calibration", "CL"],
     ["feedback", "Feedback", "FB"],
     ["instruments", "Instruments", "IN"],
     ["accuracy", "Accuracy", "AC"],
-    ["settings", "Settings", "ST"],
+    ["settings", "Settings", "SE"],
   ];
 
   function route() {
@@ -146,6 +147,23 @@
   function severityBadge(sev) {
     const s = Number(sev || 0);
     return badge("S" + (s || "-"), s >= 3 ? "b-sev3" : s === 2 ? "b-sev2" : "");
+  }
+
+  function statusBadge(status) {
+    const s = status || "unknown";
+    const cls = s === "ok" ? "b-high" :
+      s === "warning" ? "b-medium" :
+      s === "critical" ? "b-low" : "b-unknown";
+    return badge(s, cls);
+  }
+
+  function durationShort(seconds) {
+    const nsec = finiteNumberOrNull(seconds);
+    if (nsec == null) return "-";
+    if (nsec < 60) return Math.round(nsec) + "s";
+    if (nsec < 3600) return Math.round(nsec / 60) + "m";
+    if (nsec < 86400) return Math.round(nsec / 3600) + "h";
+    return Math.round(nsec / 86400) + "d";
   }
 
   function signalScore(row) {
@@ -405,11 +423,12 @@
   }
 
   async function pageTriage() {
-    const [ov, delivery, signals, settings] = await Promise.all([
+    const [ov, delivery, signals, settings, pipeline] = await Promise.all([
       api("/admin/api/overview" + params({ minutes: state.minutes })),
       api("/admin/api/delivery/overview" + params({ minutes: state.minutes })),
       api("/admin/api/signals" + params({ minutes: state.minutes, limit: 40 })),
       api("/admin/api/settings"),
+      api("/admin/api/pipeline/status" + params({ minutes: sourceHealthMinutes() })),
     ]);
     rememberRuntime(settings);
     rememberSignalRows(signals.items || []);
@@ -419,6 +438,7 @@
     const last = (ov.totals || {}).last_detected_at;
     view().innerHTML = `
       ${pageHead("Triage", "Очередь внимания, доставка и шум за выбранный период.")}
+      ${pipelineStatusPanel(pipeline)}
       ${metrics([
         { label: "Generated", value: n(all, 0), hint: "saved signals" },
         { label: "Delivered", value: n(totals.delivered, 0), hint: pct(totals.delivery_rate) },
@@ -447,6 +467,85 @@
       </div>
     `;
     bindQuickFeedback(() => pageTriage());
+  }
+
+  function pipelineStatusPanel(data) {
+    const d = data || {};
+    const m = d.metrics || {};
+    const checks = Array.isArray(d.checks) ? d.checks : [];
+    const critical = checks.filter((c) => c.status === "critical").length;
+    const warning = checks.filter((c) => c.status === "warning").length;
+    return `
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Signal Pipeline Status</h2>
+          <a href="#/status">Open diagnostics</a>
+        </div>
+        <div class="panel-body stack">
+          <div class="row">${statusBadge(d.status)}<span>${esc(d.headline || "")}</span></div>
+          <div class="grid-3">
+            ${miniMetric("Generated", n(m.generated, 0))}
+            ${miniMetric("Delivered", n(m.delivered, 0))}
+            ${miniMetric("Last delivered", shortTime(m.last_delivered_at))}
+          </div>
+          <div class="muted">
+            ${critical ? critical + " critical" : "no critical blockers"} ·
+            ${warning ? warning + " warnings" : "no warnings"} ·
+            last signal age ${esc(durationShort(m.last_signal_age_seconds))}
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  async function pageStatus() {
+    const data = await api("/admin/api/pipeline/status" + params({ minutes: sourceHealthMinutes() }));
+    rememberRuntime(data);
+    const m = data.metrics || {};
+    view().innerHTML = `
+      ${pageHead("Status", "Диагностика контура detector → Postgres → delivery policy → Telegram.")}
+      <section class="panel">
+        <div class="panel-head"><h2>Current State</h2>${statusBadge(data.status)}</div>
+        <div class="panel-body stack">
+          <div class="summary-text">${esc(data.headline || "")}</div>
+          <div class="muted">${esc(data.incident_note || "")}</div>
+          <div class="grid-3">
+            ${miniMetric("Generated", n(m.generated, 0))}
+            ${miniMetric("Delivered", n(m.delivered, 0))}
+            ${miniMetric("Suppressed", n(m.suppressed, 0))}
+            ${miniMetric("Delivery rate", pct(m.delivery_rate))}
+            ${miniMetric("Last signal", shortTime(m.last_signal_at))}
+            ${miniMetric("Last delivered", shortTime(m.last_delivered_at))}
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>Checks</h2><span class="muted">last ${esc(activePeriodShort())}</span></div>
+        ${statusCheckTable(data.checks || [])}
+      </section>
+    `;
+  }
+
+  function statusCheckTable(rows) {
+    return table(
+      [
+        { label: "Check" },
+        { label: "Status" },
+        { label: "Last" },
+        { label: "Age" },
+        { label: "Detail" },
+      ],
+      rows.map((r) => `
+        <tr>
+          <td><strong>${esc(r.label || r.id || "")}</strong><div class="muted">${esc(r.id || "")}</div></td>
+          <td>${statusBadge(r.status)}</td>
+          <td>${shortTime(r.last_at)}</td>
+          <td>${esc(durationShort(r.age_seconds))}</td>
+          <td class="clip">${esc(r.detail || "")}</td>
+        </tr>
+      `),
+      "Нет проверок"
+    );
   }
 
   function signalHeaders() {
@@ -1297,6 +1396,7 @@
     }
     try {
       if (r.name === "signals") await pageSignals();
+      else if (r.name === "status") await pageStatus();
       else if (r.name === "delivery") await pageDelivery();
       else if (r.name === "calibration") await pageCalibration();
       else if (r.name === "feedback") await pageFeedback();

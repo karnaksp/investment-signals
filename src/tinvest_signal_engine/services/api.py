@@ -876,6 +876,39 @@ def _count_key(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     ]
 
 
+def _iso_age_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        dt = isoparse(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+
+
+def _redis_ping_status(redis_url: str | None) -> tuple[bool | None, str]:
+    if not redis_url:
+        return None, "REDIS_URL не задан; detector продолжит без сохранения state."
+    try:
+        import redis
+
+        redis.Redis.from_url(redis_url, decode_responses=True).ping()
+    except Exception as exc:
+        return False, f"Redis недоступен: {type(exc).__name__}: {exc}"
+    return True, "Redis доступен; detector state можно загрузить и сохранить."
+
+
+def _pipeline_status(checks: list[dict[str, Any]]) -> str:
+    statuses = {str(check.get("status") or "unknown") for check in checks}
+    if "critical" in statuses:
+        return "critical"
+    if "warning" in statuses:
+        return "warning"
+    return "ok"
+
+
 def require_admin(
     request: Request,
     token: Annotated[str | None, Query(description="Значение ADMIN_API_TOKEN")] = None,
@@ -1220,6 +1253,158 @@ def create_app() -> FastAPI:
         return fastapi_app.state.signal_store.fetch_admin_delivery_overview(
             minutes=minutes
         )
+
+    @fastapi_app.get(
+        "/admin/api/pipeline/status",
+        tags=["admin"],
+        summary="Статус контура сигналов и Telegram-доставки",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_pipeline_status(
+        request: Request,
+        minutes: Annotated[int, Query(ge=1, le=10_080)] = 1440,
+    ) -> dict[str, Any]:
+        s = request.app.state.settings
+        store = request.app.state.signal_store
+        checks: list[dict[str, Any]] = []
+
+        try:
+            postgres_ok = bool(store.ping())
+        except Exception as exc:
+            postgres_ok = False
+            postgres_detail = f"Postgres недоступен: {type(exc).__name__}: {exc}"
+        else:
+            postgres_detail = (
+                "Postgres доступен; detector может сохранять сигналы."
+            )
+        checks.append(
+            {
+                "id": "postgres",
+                "label": "Storage",
+                "status": "ok" if postgres_ok else "critical",
+                "detail": postgres_detail,
+            }
+        )
+
+        redis_ok, redis_detail = _redis_ping_status(s.redis_url)
+        checks.append(
+            {
+                "id": "redis",
+                "label": "Detector state",
+                "status": (
+                    "ok" if redis_ok is True else "warning"
+                    if redis_ok is None else "warning"
+                ),
+                "detail": redis_detail,
+            }
+        )
+
+        telegram_configured = bool(s.telegram_bot_token and s.telegram_chat_id)
+        checks.append(
+            {
+                "id": "telegram_config",
+                "label": "Telegram config",
+                "status": "ok" if telegram_configured else "critical",
+                "detail": (
+                    "TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID заданы."
+                    if telegram_configured
+                    else "Telegram отключён: задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID."
+                ),
+            }
+        )
+
+        checks.append(
+            {
+                "id": "delivery_policy",
+                "label": "Delivery policy",
+                "status": "ok" if s.signal_delivery_enabled else "critical",
+                "detail": (
+                    "SIGNAL_DELIVERY_ENABLED=true; delivered сигналы уходят в sinks."
+                    if s.signal_delivery_enabled
+                    else "SIGNAL_DELIVERY_ENABLED=false; внешняя отправка выключена."
+                ),
+            }
+        )
+
+        overview = store.fetch_admin_overview(minutes=minutes)
+        delivery = store.fetch_admin_delivery_overview(minutes=minutes)
+        totals = overview.get("totals") or {}
+        delivery_totals = delivery.get("totals") or {}
+        recent_delivered = delivery.get("recent_delivered") or []
+        last_signal_at = totals.get("last_detected_at")
+        last_delivered_at = (
+            recent_delivered[0].get("detected_at") if recent_delivered else None
+        )
+        generated = int(totals.get("total") or 0)
+        delivered = int(delivery_totals.get("delivered") or 0)
+        last_signal_age_seconds = _iso_age_seconds(last_signal_at)
+        last_delivered_age_seconds = _iso_age_seconds(last_delivered_at)
+
+        checks.append(
+            {
+                "id": "signal_generation",
+                "label": "Signal generation",
+                "status": "ok" if generated > 0 else "warning",
+                "detail": (
+                    f"За период сохранено сигналов: {generated}."
+                    if generated > 0
+                    else "За период нет сохранённых сигналов; проверьте ingestor/detector/Kafka или торговые часы."
+                ),
+                "last_at": last_signal_at,
+                "age_seconds": last_signal_age_seconds,
+            }
+        )
+
+        if delivered > 0:
+            delivery_status = "ok"
+            delivery_detail = f"За период delivered сигналов: {delivered}."
+        elif generated > 0:
+            delivery_status = "warning"
+            delivery_detail = (
+                "Сигналы сохраняются, но delivered за период нет; чаще всего их "
+                "подавила delivery policy. Смотрите вкладку Delivery / Reasons."
+            )
+        else:
+            delivery_status = "warning"
+            delivery_detail = "Нет generated сигналов, поэтому Telegram-доставка не проверялась."
+        checks.append(
+            {
+                "id": "telegram_delivery",
+                "label": "Telegram delivery",
+                "status": delivery_status,
+                "detail": delivery_detail,
+                "last_at": last_delivered_at,
+                "age_seconds": last_delivered_age_seconds,
+            }
+        )
+
+        status = _pipeline_status(checks)
+        return {
+            "runtime": request.app.state.runtime,
+            "minutes": minutes,
+            "status": status,
+            "headline": {
+                "ok": "Контур сигналов и Telegram-доставки выглядит рабочим.",
+                "warning": "Контур работает с предупреждениями; детали ниже.",
+                "critical": "Есть блокирующая проблема для Telegram-доставки.",
+            }[status],
+            "incident_note": (
+                "Предыдущий сбой был таким: detector не мог стартовать без "
+                "Postgres, а Redis тоже был остановлен; raw-события шли в Kafka, "
+                "но новые сигналы не сохранялись и до Telegram не доходили."
+            ),
+            "checks": checks,
+            "metrics": {
+                "generated": generated,
+                "delivered": delivered,
+                "suppressed": int(delivery_totals.get("suppressed") or 0),
+                "delivery_rate": delivery_totals.get("delivery_rate") or 0,
+                "last_signal_at": last_signal_at,
+                "last_signal_age_seconds": last_signal_age_seconds,
+                "last_delivered_at": last_delivered_at,
+                "last_delivered_age_seconds": last_delivered_age_seconds,
+            },
+        }
 
     @fastapi_app.get(
         "/admin/api/delivery/reasons",

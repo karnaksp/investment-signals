@@ -18,12 +18,17 @@ from tinkoff.invest import (
     TradeInstrument,
 )
 from tinkoff.invest.constants import INVEST_GRPC_API_SANDBOX
+from tinkoff.invest.exceptions import RequestError
 
 from ..config import RuntimeSettings, load_instrument_configs
 from ..kafka_proto import build_raw_value_serializer
 from ..kafka_wire_config import validate_kafka_wire_settings
 from ..schema_registry import register_protobuf_schema, schema_subject_for_topic
-from ..instruments import InstrumentMetadata, build_instrument_registry
+from ..instruments import (
+    InstrumentMetadata,
+    build_instrument_registry,
+    request_error_retry_delay_seconds,
+)
 from ..logging_utils import configure_logging
 from ..models import NormalizedEvent
 from ..serialization import parse_timestamp, to_plain_data, utc_now
@@ -271,6 +276,13 @@ def main() -> None:
                         )
             except KeyboardInterrupt:
                 raise
+            except RequestError as exc:
+                retry_delay = request_error_retry_delay_seconds(exc)
+                logger.exception(
+                    "T-Invest request failed; reconnecting in %ss",
+                    retry_delay,
+                )
+                time.sleep(retry_delay)
             except Exception:
                 logger.exception("Market data stream crashed; reconnecting in 5s")
                 time.sleep(5)

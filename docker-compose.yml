@@ -40,10 +40,6 @@ services:
       - --check=false
       - --set
       - redpanda.auto_create_topics_enabled=false
-      - --set
-      - redpanda.log_retention_bytes=${REDPANDA_LOG_RETENTION_BYTES:-1073741824}
-      - --set
-      - redpanda.retention_bytes=${REDPANDA_DEFAULT_RETENTION_BYTES:-1073741824}
       # Меньше «залипания» кэшей чтения/фетча при малом RAM (см. cluster properties в доке Redpanda).
       - --set
       - redpanda.release_cache_on_segment_roll=true
@@ -93,24 +89,21 @@ services:
           fi
           sleep 1
         done
-        rpk -X brokers=redpanda:9092 topic create marketdata.raw -p 1 -r 1 --if-not-exists
-        rpk -X brokers=redpanda:9092 topic create marketdata.raw.unary -p 1 -r 1 --if-not-exists
-        rpk -X brokers=redpanda:9092 topic create marketdata.signals -p 1 -r 1 --if-not-exists
+        rpk -X brokers=redpanda:9092 topic create marketdata.raw -p 1 -r 1 || true
+        rpk -X brokers=redpanda:9092 topic create marketdata.raw.unary -p 1 -r 1 || true
+        rpk -X brokers=redpanda:9092 topic create marketdata.signals -p 1 -r 1 || true
         rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw \
           --set retention.ms=${KAFKA_RAW_RETENTION_MS:-21600000} \
           --set retention.bytes=${KAFKA_RAW_RETENTION_BYTES:-33554432} \
-          --set segment.bytes=8388608 \
-          --no-confirm
+          --set segment.bytes=8388608
         rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw.unary \
           --set retention.ms=${KAFKA_RAW_UNARY_RETENTION_MS:-21600000} \
           --set retention.bytes=${KAFKA_RAW_UNARY_RETENTION_BYTES:-16777216} \
-          --set segment.bytes=8388608 \
-          --no-confirm
+          --set segment.bytes=8388608
         rpk -X brokers=redpanda:9092 topic alter-config marketdata.signals \
           --set retention.ms=${KAFKA_SIGNAL_RETENTION_MS:-2592000000} \
           --set retention.bytes=${KAFKA_SIGNAL_RETENTION_BYTES:-268435456} \
-          --set segment.bytes=16777216 \
-          --no-confirm
+          --set segment.bytes=16777216
         # Дублируем «лёгкие» для RAM настройки без рестарта (на случай уже существующего кластера в volume).
         rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set release_cache_on_segment_roll true
         rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set readers_cache_target_max_size ${REDPANDA_READERS_CACHE_TARGET_MAX_SIZE:-32}
@@ -128,6 +121,7 @@ services:
   # Хранилище сигналов и состояние для API.
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
     ports:
       - "${HOST_POSTGRES_PORT:-35432}:5432"
     environment:
@@ -178,7 +172,7 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -393,6 +387,7 @@ services:
 
   redis:
     image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: unless-stopped
     ports:
       - "${HOST_REDIS_PORT:-36379}:6379"
     command:
@@ -403,6 +398,12 @@ services:
       - allkeys-lru
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
   # HTTP API поверх Postgres (история сигналов).
   api:
