@@ -189,9 +189,7 @@ class SignalDetector:
             if not ctx:
                 out.append(s)
                 continue
-            out.append(
-                replace(s, payload={**s.payload, "unary_context": dict(ctx)})
-            )
+            out.append(replace(s, payload={**s.payload, "unary_context": dict(ctx)}))
         return out
 
     def export_alert_state(self) -> dict[str, dict[str, str]]:
@@ -252,15 +250,11 @@ class SignalDetector:
 
         if signed_qty != 0:
             signals.extend(
-                self._maybe_emit_trade_burst(
-                    event, state, cfg, signed_qty=signed_qty
-                )
+                self._maybe_emit_trade_burst(event, state, cfg, signed_qty=signed_qty)
             )
 
         signals.extend(self._sample_trade_windows(event, state, cfg))
-        signals.extend(
-            self._sample_price_move(event, state, cfg, current_price=price)
-        )
+        signals.extend(self._sample_price_move(event, state, cfg, current_price=price))
         return signals
 
     def _process_last_price_event(
@@ -327,9 +321,7 @@ class SignalDetector:
 
         if cfg.limit_band_warning_bps > 0:
             signals.extend(
-                self._maybe_emit_price_near_limit_band(
-                    event, state, cfg, mid=mid
-                )
+                self._maybe_emit_price_near_limit_band(event, state, cfg, mid=mid)
             )
 
         if not self._should_sample(state, "orderbook", event.source_time, cfg):
@@ -412,9 +404,7 @@ class SignalDetector:
                 delta_obi = obi - state.last_sampled_obi
                 if abs(delta_obi) >= cfg.obi_delta_absolute_threshold:
                     tmpl = (
-                        "{ticker} L"
-                        + str(depth)
-                        + " OBI jump |Δ|={metric:.3f} "
+                        "{ticker} L" + str(depth) + " OBI jump |Δ|={metric:.3f} "
                         "vs baseline {baseline:.3f} (z={z_score:.2f})."
                     )
                     signals.extend(
@@ -460,9 +450,7 @@ class SignalDetector:
             return []
         signals: list[TriggerSignal] = []
         if cfg.track_market_access_flags:
-            signals.extend(
-                self._maybe_emit_market_access_change(event, state, cfg)
-            )
+            signals.extend(self._maybe_emit_market_access_change(event, state, cfg))
 
         previous_status = state.last_trading_status
         state.last_trading_status = status
@@ -514,6 +502,9 @@ class SignalDetector:
         trade_count = float(len(state.trade_points))
         lot = max(1, int(event.lot or 0))
         current_price = quotation_to_float(event.payload.get("price"))
+        baseline_volatility_bps = _realized_volatility_bps(
+            self._mid_track[event.instrument_id]
+        )
         signals: list[TriggerSignal] = []
 
         signals.extend(
@@ -539,6 +530,7 @@ class SignalDetector:
                     "window_notional_currency": "price_units",
                     "last_price": current_price,
                     "lot": lot,
+                    "baseline_volatility_bps": baseline_volatility_bps,
                 },
             )
         )
@@ -568,6 +560,7 @@ class SignalDetector:
                     "avg_trade_notional": (
                         total_notional / trade_count if trade_count > 0 else None
                     ),
+                    "baseline_volatility_bps": baseline_volatility_bps,
                     "last_price": current_price,
                     "lot": lot,
                 },
@@ -1200,13 +1193,7 @@ class SignalDetector:
     ) -> list[TriggerSignal]:
         lim_up = quotation_to_float(event.payload.get("limit_up"))
         lim_dn = quotation_to_float(event.payload.get("limit_down"))
-        if (
-            lim_up is None
-            or lim_dn is None
-            or lim_up <= 0
-            or lim_dn <= 0
-            or mid <= 0
-        ):
+        if lim_up is None or lim_dn is None or lim_up <= 0 or lim_dn <= 0 or mid <= 0:
             return []
         dist_up = (lim_up - mid) / mid * 10_000.0
         dist_dn = (mid - lim_dn) / mid * 10_000.0
@@ -1315,9 +1302,7 @@ class SignalDetector:
             oi = float(int(event.payload.get("open_interest", 0)))
         except (TypeError, ValueError):
             return []
-        if not self._should_sample(
-            state, "open_interest", event.source_time, cfg
-        ):
+        if not self._should_sample(state, "open_interest", event.source_time, cfg):
             return []
         signals = self._maybe_emit_from_history(
             event=event,
@@ -1334,7 +1319,12 @@ class SignalDetector:
                 "{ticker} open interest {metric:.0f} vs baseline {baseline:.0f} "
                 "(z={z_score:.2f})."
             ),
-            payload_extra={"open_interest": oi},
+            payload_extra={
+                "open_interest": oi,
+                "baseline_volatility_bps": _realized_volatility_bps(
+                    self._mid_track[event.instrument_id]
+                ),
+            },
         )
         state.open_interest_history.append(oi)
         state.last_sample_at["open_interest"] = event.source_time
@@ -1403,7 +1393,13 @@ class SignalDetector:
             now = event.source_time
             leader_move = _range_bps_in_window(leader_ring, now, window)
             follower_move = _range_bps_in_window(follower_ring, now, window)
-            if leader_move is None or follower_move is None:
+            leader_signed_move = _signed_move_bps_in_window(leader_ring, now, window)
+            if (
+                leader_move is None
+                or follower_move is None
+                or leader_signed_move is None
+                or abs(leader_signed_move) <= 1e-12
+            ):
                 continue
             if leader_move < cfg.lead_lag_leader_move_bps:
                 continue
@@ -1442,7 +1438,11 @@ class SignalDetector:
                         "leader_instrument_id": leader_id,
                         "follower_instrument_id": follower_id,
                         "leader_range_bps": leader_move,
+                        "leader_signed_move_bps": leader_signed_move,
                         "follower_range_bps": follower_move,
+                        "follower_expected_direction": (
+                            "long" if leader_signed_move > 0 else "short"
+                        ),
                     },
                 )
             )
@@ -1473,6 +1473,33 @@ def _range_bps_in_window(
     if mid <= 0:
         return None
     return (hi - lo) / mid * 10_000.0
+
+
+def _signed_move_bps_in_window(
+    ring: deque[tuple[datetime, float]],
+    now: datetime,
+    window: timedelta,
+) -> float | None:
+    start = now - window
+    prices = [px for ts, px in ring if start <= ts <= now]
+    if len(prices) < 2 or prices[0] <= 0:
+        return None
+    return ((prices[-1] - prices[0]) / prices[0]) * 10_000.0
+
+
+def _realized_volatility_bps(
+    ring: deque[tuple[datetime, float]],
+) -> float | None:
+    prices = [price for _, price in ring if price > 0 and math.isfinite(price)]
+    if len(prices) < 3:
+        return None
+    returns = [
+        ((current / previous) - 1.0) * 10_000.0
+        for previous, current in zip(prices, prices[1:])
+    ]
+    mean = fmean(returns)
+    variance = fmean((value - mean) ** 2 for value in returns)
+    return math.sqrt(variance)
 
 
 def _severity_from_z_score(z_score: float) -> int:

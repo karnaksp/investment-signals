@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from tinvest_signal_engine.config import DetectorSettings
-from tinvest_signal_engine.detector_core import InstrumentState, SignalDetector
+from tinvest_signal_engine.detector_core import (
+    InstrumentState,
+    SignalDetector,
+    _realized_volatility_bps,
+)
 from tinvest_signal_engine.models import NormalizedEvent, TriggerSignal
 
 
@@ -134,6 +139,64 @@ class SignalDetectorTest(unittest.TestCase):
 
         signal_types = {signal.signal_type for signal in emitted}
         self.assertIn("volume_spike", signal_types)
+        volume = next(
+            signal for signal in emitted if signal.signal_type == "volume_spike"
+        )
+        self.assertIsNotNone(volume.payload["baseline_volatility_bps"])
+
+    def test_activity_baseline_is_successive_return_volatility(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ring = deque(
+            [
+                (start, 100.0),
+                (start + timedelta(seconds=1), 101.0),
+                (start + timedelta(seconds=2), 100.0),
+            ]
+        )
+
+        baseline = _realized_volatility_bps(ring)
+
+        self.assertIsNotNone(baseline)
+        self.assertGreater(baseline, 0.0)
+
+    def test_lead_lag_signal_carries_expected_follower_direction(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        settings = DetectorSettings(
+            lead_lag_enabled=True,
+            lead_lag_window_seconds=30,
+            lead_lag_leader_move_bps=5.0,
+            lead_lag_follower_max_bps=2.0,
+            alert_cooldown_seconds=0,
+        )
+        detector = SignalDetector(
+            settings,
+            lead_lag_pairs=(("LEADER", "FOLLOWER"),),
+        )
+        detector._mid_track["LEADER"].extend(
+            ((start, 100.0), (start + timedelta(seconds=5), 101.0))
+        )
+        detector._mid_track["FOLLOWER"].extend(
+            ((start, 100.0), (start + timedelta(seconds=5), 100.01))
+        )
+        event = NormalizedEvent(
+            event_id="follower-event",
+            event_type="last_price",
+            instrument_id="FOLLOWER",
+            ticker="FOL",
+            class_code="TQBR",
+            alias="fol",
+            figi="figi",
+            uid="uid",
+            lot=1,
+            source_time=start + timedelta(seconds=5),
+            received_at=start + timedelta(seconds=5),
+            payload={"price": 100.01},
+        )
+
+        signals = detector._maybe_lead_lag(event, settings)
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].payload["follower_expected_direction"], "long")
 
     def test_price_jump_payload_includes_signed_move_context(self) -> None:
         detector = SignalDetector(
@@ -218,9 +281,7 @@ class SignalDetectorTest(unittest.TestCase):
         self.assertEqual(passed[0].signal_type, "volume_spike")
 
     def test_trading_status_change_is_emitted(self) -> None:
-        detector = SignalDetector(
-            DetectorSettings(alert_cooldown_seconds=0)
-        )
+        detector = SignalDetector(DetectorSettings(alert_cooldown_seconds=0))
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
         first = detector.process(
@@ -342,8 +403,7 @@ class SignalDetectorTest(unittest.TestCase):
             emitted.extend(
                 detector.process(
                     _trade_event(
-                        ts=start
-                        + timedelta(seconds=12, milliseconds=ms),
+                        ts=start + timedelta(seconds=12, milliseconds=ms),
                         quantity=50,
                         price=101.0,
                         direction="TRADE_DIRECTION_BUY",
@@ -419,18 +479,14 @@ class AlertStateExportHydrateTest(unittest.TestCase):
             start,
         )
 
-        older = {
-            "X_TQBR": {"volume_spike": (start - timedelta(hours=1)).isoformat()}
-        }
+        older = {"X_TQBR": {"volume_spike": (start - timedelta(hours=1)).isoformat()}}
         fresh.hydrate_alert_state(older)
         self.assertEqual(
             fresh._states["X_TQBR"].last_alert_at["volume_spike"],
             start,
         )
 
-        newer = {
-            "X_TQBR": {"volume_spike": (start + timedelta(hours=1)).isoformat()}
-        }
+        newer = {"X_TQBR": {"volume_spike": (start + timedelta(hours=1)).isoformat()}}
         fresh.hydrate_alert_state(newer)
         self.assertEqual(
             fresh._states["X_TQBR"].last_alert_at["volume_spike"],
