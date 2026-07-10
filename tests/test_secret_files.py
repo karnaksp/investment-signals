@@ -52,3 +52,19 @@ def test_service_cannot_read_another_services_secret(tmp_path: Path) -> None:
 def test_unknown_service_name_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown service"):
         load_secret("TINVEST_TOKEN", service_name="typo", environ={})
+
+
+@pytest.mark.parametrize("service_name", ["api", "detector"])
+def test_redis_url_secret_is_scoped_to_consumers(
+    tmp_path: Path, service_name: str
+) -> None:
+    secret_file = tmp_path / "redis-url"
+    secret_file.write_text("redis://detector:secret@redis:6379/0\n", encoding="utf-8")
+
+    value = load_secret(
+        "REDIS_URL",
+        service_name=service_name,
+        environ={"REDIS_URL_FILE": str(secret_file)},
+    )
+
+    assert value == "redis://detector:secret@redis:6379/0"

@@ -18,6 +18,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
             "ADMIN_API_TOKEN",
             "CLICKHOUSE_PASSWORD",
             "POSTGRES_PASSWORD",
+            "REDIS_URL",
             "TELEGRAM_BOT_TOKEN",
             "TINVEST_TOKEN",
         }
@@ -27,6 +28,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
         {
             "ALERT_WEBHOOK_URL",
             "POSTGRES_PASSWORD",
+            "REDIS_URL",
             "TELEGRAM_BOT_TOKEN",
         }
     ),
@@ -408,7 +410,10 @@ class RuntimeSettings:
                 os.getenv("KAFKA_COMPRESSION_CODEC", "lz4").strip().lower()
                 or "lz4"
             ),
-            redis_url=(os.getenv("REDIS_URL") or "").strip() or None,
+            redis_url=(
+                load_secret("REDIS_URL", service_name=service_name) or ""
+            ).strip()
+            or None,
             redis_alert_flush_interval_seconds=int(
                 os.getenv("REDIS_ALERT_FLUSH_INTERVAL_SECONDS", "30")
             ),
