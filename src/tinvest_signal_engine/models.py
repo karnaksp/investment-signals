@@ -75,6 +75,14 @@ class TriggerSignal:
     window_seconds: int
     summary: str
     payload: dict[str, Any] = field(default_factory=dict)
+    source_event_id: str | None = None
+    source_event_at: datetime | None = None
+    signal_schema_version: str = "1.0.0"
+    expectation_catalog_version: str | None = None
+    detector_config_version: str | None = None
+    delivery_config_version: str | None = None
+    cost_model_version: str | None = None
+    provenance_status: str = "legacy"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +101,16 @@ class TriggerSignal:
             "window_seconds": self.window_seconds,
             "summary": self.summary,
             "payload": self.payload,
+            "source_event_id": self.source_event_id,
+            "source_event_at": (
+                self.source_event_at.isoformat() if self.source_event_at else None
+            ),
+            "signal_schema_version": self.signal_schema_version,
+            "expectation_catalog_version": self.expectation_catalog_version,
+            "detector_config_version": self.detector_config_version,
+            "delivery_config_version": self.delivery_config_version,
+            "cost_model_version": self.cost_model_version,
+            "provenance_status": self.provenance_status,
         }
 
     @classmethod
@@ -113,9 +131,42 @@ class TriggerSignal:
             window_seconds=int(data["window_seconds"]),
             summary=str(data["summary"]),
             payload=dict(data.get("payload", {})),
+            source_event_id=(
+                str(data["source_event_id"])
+                if data.get("source_event_id") is not None
+                else None
+            ),
+            source_event_at=(
+                parse_timestamp(data["source_event_at"])
+                if data.get("source_event_at") is not None
+                else None
+            ),
+            signal_schema_version=str(
+                data.get("signal_schema_version") or "1.0.0"
+            ),
+            expectation_catalog_version=(
+                str(data["expectation_catalog_version"])
+                if data.get("expectation_catalog_version") is not None
+                else None
+            ),
+            detector_config_version=(
+                str(data["detector_config_version"])
+                if data.get("detector_config_version") is not None
+                else None
+            ),
+            delivery_config_version=(
+                str(data["delivery_config_version"])
+                if data.get("delivery_config_version") is not None
+                else None
+            ),
+            cost_model_version=(
+                str(data["cost_model_version"])
+                if data.get("cost_model_version") is not None
+                else None
+            ),
+            provenance_status=str(data.get("provenance_status") or "legacy"),
         )
 
 
 def make_received_at() -> datetime:
     return utc_now()
-

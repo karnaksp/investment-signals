@@ -195,7 +195,7 @@ def normalize_stream_message(message, registry) -> NormalizedEvent | None:
 
 
 def main() -> None:
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="ingestor")
     validate_kafka_wire_settings(settings, check_signal=False)
     configure_logging(settings.log_level)
     if not settings.tinvest_token:

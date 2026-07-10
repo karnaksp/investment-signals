@@ -133,7 +133,15 @@ class PostgresSignalStore:
                 z_score,
                 window_seconds,
                 summary,
-                payload_json
+                payload_json,
+                source_event_id,
+                source_event_at,
+                signal_schema_version,
+                expectation_catalog_version,
+                detector_config_version,
+                delivery_config_version,
+                cost_model_version,
+                provenance_status
             ) VALUES (
                 %(signal_id)s,
                 %(detected_at)s,
@@ -149,8 +157,17 @@ class PostgresSignalStore:
                 %(z_score)s,
                 %(window_seconds)s,
                 %(summary)s,
-                %(payload_json)s::jsonb
+                %(payload_json)s::jsonb,
+                %(source_event_id)s,
+                %(source_event_at)s,
+                %(signal_schema_version)s,
+                %(expectation_catalog_version)s,
+                %(detector_config_version)s,
+                %(delivery_config_version)s,
+                %(cost_model_version)s,
+                %(provenance_status)s
             )
+            ON CONFLICT (signal_id) DO NOTHING
         """
         with self._cursor() as cursor:
             cursor.execute(
@@ -171,6 +188,16 @@ class PostgresSignalStore:
                     "window_seconds": signal.window_seconds,
                     "summary": signal.summary,
                     "payload_json": json_dumps(signal.payload),
+                    "source_event_id": signal.source_event_id,
+                    "source_event_at": signal.source_event_at,
+                    "signal_schema_version": signal.signal_schema_version,
+                    "expectation_catalog_version": (
+                        signal.expectation_catalog_version
+                    ),
+                    "detector_config_version": signal.detector_config_version,
+                    "delivery_config_version": signal.delivery_config_version,
+                    "cost_model_version": signal.cost_model_version,
+                    "provenance_status": signal.provenance_status,
                 },
             )
 
@@ -227,7 +254,15 @@ class PostgresSignalStore:
                 z_score,
                 window_seconds,
                 summary,
-                payload_json
+                payload_json,
+                source_event_id,
+                source_event_at,
+                signal_schema_version,
+                expectation_catalog_version,
+                detector_config_version,
+                delivery_config_version,
+                cost_model_version,
+                provenance_status
             FROM {self._table_name}
             {filter_clause}
             ORDER BY detected_at DESC
@@ -253,6 +288,20 @@ class PostgresSignalStore:
                 "window_seconds": row["window_seconds"],
                 "summary": row["summary"],
                 "payload": row["payload_json"],
+                "source_event_id": row["source_event_id"],
+                "source_event_at": (
+                    row["source_event_at"].isoformat()
+                    if row["source_event_at"] is not None
+                    else None
+                ),
+                "signal_schema_version": row["signal_schema_version"],
+                "expectation_catalog_version": row[
+                    "expectation_catalog_version"
+                ],
+                "detector_config_version": row["detector_config_version"],
+                "delivery_config_version": row["delivery_config_version"],
+                "cost_model_version": row["cost_model_version"],
+                "provenance_status": row["provenance_status"],
             }
             for row in rows
         ]

@@ -34,7 +34,7 @@ def threshold_recalc_op(context) -> None:
     """Пересчёт price_move_absolute_threshold_bps → ``detectors.overrides.yaml``."""
     from .config import RuntimeSettings
 
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="dagster")
     configure_logging(settings.log_level)
     if not (settings.tinvest_token or "").strip():
         raise Failure("TINVEST_TOKEN не задан: пересчёт порогов невозможен")

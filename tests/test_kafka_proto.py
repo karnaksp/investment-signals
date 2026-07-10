@@ -78,9 +78,50 @@ def test_trigger_signal_proto_roundtrip() -> None:
         window_seconds=60,
         summary="test",
         payload={"k": 1},
+        source_event_id="event-1",
+        source_event_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        signal_schema_version="1.0.0",
+        expectation_catalog_version="catalog-1",
+        detector_config_version="detector-1",
+        delivery_config_version="delivery-1",
+        cost_model_version="cost-1",
+        provenance_status="complete",
     )
     raw = trigger_signal_to_proto_bytes(sig)
     d = trigger_signal_dict_from_proto_bytes(raw)
     sig2 = TriggerSignal.from_dict(d)
     assert sig2.signal_id == sig.signal_id
     assert sig2.payload == {"k": 1}
+    assert sig2.source_event_id == "event-1"
+    assert sig2.source_event_at == sig.source_event_at
+    assert sig2.detector_config_version == "detector-1"
+    assert sig2.provenance_status == "complete"
+
+
+def test_old_trigger_signal_proto_defaults_to_legacy() -> None:
+    from tinvest_signal_engine.proto_gen.trigger_signal_pb2 import TriggerSignalV1
+
+    old = TriggerSignalV1(
+        signal_id="00000000-0000-0000-0000-000000000001",
+        detected_at_rfc3339="2026-01-01T00:00:00+00:00",
+        instrument_id="SBER_TQBR",
+        ticker="SBER",
+        class_code="TQBR",
+        alias="sber",
+        source_event_type="trade",
+        signal_type="price_jump",
+        severity=2,
+        metric_value=1.0,
+        baseline_value=0.5,
+        z_score=3.0,
+        window_seconds=60,
+        summary="old",
+        payload_json="{}",
+    )
+
+    signal = TriggerSignal.from_dict(
+        trigger_signal_dict_from_proto_bytes(old.SerializeToString())
+    )
+
+    assert signal.source_event_id is None
+    assert signal.provenance_status == "legacy"

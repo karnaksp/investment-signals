@@ -44,7 +44,7 @@ def format_notification(signal: TriggerSignal) -> tuple[str, str]:
 
 
 def main() -> None:
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="local_notifier")
     validate_kafka_wire_settings(settings, check_raw=False)
     configure_logging(settings.log_level)
     consumer = build_consumer(settings)

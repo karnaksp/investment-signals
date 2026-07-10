@@ -120,14 +120,14 @@ def _recalculate(settings: RuntimeSettings) -> None:
 
 def run_recalc_once(settings: RuntimeSettings | None = None) -> None:
     """Один прогон пересчёта порогов (Dagster, тесты, ручной вызов)."""
-    cfg = settings or RuntimeSettings.from_env()
+    cfg = settings or RuntimeSettings.from_env(service_name="threshold_cron")
     if not cfg.tinvest_token:
         raise RuntimeError("TINVEST_TOKEN is required")
     _recalculate(cfg)
 
 
 def main() -> None:
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="threshold_cron")
     configure_logging(settings.log_level)
     if not settings.tinvest_token:
         raise RuntimeError("TINVEST_TOKEN is required")

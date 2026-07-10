@@ -9,7 +9,69 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+
+_SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
+    "api": frozenset(
+        {
+            "ADMIN_API_TOKEN",
+            "CLICKHOUSE_PASSWORD",
+            "POSTGRES_PASSWORD",
+            "TELEGRAM_BOT_TOKEN",
+            "TINVEST_TOKEN",
+        }
+    ),
+    "dagster": frozenset({"TINVEST_TOKEN"}),
+    "detector": frozenset(
+        {
+            "ALERT_WEBHOOK_URL",
+            "POSTGRES_PASSWORD",
+            "TELEGRAM_BOT_TOKEN",
+        }
+    ),
+    "ingestor": frozenset({"TINVEST_TOKEN"}),
+    "local_notifier": frozenset(),
+    "market_unary_emitter": frozenset({"TINVEST_TOKEN"}),
+    "migration": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
+    "threshold_cron": frozenset({"TINVEST_TOKEN"}),
+}
+
+
+def load_secret(
+    name: str,
+    *,
+    default: str | None = None,
+    service_name: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Load one secret from ``NAME`` or Docker-style ``NAME_FILE``.
+
+    When ``service_name`` is supplied, secrets outside that service's explicit
+    allowlist are ignored. This keeps one service from accidentally consuming
+    credentials intended for another service.
+    """
+    env = os.environ if environ is None else environ
+    if service_name is not None:
+        allowed = _SERVICE_SECRET_NAMES.get(service_name)
+        if allowed is None:
+            raise ValueError(f"Unknown service name: {service_name!r}")
+        if name not in allowed:
+            return default
+
+    direct = env.get(name)
+    file_value = env.get(f"{name}_FILE")
+    if direct and file_value:
+        raise ValueError(f"Set only one of {name} and {name}_FILE")
+    if file_value:
+        path = Path(file_value).expanduser()
+        value = path.read_text(encoding="utf-8").rstrip("\r\n")
+        if "\x00" in value:
+            raise ValueError(f"Secret file for {name} contains a NUL byte")
+        return value
+    if direct is not None:
+        return direct
+    return default
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -219,9 +281,15 @@ class RuntimeSettings:
     market_unary_metrics_listen_port: int | None
     admin_api_rate_limit_per_minute: int
     admin_api_allowed_ips: frozenset[str] | None
+    expectation_catalog_version: str | None
+    detector_config_version: str | None
+    delivery_config_version: str | None
+    cost_model_version: str | None
 
     @classmethod
-    def from_env(cls) -> "RuntimeSettings":
+    def from_env(
+        cls, *, service_name: str | None = None
+    ) -> "RuntimeSettings":
         instruments_path = Path(
             os.getenv("INSTRUMENTS_CONFIG", "conf/instruments.yaml")
         )
@@ -234,7 +302,10 @@ class RuntimeSettings:
             )
         )
         return cls(
-            tinvest_token=os.getenv("TINVEST_TOKEN", ""),
+            tinvest_token=load_secret(
+                "TINVEST_TOKEN", default="", service_name=service_name
+            )
+            or "",
             tinvest_use_sandbox=_env_bool(
                 "TINVEST_USE_SANDBOX", default=False
             ),
@@ -270,7 +341,12 @@ class RuntimeSettings:
             postgres_port=int(os.getenv("POSTGRES_PORT", "5432")),
             postgres_database=os.getenv("POSTGRES_DATABASE", "signal_engine"),
             postgres_username=os.getenv("POSTGRES_USERNAME", "signal_engine"),
-            postgres_password=os.getenv("POSTGRES_PASSWORD", "signal_engine"),
+            postgres_password=load_secret(
+                "POSTGRES_PASSWORD",
+                default="signal_engine",
+                service_name=service_name,
+            )
+            or "",
             postgres_table=os.getenv("POSTGRES_TABLE", "market_signals"),
             postgres_startup_timeout_seconds=int(
                 os.getenv("POSTGRES_STARTUP_TIMEOUT_SECONDS", "90")
@@ -281,8 +357,14 @@ class RuntimeSettings:
             api_host=os.getenv("API_HOST", "0.0.0.0"),
             api_port=int(os.getenv("API_PORT", "8000")),
             api_reload=_env_bool("TINVEST_API_RELOAD", default=False),
-            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
-            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
+            alert_webhook_url=load_secret(
+                "ALERT_WEBHOOK_URL", service_name=service_name
+            )
+            or None,
+            telegram_bot_token=load_secret(
+                "TELEGRAM_BOT_TOKEN", service_name=service_name
+            )
+            or None,
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
             telegram_message_thread_id=_env_optional_int(
                 "TELEGRAM_MESSAGE_THREAD_ID"
@@ -334,7 +416,10 @@ class RuntimeSettings:
             kafka_protobuf_schema_id_signal=_env_optional_int(
                 "KAFKA_PROTOBUF_SCHEMA_ID_SIGNAL"
             ),
-            admin_api_token=(os.getenv("ADMIN_API_TOKEN") or "").strip() or None,
+            admin_api_token=(
+                load_secret("ADMIN_API_TOKEN", service_name=service_name) or ""
+            ).strip()
+            or None,
             signal_accuracy_json_path=Path(
                 os.getenv(
                     "SIGNAL_ACCURACY_JSON_PATH",
@@ -348,8 +433,10 @@ class RuntimeSettings:
                 (os.getenv("CLICKHOUSE_USERNAME") or "").strip() or None
             ),
             clickhouse_http_password=(
-                (os.getenv("CLICKHOUSE_PASSWORD") or "").strip() or None
-            ),
+                load_secret("CLICKHOUSE_PASSWORD", service_name=service_name)
+                or ""
+            ).strip()
+            or None,
             signal_min_quality_score=_env_optional_int(
                 "SIGNAL_MIN_QUALITY_SCORE"
             ),
@@ -418,6 +505,19 @@ class RuntimeSettings:
             ),
             admin_api_allowed_ips=_parse_admin_ip_allowlist(
                 os.getenv("ADMIN_API_ALLOWED_IPS", "")
+            ),
+            expectation_catalog_version=(
+                (os.getenv("EXPECTATION_CATALOG_VERSION") or "").strip()
+                or None
+            ),
+            detector_config_version=(
+                (os.getenv("DETECTOR_CONFIG_VERSION") or "").strip() or None
+            ),
+            delivery_config_version=(
+                (os.getenv("DELIVERY_CONFIG_VERSION") or "").strip() or None
+            ),
+            cost_model_version=(
+                (os.getenv("COST_MODEL_VERSION") or "").strip() or None
             ),
         )
 

@@ -84,6 +84,16 @@ def trigger_signal_to_proto_bytes(signal: TriggerSignal) -> bytes:
     msg.window_seconds = int(signal.window_seconds)
     msg.summary = signal.summary
     msg.payload_json = json_dumps(signal.payload)
+    msg.source_event_id = signal.source_event_id or ""
+    msg.source_event_at_rfc3339 = (
+        signal.source_event_at.isoformat() if signal.source_event_at else ""
+    )
+    msg.signal_schema_version = signal.signal_schema_version
+    msg.expectation_catalog_version = signal.expectation_catalog_version or ""
+    msg.detector_config_version = signal.detector_config_version or ""
+    msg.delivery_config_version = signal.delivery_config_version or ""
+    msg.cost_model_version = signal.cost_model_version or ""
+    msg.provenance_status = signal.provenance_status
     return msg.SerializeToString()
 
 
@@ -111,6 +121,14 @@ def trigger_signal_dict_from_proto_bytes(data: bytes) -> dict[str, Any]:
         "window_seconds": int(msg.window_seconds),
         "summary": msg.summary,
         "payload": payload,
+        "source_event_id": msg.source_event_id or None,
+        "source_event_at": msg.source_event_at_rfc3339 or None,
+        "signal_schema_version": msg.signal_schema_version or "1.0.0",
+        "expectation_catalog_version": msg.expectation_catalog_version or None,
+        "detector_config_version": msg.detector_config_version or None,
+        "delivery_config_version": msg.delivery_config_version or None,
+        "cost_model_version": msg.cost_model_version or None,
+        "provenance_status": msg.provenance_status or "legacy",
     }
 
 

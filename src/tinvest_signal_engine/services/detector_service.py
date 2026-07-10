@@ -12,6 +12,7 @@ from ..config import RuntimeSettings, load_detector_config
 from ..data_quality import log_validation_failure, validate_normalized_event_dict
 from ..delivery_policy import DELIVERY_DELIVERED, DeliveryPolicy
 from ..detector_core import SignalDetector
+from ..domain.configuration import content_version
 from ..kafka_proto import (
     build_raw_value_deserializer,
     build_signal_value_serializer,
@@ -35,6 +36,15 @@ from ..sinks import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _detector_config_version(settings: RuntimeSettings) -> str:
+    if settings.detector_config_version:
+        return settings.detector_config_version
+    paths = (settings.detector_path, settings.detector_overrides_path)
+    return content_version(
+        path.read_bytes() for path in paths if path.exists()
+    )
 
 
 def _kafka_compression_type(settings: RuntimeSettings) -> str | None:
@@ -93,7 +103,7 @@ def build_signal_producer(settings: RuntimeSettings) -> KafkaProducer:
 
 
 def main() -> None:
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="detector")
     validate_kafka_wire_settings(settings)
     configure_logging(settings.log_level)
     if settings.metrics_listen_port:
@@ -105,6 +115,10 @@ def main() -> None:
         loaded.default,
         loaded.per_instrument,
         lead_lag_pairs=loaded.lead_lag_pairs,
+        expectation_catalog_version=settings.expectation_catalog_version,
+        detector_config_version=_detector_config_version(settings),
+        delivery_config_version=settings.delivery_config_version,
+        cost_model_version=settings.cost_model_version,
     )
     hydrate_detector_from_redis(detector, settings.redis_url)
     detector_mtime = settings.detector_path.stat().st_mtime
@@ -178,6 +192,16 @@ def main() -> None:
                                 loaded.default,
                                 loaded.per_instrument,
                                 lead_lag_pairs=loaded.lead_lag_pairs,
+                                expectation_catalog_version=(
+                                    settings.expectation_catalog_version
+                                ),
+                                detector_config_version=(
+                                    _detector_config_version(settings)
+                                ),
+                                delivery_config_version=(
+                                    settings.delivery_config_version
+                                ),
+                                cost_model_version=settings.cost_model_version,
                             )
                             hydrate_detector_from_redis(detector, settings.redis_url)
                             detector_mtime = mtime

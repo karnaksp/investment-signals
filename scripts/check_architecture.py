@@ -14,8 +14,8 @@ PACKAGE = "tinvest_signal_engine"
 INNER_LAYERS = ("domain", "application")
 
 
-def _module_name(path: Path) -> str:
-    return ".".join(path.relative_to(SOURCE_ROOT).with_suffix("").parts)
+def _module_name(path: Path, source_root: Path = SOURCE_ROOT) -> str:
+    return ".".join(path.relative_to(source_root).with_suffix("").parts)
 
 
 def _layer(module: str) -> str | None:
@@ -68,20 +68,27 @@ def _allowed(layer: str, imported: str) -> bool:
     )
 
 
+def _display_path(path: Path) -> Path:
+    try:
+        return path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        return path
+
+
 def find_violations(source_root: Path = SOURCE_ROOT) -> list[str]:
     violations: list[str] = []
     package_root = source_root / PACKAGE
     if not package_root.exists():
         return violations
     for path in sorted(package_root.rglob("*.py")):
-        module = _module_name(path)
+        module = _module_name(path, source_root)
         layer = _layer(module)
         if layer is None:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for line, imported in _imports(tree, module):
             if not _allowed(layer, imported):
-                relative = path.relative_to(PROJECT_ROOT)
+                relative = _display_path(path)
                 violations.append(
                     f"{relative}:{line}: {layer} layer imports {imported!r}"
                 )
@@ -89,7 +96,8 @@ def find_violations(source_root: Path = SOURCE_ROOT) -> list[str]:
 
 
 def main() -> int:
-    violations = find_violations()
+    source_root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else SOURCE_ROOT
+    violations = find_violations(source_root)
     if violations:
         print("Clean Architecture dependency violations:")
         print("\n".join(f"- {item}" for item in violations))
@@ -100,4 +108,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -829,6 +829,36 @@ def _row_to_signal(row: dict[str, Any]) -> TriggerSignal:
         window_seconds=int(row.get("window_seconds") or 0),
         summary=str(row.get("summary") or ""),
         payload=dict(row.get("payload") or {}),
+        source_event_id=(
+            str(row["source_event_id"])
+            if row.get("source_event_id") is not None
+            else None
+        ),
+        source_event_at=_parse_dt(row.get("source_event_at")),
+        signal_schema_version=str(
+            row.get("signal_schema_version") or "1.0.0"
+        ),
+        expectation_catalog_version=(
+            str(row["expectation_catalog_version"])
+            if row.get("expectation_catalog_version") is not None
+            else None
+        ),
+        detector_config_version=(
+            str(row["detector_config_version"])
+            if row.get("detector_config_version") is not None
+            else None
+        ),
+        delivery_config_version=(
+            str(row["delivery_config_version"])
+            if row.get("delivery_config_version") is not None
+            else None
+        ),
+        cost_model_version=(
+            str(row["cost_model_version"])
+            if row.get("cost_model_version") is not None
+            else None
+        ),
+        provenance_status=str(row.get("provenance_status") or "legacy"),
     )
 
 
@@ -936,7 +966,7 @@ def require_admin(
 
 
 def create_app() -> FastAPI:
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="api")
     runtime = runtime_fingerprint()
     configure_logging(settings.log_level)
     fastapi_app = FastAPI(
@@ -2005,7 +2035,7 @@ app = create_app()
 
 
 def main() -> None:
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="api")
     host, port = settings.api_host, settings.api_port
     pkg_root = str(Path(__file__).resolve().parent.parent)
     if settings.api_reload:

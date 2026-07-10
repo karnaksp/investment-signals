@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 from .config import DetectorSettings
+from .domain.signal_identity import deterministic_signal_id
 from .models import NormalizedEvent, TriggerSignal
 from .serialization import quotation_to_float, utc_now
 
@@ -83,11 +84,19 @@ class SignalDetector:
         per_instrument: dict[str, DetectorSettings] | None = None,
         *,
         lead_lag_pairs: tuple[tuple[str, str], ...] = (),
+        expectation_catalog_version: str | None = None,
+        detector_config_version: str | None = None,
+        delivery_config_version: str | None = None,
+        cost_model_version: str | None = None,
     ):
         self._default_settings = settings
         self._per_instrument = per_instrument or {}
         self._states: dict[str, InstrumentState] = defaultdict(InstrumentState)
         self._lead_lag_pairs = lead_lag_pairs
+        self._expectation_catalog_version = expectation_catalog_version
+        self._detector_config_version = detector_config_version
+        self._delivery_config_version = delivery_config_version
+        self._cost_model_version = cost_model_version
         self._mid_track: dict[str, deque[tuple[datetime, float]]] = defaultdict(
             lambda: deque(maxlen=4000)
         )
@@ -118,7 +127,25 @@ class SignalDetector:
             signals = []
         signals = list(signals)
         signals.extend(self._maybe_lead_lag(event, cfg))
-        return signals
+        return [self._attach_provenance(signal, event) for signal in signals]
+
+    def _attach_provenance(
+        self,
+        signal: TriggerSignal,
+        event: NormalizedEvent,
+    ) -> TriggerSignal:
+        return replace(
+            signal,
+            signal_id=deterministic_signal_id(event.event_id, signal.signal_type),
+            source_event_id=event.event_id,
+            source_event_at=event.source_time,
+            signal_schema_version="1.0.0",
+            expectation_catalog_version=self._expectation_catalog_version,
+            detector_config_version=self._detector_config_version,
+            delivery_config_version=self._delivery_config_version,
+            cost_model_version=self._cost_model_version,
+            provenance_status="complete",
+        )
 
     @staticmethod
     def _truncate_unary_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1498,4 +1525,3 @@ def _signed_quantity_from_trade_payload(
         if raw_direction == 2:
             return -quantity
     return 0.0
-
