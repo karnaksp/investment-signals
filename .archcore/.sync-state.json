@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "files": {},
+  "relations": [
+    {
+      "source": "conventions/clean-architecture.rule.md",
+      "target": "architecture/clean-architecture.adr.md",
+      "type": "implements"
+    }
+  ]
+}

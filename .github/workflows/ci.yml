@@ -40,6 +40,9 @@ jobs:
       - name: Run pytest
         run: python -m pytest -q
 
+      - name: Check Clean Architecture boundaries
+        run: python scripts/check_architecture.py
+
       - name: Check admin JavaScript syntax
         run: node --check src/tinvest_signal_engine/static/admin_app.js
 
