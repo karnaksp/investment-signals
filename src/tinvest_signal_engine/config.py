@@ -43,6 +43,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "local_notifier": frozenset(),
     "market_unary_emitter": frozenset({"TINVEST_TOKEN"}),
     "migration": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
+    "reference_tick_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
     "threshold_cron": frozenset({"TINVEST_TOKEN"}),
 }
 
