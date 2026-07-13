@@ -33,7 +33,11 @@ RUN rm -rf /app/src/tinkoff \
 
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir --retries 20 --timeout 60 "setuptools>=69" wheel && \
-    pip install --no-cache-dir --no-build-isolation ".[orchestration]"
+    pip install --no-cache-dir --no-build-isolation ".[orchestration]" && \
+    groupadd --gid 10001 tinvest && \
+    useradd --uid 10001 --gid tinvest --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin tinvest
+
+USER 10001:10001
 
 CMD ["tinvest-api"]
-
