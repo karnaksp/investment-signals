@@ -53,7 +53,12 @@ FOR EACH ROW EXECUTE FUNCTION protect_detector_observation_outbox();
 CREATE OR REPLACE FUNCTION reject_detector_observation_outbox_delete()
 RETURNS TRIGGER AS $$
 BEGIN
-    RAISE EXCEPTION 'detector observation outbox rows are append-only';
+    IF OLD.status <> 'published'
+       OR OLD.published_at IS NULL
+       OR OLD.published_at > now() - INTERVAL '7 days' THEN
+        RAISE EXCEPTION 'only published detector observations past the safety window may be purged';
+    END IF;
+    RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;
 

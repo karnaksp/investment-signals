@@ -146,7 +146,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
     expected = {
         "postgresql": (
             root / "postgres" / "migrations",
-            (100, 101, 102, 103, 104),
+            (100, 101, 102, 103, 104, 105),
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
@@ -204,3 +204,22 @@ def test_detector_observation_outbox_is_durable_and_payload_immutable() -> None:
     assert "NEW.payload_json IS DISTINCT FROM OLD.payload_json" in sql
     assert "detector_observation_outbox_state_guard" in sql
     assert "detector_observation_outbox_delete_guard" in sql
+    assert "past the safety window may be purged" in sql
+
+
+def test_detector_state_snapshot_is_versioned_and_broker_monotonic() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0105_add_detector_state_snapshots.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE detector_state_snapshots" in sql
+    assert "REFERENCES processed_events(event_id) ON DELETE RESTRICT" in sql
+    assert "snapshot_sha256 BYTEA NOT NULL" in sql
+    assert "NEW.offset_id <= OLD.offset_id" in sql
+    assert "detector_state_snapshots_advance_guard" in sql
+    assert "detector_state_snapshots_delete_guard" in sql
