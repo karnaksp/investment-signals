@@ -7,6 +7,7 @@ from time import monotonic
 from typing import Protocol, Sequence
 
 from tinvest_signal_engine.application.observability import ReliabilityMetrics
+from tinvest_signal_engine.domain.detector_observations import DetectorObservation
 from tinvest_signal_engine.domain.reliable_processing import (
     PreparedSignal,
     SignalRecord,
@@ -36,6 +37,30 @@ class BrokerEvent:
 class StoredEvent:
     signals: tuple[SignalRecord, ...]
     replayed: bool
+
+
+@dataclass(frozen=True)
+class DetectionBatch:
+    """Application-owned unit that must be staged in one durable transaction."""
+
+    signals: tuple[PreparedSignal, ...] = ()
+    observations: tuple[DetectorObservation, ...] = ()
+
+
+class BatchDetectionPort(Protocol):
+    def detect_batch(self, payload: dict[str, object]) -> DetectionBatch: ...
+
+
+class AtomicDetectionStore(Protocol):
+    """Future persistence boundary; implementations must not dual-write."""
+
+    def find_processed(self, event: BrokerEvent) -> StoredEvent | None: ...
+
+    def persist_detection_once(
+        self,
+        event: BrokerEvent,
+        batch: DetectionBatch,
+    ) -> StoredEvent: ...
 
 
 class DetectionPort(Protocol):

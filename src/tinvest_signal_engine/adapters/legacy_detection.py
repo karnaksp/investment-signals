@@ -6,6 +6,7 @@ import logging
 import time
 from typing import Callable
 
+from tinvest_signal_engine.application.reliable_processing import DetectionBatch
 from tinvest_signal_engine.config import RuntimeSettings, load_detector_config
 from tinvest_signal_engine.delivery_policy import DELIVERY_DELIVERED, DeliveryPolicy
 from tinvest_signal_engine.detector_core import SignalDetector
@@ -51,9 +52,13 @@ class LegacyDetectionAdapter:
         )
 
     def detect(self, payload: dict[str, object]) -> tuple[PreparedSignal, ...]:
+        return self.detect_batch(payload).signals
+
+    def detect_batch(self, payload: dict[str, object]) -> DetectionBatch:
         self._maybe_reload()
         event = NormalizedEvent.from_dict(payload)
         signals = self._detector.process(event)
+        observations = self._detector.drain_observations()
         signals = self._detector.enrich_signals_with_unary(signals)
         prepared: list[PreparedSignal] = []
         for signal in signals:
@@ -70,7 +75,7 @@ class LegacyDetectionAdapter:
                     delivery_targets=targets,
                 )
             )
-        return tuple(prepared)
+        return DetectionBatch(tuple(prepared), observations)
 
     def checkpoint(self) -> None:
         flush_detector_to_redis(self._detector, self._settings.redis_url)

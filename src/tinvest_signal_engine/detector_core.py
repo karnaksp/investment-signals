@@ -12,6 +12,11 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 from .config import DetectorSettings
+from .domain.detector_observations import (
+    HISTORY_SAMPLING_POLICY_VERSION,
+    DetectorObservation,
+    deterministic_observation_id,
+)
 from .domain.signal_identity import deterministic_signal_id
 from .models import NormalizedEvent, TriggerSignal
 from .serialization import quotation_to_float, utc_now
@@ -102,11 +107,13 @@ class SignalDetector:
         )
         # Последние unary-снимки по instrument_id (не сериализуем в Redis).
         self._unary_context: dict[str, dict[str, Any]] = {}
+        self._pending_observations: list[DetectorObservation] = []
 
     def _settings_for(self, instrument_id: str) -> DetectorSettings:
         return self._per_instrument.get(instrument_id, self._default_settings)
 
     def process(self, event: NormalizedEvent) -> list[TriggerSignal]:
+        self._pending_observations = []
         cfg = self._settings_for(event.instrument_id)
         state = self._states[event.instrument_id]
         if event.event_type == "trade":
@@ -128,6 +135,13 @@ class SignalDetector:
         signals = list(signals)
         signals.extend(self._maybe_lead_lag(event, cfg))
         return [self._attach_provenance(signal, event) for signal in signals]
+
+    def drain_observations(self) -> tuple[DetectorObservation, ...]:
+        """Return observations from the latest event exactly once."""
+
+        observations = tuple(self._pending_observations)
+        self._pending_observations = []
+        return observations
 
     def _attach_provenance(
         self,
@@ -360,39 +374,39 @@ class SignalDetector:
             )
         )
 
-        if imbalance_abs >= cfg.imbalance_absolute_threshold:
-            signals.extend(
-                self._maybe_emit_from_history(
-                    event=event,
-                    state=state,
-                    cfg=cfg,
-                    signal_type="orderbook_imbalance",
-                    source_event_type="orderbook",
-                    history=state.imbalance_history,
-                    threshold=cfg.imbalance_zscore_threshold,
-                    value=imbalance_abs,
-                    baseline_label="imbalance",
-                    window_seconds=cfg.orderbook_window_seconds,
-                    summary_template=(
-                        "{ticker} order book imbalance reached {metric:.2f} "
-                        "vs baseline {baseline:.2f} (z={z_score:.2f})."
-                    ),
-                    payload_extra={
-                        "imbalance_abs": imbalance_abs,
-                        "imbalance_ratio": imbalance_ratio,
-                        "dominant_side": (
-                            "bid" if top_bids_qty >= top_asks_qty else "ask"
-                        ),
-                        "depth_levels": depth,
-                        "top_bid_qty": top_bids_qty,
-                        "top_ask_qty": top_asks_qty,
-                        "total_book_qty": total_qty,
-                        "best_bid": best_bid,
-                        "best_ask": best_ask,
-                        "mid": mid,
-                    },
-                )
+        signals.extend(
+            self._maybe_emit_from_history(
+                event=event,
+                state=state,
+                cfg=cfg,
+                signal_type="orderbook_imbalance",
+                source_event_type="orderbook",
+                history=state.imbalance_history,
+                threshold=cfg.imbalance_zscore_threshold,
+                value=imbalance_abs,
+                baseline_label="imbalance",
+                window_seconds=cfg.orderbook_window_seconds,
+                summary_template=(
+                    "{ticker} order book imbalance reached {metric:.2f} "
+                    "vs baseline {baseline:.2f} (z={z_score:.2f})."
+                ),
+                payload_extra={
+                    "imbalance_abs": imbalance_abs,
+                    "imbalance_ratio": imbalance_ratio,
+                    "dominant_side": ("bid" if top_bids_qty >= top_asks_qty else "ask"),
+                    "depth_levels": depth,
+                    "top_bid_qty": top_bids_qty,
+                    "top_ask_qty": top_asks_qty,
+                    "total_book_qty": total_qty,
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "mid": mid,
+                },
+                absolute_gate_passed=(
+                    imbalance_abs >= cfg.imbalance_absolute_threshold
+                ),
             )
+        )
 
         state.spread_history.append(spread_bps)
         state.imbalance_history.append(imbalance_abs)
@@ -402,35 +416,37 @@ class SignalDetector:
             obi = (top_bids_qty - top_asks_qty) / total_qty
             if state.last_sampled_obi is not None:
                 delta_obi = obi - state.last_sampled_obi
-                if abs(delta_obi) >= cfg.obi_delta_absolute_threshold:
-                    tmpl = (
-                        "{ticker} L" + str(depth) + " OBI jump |Δ|={metric:.3f} "
-                        "vs baseline {baseline:.3f} (z={z_score:.2f})."
+                tmpl = (
+                    "{ticker} L" + str(depth) + " OBI jump |Δ|={metric:.3f} "
+                    "vs baseline {baseline:.3f} (z={z_score:.2f})."
+                )
+                signals.extend(
+                    self._maybe_emit_from_history(
+                        event=event,
+                        state=state,
+                        cfg=cfg,
+                        signal_type="obi_dynamics",
+                        source_event_type="orderbook",
+                        history=state.obi_delta_history,
+                        threshold=cfg.obi_delta_zscore_threshold,
+                        value=abs(delta_obi),
+                        baseline_label="obi delta",
+                        window_seconds=cfg.orderbook_window_seconds,
+                        summary_template=tmpl,
+                        payload_extra={
+                            "obi": obi,
+                            "previous_obi": state.last_sampled_obi,
+                            "delta_obi": delta_obi,
+                            "abs_delta_obi": abs(delta_obi),
+                            "depth_levels": depth,
+                            "top_bid_qty": top_bids_qty,
+                            "top_ask_qty": top_asks_qty,
+                        },
+                        absolute_gate_passed=(
+                            abs(delta_obi) >= cfg.obi_delta_absolute_threshold
+                        ),
                     )
-                    signals.extend(
-                        self._maybe_emit_from_history(
-                            event=event,
-                            state=state,
-                            cfg=cfg,
-                            signal_type="obi_dynamics",
-                            source_event_type="orderbook",
-                            history=state.obi_delta_history,
-                            threshold=cfg.obi_delta_zscore_threshold,
-                            value=abs(delta_obi),
-                            baseline_label="obi delta",
-                            window_seconds=cfg.orderbook_window_seconds,
-                            summary_template=tmpl,
-                            payload_extra={
-                                "obi": obi,
-                                "previous_obi": state.last_sampled_obi,
-                                "delta_obi": delta_obi,
-                                "abs_delta_obi": abs(delta_obi),
-                                "depth_levels": depth,
-                                "top_bid_qty": top_bids_qty,
-                                "top_ask_qty": top_asks_qty,
-                            },
-                        )
-                    )
+                )
                 state.obi_delta_history.append(abs(delta_obi))
             state.last_sampled_obi = obi
 
@@ -590,11 +606,10 @@ class SignalDetector:
             return []
         signed_move_bps = ((current_price - oldest_price) / oldest_price) * 10_000
         move_bps = abs(signed_move_bps)
-        if (
-            cfg.price_move_absolute_threshold_bps > 0
-            and move_bps < cfg.price_move_absolute_threshold_bps
-        ):
-            return []
+        absolute_gate_passed = (
+            cfg.price_move_absolute_threshold_bps <= 0
+            or move_bps >= cfg.price_move_absolute_threshold_bps
+        )
         volatility_context = self._baseline_volatility_context(event, cfg)
         signals = self._maybe_emit_from_history(
             event=event,
@@ -621,6 +636,7 @@ class SignalDetector:
                 "price_direction": "up" if signed_move_bps > 0 else "down",
                 **volatility_context,
             },
+            absolute_gate_passed=absolute_gate_passed,
         )
 
         state.return_history.append(move_bps)
@@ -945,20 +961,57 @@ class SignalDetector:
         window_seconds: int,
         summary_template: str,
         payload_extra: dict[str, Any] | None = None,
+        absolute_gate_passed: bool = True,
     ) -> list[TriggerSignal]:
         if len(history) < cfg.min_baseline_points:
             return []
         baseline, z_score = _z_score(history, value)
-        if z_score < threshold:
-            return []
+        threshold_passed = z_score >= threshold
+        relative_gate_passed = True
         if cfg.min_relative_metric_excursion > 0.0:
             b = float(baseline)
             if abs(b) >= 1e-9:
                 rel = abs(float(value) - b) / max(abs(b), 1e-12)
                 if rel < cfg.min_relative_metric_excursion:
-                    return []
-        state.last_active_at[signal_type] = event.source_time
-        if not self._is_alert_ready(state, signal_type, event.source_time, cfg):
+                    relative_gate_passed = False
+        detector_passed = (
+            threshold_passed and relative_gate_passed and absolute_gate_passed
+        )
+        signal_emitted = detector_passed and self._is_alert_ready(
+            state, signal_type, event.source_time, cfg
+        )
+        detector_config_version = self._detector_config_version or "unversioned"
+        self._pending_observations.append(
+            DetectorObservation(
+                observation_id=deterministic_observation_id(
+                    source_event_id=event.event_id,
+                    signal_type=signal_type,
+                    detector_config_version=detector_config_version,
+                ),
+                source_event_id=event.event_id,
+                observed_at=event.source_time,
+                instrument_id=event.instrument_id,
+                source_event_type=source_event_type,
+                signal_type=signal_type,
+                metric_value=float(value),
+                baseline_value=float(baseline),
+                z_score=float(z_score),
+                threshold_value=float(threshold),
+                threshold_passed=threshold_passed,
+                detector_passed=detector_passed,
+                signal_emitted=signal_emitted,
+                window_seconds=window_seconds,
+                sampling_policy_version=HISTORY_SAMPLING_POLICY_VERSION,
+                detector_config_version=detector_config_version,
+                expectation_catalog_version=self._expectation_catalog_version,
+                provenance_status=(
+                    "complete" if self._detector_config_version else "legacy"
+                ),
+            )
+        )
+        if detector_passed:
+            state.last_active_at[signal_type] = event.source_time
+        if not signal_emitted:
             return []
         state.last_alert_at[signal_type] = event.source_time
         payload = {
