@@ -146,8 +146,12 @@ class SignalDetectorTest(unittest.TestCase):
         self.assertIsNotNone(volume.payload["baseline_volatility_bps"])
         self.assertEqual(volume.payload["baseline_volatility_horizon_seconds"], 60)
         self.assertEqual(
+            volume.payload["baseline_volatility_estimator"],
+            "tick_realized_rv",
+        )
+        self.assertEqual(
             volume.payload["baseline_volatility_estimator_version"],
-            "tick-realized-rv-v1",
+            "1.0.0",
         )
 
     def test_activity_baseline_is_successive_return_volatility(self) -> None:
@@ -253,8 +257,12 @@ class SignalDetectorTest(unittest.TestCase):
             (start + timedelta(seconds=35)).isoformat(),
         )
         self.assertEqual(
+            price_jump.payload["baseline_volatility_estimator"],
+            "tick_realized_rv",
+        )
+        self.assertEqual(
             price_jump.payload["baseline_volatility_estimator_version"],
-            "tick-realized-rv-v1",
+            "1.0.0",
         )
 
     def test_min_relative_metric_excursion_blocks_flat_baseline_spike(self) -> None:

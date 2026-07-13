@@ -1098,7 +1098,8 @@ class SignalDetector:
                 cfg.baseline_volatility_window_seconds
             ),
             "baseline_volatility_observed_until": event.source_time.isoformat(),
-            "baseline_volatility_estimator_version": "tick-realized-rv-v1",
+            "baseline_volatility_estimator": "tick_realized_rv",
+            "baseline_volatility_estimator_version": "1.0.0",
         }
 
     def _maybe_emit_trade_burst(
