@@ -146,7 +146,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
     expected = {
         "postgresql": (
             root / "postgres" / "migrations",
-            (100, 101, 102, 103),
+            (100, 101, 102, 103, 104),
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
@@ -185,3 +185,22 @@ def test_reliable_processing_migration_contains_inbox_and_outbox() -> None:
     assert "CREATE TABLE IF NOT EXISTS delivery_outbox" in sql
     assert "REFERENCES market_signals(signal_id) ON DELETE CASCADE" in sql
     assert "WHERE status = 'delivering'" in sql
+
+
+def test_detector_observation_outbox_is_durable_and_payload_immutable() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0104_add_detector_observation_outbox.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS detector_observation_outbox" in sql
+    assert "REFERENCES processed_events(event_id) ON DELETE RESTRICT" in sql
+    assert "detector_observation_outbox_ready_idx" in sql
+    assert "detector_observation_outbox_reclaim_idx" in sql
+    assert "NEW.payload_json IS DISTINCT FROM OLD.payload_json" in sql
+    assert "detector_observation_outbox_state_guard" in sql
+    assert "detector_observation_outbox_delete_guard" in sql
