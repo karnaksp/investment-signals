@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -143,6 +144,11 @@ class SignalDetectorTest(unittest.TestCase):
             signal for signal in emitted if signal.signal_type == "volume_spike"
         )
         self.assertIsNotNone(volume.payload["baseline_volatility_bps"])
+        self.assertEqual(volume.payload["baseline_volatility_horizon_seconds"], 60)
+        self.assertEqual(
+            volume.payload["baseline_volatility_estimator_version"],
+            "tick-realized-rv-v1",
+        )
 
     def test_activity_baseline_is_successive_return_volatility(self) -> None:
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -157,7 +163,10 @@ class SignalDetectorTest(unittest.TestCase):
         baseline = _realized_volatility_bps(ring)
 
         self.assertIsNotNone(baseline)
-        self.assertGreater(baseline, 0.0)
+        self.assertAlmostEqual(
+            baseline,
+            math.sqrt(100.0**2 + ((100.0 / 101.0 - 1.0) * 10_000.0) ** 2),
+        )
 
     def test_lead_lag_signal_carries_expected_follower_direction(self) -> None:
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -235,6 +244,18 @@ class SignalDetectorTest(unittest.TestCase):
         self.assertAlmostEqual(price_jump.payload["price_change_pct"], 2.0)
         self.assertEqual(price_jump.payload["start_price"], 100.0)
         self.assertEqual(price_jump.payload["current_price"], 102.0)
+        self.assertIsNotNone(price_jump.payload["baseline_volatility_bps"])
+        self.assertEqual(
+            price_jump.payload["baseline_volatility_horizon_seconds"], 60
+        )
+        self.assertEqual(
+            price_jump.payload["baseline_volatility_observed_until"],
+            (start + timedelta(seconds=35)).isoformat(),
+        )
+        self.assertEqual(
+            price_jump.payload["baseline_volatility_estimator_version"],
+            "tick-realized-rv-v1",
+        )
 
     def test_min_relative_metric_excursion_blocks_flat_baseline_spike(self) -> None:
         """Высокий z при нулевом std не должен проходить без заметного относит. отклонения."""

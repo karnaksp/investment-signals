@@ -155,6 +155,7 @@ class DetectorSettings:
     trade_window_seconds: int = 60
     price_window_seconds: int = 90
     orderbook_window_seconds: int = 120
+    baseline_volatility_window_seconds: int = 60
     alert_cooldown_seconds: int = 120
     volume_zscore_threshold: float = 4.0
     trade_count_zscore_threshold: float = 4.0
@@ -576,6 +577,9 @@ def _detector_settings_from_mapping(
         price_window_seconds=int(detector.get("price_window_seconds", 90)),
         orderbook_window_seconds=int(
             detector.get("orderbook_window_seconds", 120)
+        ),
+        baseline_volatility_window_seconds=int(
+            detector.get("baseline_volatility_window_seconds", 60)
         ),
         alert_cooldown_seconds=int(
             detector.get("alert_cooldown_seconds", 120)

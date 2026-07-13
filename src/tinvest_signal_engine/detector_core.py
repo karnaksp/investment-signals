@@ -502,9 +502,7 @@ class SignalDetector:
         trade_count = float(len(state.trade_points))
         lot = max(1, int(event.lot or 0))
         current_price = quotation_to_float(event.payload.get("price"))
-        baseline_volatility_bps = _realized_volatility_bps(
-            self._mid_track[event.instrument_id]
-        )
+        volatility_context = self._baseline_volatility_context(event, cfg)
         signals: list[TriggerSignal] = []
 
         signals.extend(
@@ -530,7 +528,7 @@ class SignalDetector:
                     "window_notional_currency": "price_units",
                     "last_price": current_price,
                     "lot": lot,
-                    "baseline_volatility_bps": baseline_volatility_bps,
+                    **volatility_context,
                 },
             )
         )
@@ -560,7 +558,7 @@ class SignalDetector:
                     "avg_trade_notional": (
                         total_notional / trade_count if trade_count > 0 else None
                     ),
-                    "baseline_volatility_bps": baseline_volatility_bps,
+                    **volatility_context,
                     "last_price": current_price,
                     "lot": lot,
                 },
@@ -597,6 +595,7 @@ class SignalDetector:
             and move_bps < cfg.price_move_absolute_threshold_bps
         ):
             return []
+        volatility_context = self._baseline_volatility_context(event, cfg)
         signals = self._maybe_emit_from_history(
             event=event,
             state=state,
@@ -620,6 +619,7 @@ class SignalDetector:
                 "price_change_pct": signed_move_bps / 100.0,
                 "abs_price_change_bps": move_bps,
                 "price_direction": "up" if signed_move_bps > 0 else "down",
+                **volatility_context,
             },
         )
 
@@ -1075,9 +1075,31 @@ class SignalDetector:
             return
         dq = self._mid_track[instrument_id]
         dq.append((ts, float(px)))
-        cutoff = ts - timedelta(seconds=max(5, cfg.lead_lag_window_seconds))
+        cutoff = ts - timedelta(
+            seconds=max(
+                5,
+                cfg.lead_lag_window_seconds,
+                cfg.baseline_volatility_window_seconds,
+            )
+        )
         while dq and dq[0][0] < cutoff:
             dq.popleft()
+
+    def _baseline_volatility_context(
+        self,
+        event: NormalizedEvent,
+        cfg: DetectorSettings,
+    ) -> dict[str, Any]:
+        return {
+            "baseline_volatility_bps": _realized_volatility_bps(
+                self._mid_track[event.instrument_id]
+            ),
+            "baseline_volatility_horizon_seconds": (
+                cfg.baseline_volatility_window_seconds
+            ),
+            "baseline_volatility_observed_until": event.source_time.isoformat(),
+            "baseline_volatility_estimator_version": "tick-realized-rv-v1",
+        }
 
     def _maybe_emit_trade_burst(
         self,
@@ -1321,9 +1343,7 @@ class SignalDetector:
             ),
             payload_extra={
                 "open_interest": oi,
-                "baseline_volatility_bps": _realized_volatility_bps(
-                    self._mid_track[event.instrument_id]
-                ),
+                **self._baseline_volatility_context(event, cfg),
             },
         )
         state.open_interest_history.append(oi)
@@ -1490,6 +1510,8 @@ def _signed_move_bps_in_window(
 def _realized_volatility_bps(
     ring: deque[tuple[datetime, float]],
 ) -> float | None:
+    """Realized path volatility as sqrt(sum of squared simple returns)."""
+
     prices = [price for _, price in ring if price > 0 and math.isfinite(price)]
     if len(prices) < 3:
         return None
@@ -1497,9 +1519,7 @@ def _realized_volatility_bps(
         ((current / previous) - 1.0) * 10_000.0
         for previous, current in zip(prices, prices[1:])
     ]
-    mean = fmean(returns)
-    variance = fmean((value - mean) ** 2 for value in returns)
-    return math.sqrt(variance)
+    return math.sqrt(sum(value * value for value in returns))
 
 
 def _severity_from_z_score(z_score: float) -> int:

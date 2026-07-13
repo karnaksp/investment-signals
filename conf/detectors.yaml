@@ -34,6 +34,11 @@ detector:
   # Окно для спреда и имбаланса стакана (сек).
   orderbook_window_seconds: 180
 
+  # Горизонт pre-event realized volatility в payload сигнала. Используется
+  # automatic verdict policy для sqrt-time scaling; estimator version также
+  # записывается в payload, поэтому семантика не меняется молча.
+  baseline_volatility_window_seconds: 60
+
   # Пауза между любыми двумя алертами одного типа (сек), кроме combo сигналов.
   alert_cooldown_seconds: 300
 
