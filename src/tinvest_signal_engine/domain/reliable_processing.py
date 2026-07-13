@@ -10,6 +10,7 @@ from uuid import UUID, uuid5
 
 _OUTBOX_NAMESPACE = UUID("f5bdc8cb-3731-5755-8136-f510a6c4c2e3")
 DELIVERY_DESTINATIONS = frozenset({"telegram", "webhook"})
+PROVENANCE_STATUSES = frozenset({"complete", "legacy"})
 
 
 class EventReplayConflict(RuntimeError):
@@ -41,6 +42,21 @@ class SignalRecord:
     delivery_config_version: str | None
     cost_model_version: str | None
     provenance_status: str
+
+    def __post_init__(self) -> None:
+        if self.provenance_status not in PROVENANCE_STATUSES:
+            raise ValueError("unsupported signal provenance_status")
+        if self.provenance_status == "complete":
+            required = (
+                self.source_event_id,
+                self.source_event_at,
+                self.expectation_catalog_version,
+                self.detector_config_version,
+                self.delivery_config_version,
+                self.cost_model_version,
+            )
+            if any(value is None or value == "" for value in required):
+                raise ValueError("complete signal provenance requires all versions")
 
 
 @dataclass(frozen=True)

@@ -40,15 +40,42 @@ class StoredEvent:
 
 
 @dataclass(frozen=True)
+class DetectorStateCheckpoint:
+    """Opaque detector state owned by an adapter and durably fenced by Kafka offset."""
+
+    instrument_id: str
+    state_schema_version: str
+    detector_config_version: str
+    payload: bytes
+    payload_sha256: bytes
+
+    def __post_init__(self) -> None:
+        if not self.instrument_id:
+            raise ValueError("checkpoint instrument_id must not be empty")
+        if not self.state_schema_version or not self.detector_config_version:
+            raise ValueError("checkpoint versions must not be empty")
+        if not self.payload:
+            raise ValueError("checkpoint payload must not be empty")
+        if len(self.payload_sha256) != 32:
+            raise ValueError("checkpoint payload_sha256 must be SHA-256")
+
+
+@dataclass(frozen=True)
 class DetectionBatch:
     """Application-owned unit that must be staged in one durable transaction."""
 
     signals: tuple[PreparedSignal, ...] = ()
     observations: tuple[DetectorObservation, ...] = ()
+    checkpoint: DetectorStateCheckpoint | None = None
 
 
 class BatchDetectionPort(Protocol):
     def detect_batch(self, payload: dict[str, object]) -> DetectionBatch: ...
+
+    def replace_state(
+        self,
+        checkpoints: Sequence[DetectorStateCheckpoint],
+    ) -> None: ...
 
 
 class AtomicDetectionStore(Protocol):
@@ -62,19 +89,7 @@ class AtomicDetectionStore(Protocol):
         batch: DetectionBatch,
     ) -> StoredEvent: ...
 
-
-class DetectionPort(Protocol):
-    def detect(self, payload: dict[str, object]) -> Sequence[PreparedSignal]: ...
-
-
-class ReliableProcessingStore(Protocol):
-    def find_processed(self, event: BrokerEvent) -> StoredEvent | None: ...
-
-    def persist_once(
-        self,
-        event: BrokerEvent,
-        signals: Sequence[PreparedSignal],
-    ) -> StoredEvent: ...
+    def load_state_checkpoints(self) -> tuple[DetectorStateCheckpoint, ...]: ...
 
 
 class SignalPublisher(Protocol):
@@ -103,8 +118,14 @@ class ReliableEventProcessor:
             self._observe(event, existing, started)
             return existing
 
-        batch = self._detector.detect_batch(event.payload)
-        stored = self._store.persist_detection_once(event, batch)
+        try:
+            batch = self._detector.detect_batch(event.payload)
+            stored = self._store.persist_detection_once(event, batch)
+        except Exception:
+            # Detection mutates rolling windows before the database transaction.
+            # PostgreSQL is the recovery source of truth after a rollback.
+            self._detector.replace_state(self._store.load_state_checkpoints())
+            raise
         self._publisher.publish(stored.signals)
         self._observe(event, stored, started)
         return stored

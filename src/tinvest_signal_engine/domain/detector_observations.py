@@ -10,6 +10,7 @@ from uuid import UUID, uuid5
 
 _OBSERVATION_NAMESPACE = UUID("be07e46a-0cbd-5a48-9868-ad4244845b37")
 HISTORY_SAMPLING_POLICY_VERSION = "history-evaluation-v1"
+PROVENANCE_STATUSES = frozenset({"complete", "legacy"})
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,15 @@ class DetectorObservation:
             raise ValueError("detector_passed requires threshold_passed")
         if self.signal_emitted and not self.detector_passed:
             raise ValueError("signal_emitted requires detector_passed")
+        if self.provenance_status not in PROVENANCE_STATUSES:
+            raise ValueError("unsupported observation provenance_status")
+        if (
+            self.provenance_status == "complete"
+            and not self.expectation_catalog_version
+        ):
+            raise ValueError(
+                "complete observation provenance requires expectation catalog"
+            )
 
 
 def deterministic_observation_id(

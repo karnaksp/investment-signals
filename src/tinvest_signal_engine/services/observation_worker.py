@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from tinvest_signal_engine.adapters.clickhouse_detector_observations import (
     ClickHouseDetectorObservationSink,
@@ -23,8 +23,16 @@ from tinvest_signal_engine.application.observation_publication import (
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.logging_utils import configure_logging
 
-
 logger = logging.getLogger(__name__)
+
+
+def validate_transport_timing(*, timeout_seconds: float, lease_seconds: int) -> None:
+    if timeout_seconds <= 0:
+        raise ValueError("observation ClickHouse timeout must be positive")
+    if timeout_seconds >= lease_seconds:
+        raise ValueError(
+            "observation ClickHouse timeout must be shorter than claim lease"
+        )
 
 
 def main() -> None:
@@ -39,6 +47,10 @@ def main() -> None:
         raise RuntimeError(
             "CLICKHOUSE_PASSWORD or CLICKHOUSE_PASSWORD_FILE is required"
         )
+    validate_transport_timing(
+        timeout_seconds=settings.observation_worker_clickhouse_timeout_seconds,
+        lease_seconds=settings.observation_worker_claim_lease_seconds,
+    )
 
     queue = connect_observation_publication_queue(settings)
     sink = ClickHouseDetectorObservationSink(
@@ -46,6 +58,7 @@ def main() -> None:
         database=(os.getenv("CLICKHOUSE_DATABASE") or "signal_engine").strip(),
         username=settings.clickhouse_http_username,
         password=settings.clickhouse_http_password,
+        timeout_seconds=(settings.observation_worker_clickhouse_timeout_seconds),
     )
     worker = DurableObservationPublisher(
         queue=queue,
@@ -53,14 +66,23 @@ def main() -> None:
         metrics=PrometheusReliabilityMetrics(),
         clock=lambda: datetime.now(tz=timezone.utc),
         lease_seconds=settings.observation_worker_claim_lease_seconds,
+        batch_size=settings.observation_worker_batch_size,
         maximum_attempts=settings.observation_worker_max_attempts,
         retry_base_seconds=settings.observation_worker_retry_base_seconds,
         retry_maximum_seconds=settings.observation_worker_retry_max_seconds,
     )
     logger.info("Starting detector observation publication worker")
+    next_purge_at = 0.0
     try:
         while True:
             result = worker.run_once()
+            monotonic_now = time.monotonic()
+            if monotonic_now >= next_purge_at:
+                queue.purge_published(
+                    before=datetime.now(tz=timezone.utc) - timedelta(days=7),
+                    limit=1000,
+                )
+                next_purge_at = monotonic_now + 3600
             if result.outcome == "idle":
                 time.sleep(settings.observation_worker_poll_seconds)
     except KeyboardInterrupt:

@@ -308,6 +308,8 @@ class RuntimeSettings:
     delivery_worker_metrics_listen_port: int | None
     observation_worker_poll_seconds: float
     observation_worker_claim_lease_seconds: int
+    observation_worker_batch_size: int
+    observation_worker_clickhouse_timeout_seconds: float
     observation_worker_max_attempts: int
     observation_worker_retry_base_seconds: int
     observation_worker_retry_max_seconds: int
@@ -578,6 +580,12 @@ class RuntimeSettings:
             ),
             observation_worker_claim_lease_seconds=int(
                 os.getenv("OBSERVATION_WORKER_CLAIM_LEASE_SECONDS", "60")
+            ),
+            observation_worker_batch_size=int(
+                os.getenv("OBSERVATION_WORKER_BATCH_SIZE", "250")
+            ),
+            observation_worker_clickhouse_timeout_seconds=float(
+                os.getenv("OBSERVATION_WORKER_CLICKHOUSE_TIMEOUT_SECONDS", "15")
             ),
             observation_worker_max_attempts=int(
                 os.getenv("OBSERVATION_WORKER_MAX_ATTEMPTS", "8")

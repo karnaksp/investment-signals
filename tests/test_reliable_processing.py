@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -110,13 +111,26 @@ def _observation() -> DetectorObservation:
 @dataclass
 class FakeDetector:
     calls: int = 0
+    restored: int = 0
+    state_value: int = 0
+    observed_states: list[int] = field(default_factory=list)
+    fail_next_detect: bool = False
 
     def detect_batch(self, payload) -> DetectionBatch:
         self.calls += 1
+        self.state_value += 1
+        self.observed_states.append(self.state_value)
+        if self.fail_next_detect:
+            self.fail_next_detect = False
+            raise RuntimeError("detection adapter failed after mutation")
         return DetectionBatch(
             signals=(PreparedSignal(_signal()),),
             observations=(_observation(),),
         )
+
+    def replace_state(self, checkpoints) -> None:
+        self.restored += 1
+        self.state_value = 0
 
 
 @dataclass
@@ -124,6 +138,9 @@ class FakeStore:
     stored: StoredEvent | None = None
     fail_next_persist: bool = False
     observations: tuple[DetectorObservation, ...] = ()
+
+    def load_state_checkpoints(self):
+        return ()
 
     def find_processed(self, event: BrokerEvent) -> StoredEvent | None:
         if self.stored is None:
@@ -172,6 +189,7 @@ def test_crash_after_database_commit_replays_without_duplicate_detection() -> No
 
     assert replayed.replayed is True
     assert detector.calls == 1
+    assert detector.observed_states == [1]
     assert publisher.published == [_signal().signal_id]
     assert len(store.stored.signals) == 1  # type: ignore[union-attr]
     assert store.observations == (_observation(),)
@@ -194,8 +212,35 @@ def test_database_rollback_allows_retry_without_losing_signal() -> None:
 
     assert stored.replayed is False
     assert detector.calls == 2
+    assert detector.restored == 1
+    assert detector.observed_states == [1, 1]
     assert publisher.published == [_signal().signal_id]
     assert len(stored.signals) == 1
+
+
+def test_complete_signal_provenance_requires_catalog_and_closed_status() -> None:
+    with pytest.raises(ValueError, match="all versions"):
+        replace(_signal(), expectation_catalog_version=None)
+    with pytest.raises(ValueError, match="unsupported"):
+        replace(_signal(), provenance_status="unknown")
+
+
+def test_detection_failure_restores_durable_state_before_retry() -> None:
+    detector = FakeDetector(fail_next_detect=True)
+    store = FakeStore()
+    processor = ReliableEventProcessor(
+        detector=detector,
+        store=store,
+        publisher=FakePublisher(),
+        metrics=FakeMetrics(),
+    )
+
+    with pytest.raises(RuntimeError, match="after mutation"):
+        processor.process(_event())
+    processor.process(_event())
+
+    assert detector.observed_states == [1, 1]
+    assert detector.restored == 1
 
 
 @dataclass
@@ -212,9 +257,7 @@ class FakeQueue:
         self.delivered += 1
 
     def mark_failed(self, task, **kwargs) -> None:
-        self.failures.append(
-            (bool(kwargs["dead_letter"]), task.attempt_count)
-        )
+        self.failures.append((bool(kwargs["dead_letter"]), task.attempt_count))
 
 
 @dataclass
@@ -273,9 +316,9 @@ def test_delivery_failure_moves_to_dead_letter_at_limit() -> None:
 
 
 def test_redis_runtime_uses_aof_and_noeviction() -> None:
-    config = (
-        Path(__file__).resolve().parents[1] / "conf" / "redis.conf"
-    ).read_text(encoding="utf-8")
+    config = (Path(__file__).resolve().parents[1] / "conf" / "redis.conf").read_text(
+        encoding="utf-8"
+    )
 
     assert "appendonly yes" in config
     assert "appendfsync everysec" in config

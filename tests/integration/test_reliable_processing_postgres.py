@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 import os
+import json
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from tinvest_signal_engine.adapters.postgres_reliability import (
     PostgresDeliveryQueue,
     PostgresObservationPublicationQueue,
     PostgresReliableProcessingStore,
+    detector_observation_to_dict,
+    signal_record_to_dict,
 )
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
     DetectionBatch,
+    DetectorStateCheckpoint,
 )
 from tinvest_signal_engine.domain.detector_observations import DetectorObservation
 from tinvest_signal_engine.domain.reliable_processing import (
@@ -27,7 +33,6 @@ from tinvest_signal_engine.domain.reliable_processing import (
     PreparedSignal,
     SignalRecord,
 )
-
 
 pytestmark = pytest.mark.integration
 
@@ -68,17 +73,34 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
                 (DeliveryTarget("webhook", "https://local.invalid/hook"),),
             ),
         )
+        stored_signal = prepared[0].signal
 
         batch = DetectionBatch(
             signals=prepared,
             observations=(_observation(event),),
+            checkpoint=_checkpoint(event),
         )
         first = store.persist_detection_once(event, batch)
         replay = store.persist_detection_once(event, batch)
+        stale_payload = b'{"instrument_id":"SBER_TQBR","offset":0}'
+        replay_with_stale_state = store.persist_detection_once(
+            event,
+            DetectionBatch(
+                checkpoint=DetectorStateCheckpoint(
+                    instrument_id="SBER_TQBR",
+                    state_schema_version="detector-state-v1",
+                    detector_config_version="detector-stale",
+                    payload=stale_payload,
+                    payload_sha256=sha256(stale_payload).digest(),
+                )
+            ),
+        )
 
         assert first.replayed is False
         assert replay.replayed is True
+        assert replay_with_stale_state.replayed is True
         assert len(replay.signals) == 1
+        assert store.load_state_checkpoints() == (_checkpoint(event),)
         with pytest.raises(EventReplayConflict):
             store.find_processed(replace(event, payload_sha256=b"d" * 32))
         with connection.cursor() as cursor:
@@ -90,6 +112,88 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
             assert cursor.fetchone()[0] == 1
             cursor.execute("SELECT count(*) FROM detector_observation_outbox")
             assert cursor.fetchone()[0] == 1
+
+        with connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                UPDATE delivery_outbox
+                SET payload_json = '{"tampered":true}'::jsonb
+                WHERE signal_id = %s
+                """,
+                (stored_signal.signal_id,),
+            )
+            with pytest.raises(EventReplayConflict, match="delivery target"):
+                store._insert_outbox(
+                    cursor,
+                    stored_signal,
+                    DeliveryTarget("webhook", "https://local.invalid/hook"),
+                )
+            cursor.execute(
+                """
+                UPDATE delivery_outbox
+                SET payload_json = %s::jsonb
+                WHERE signal_id = %s
+                """,
+                (
+                    json.dumps(signal_record_to_dict(stored_signal)),
+                    stored_signal.signal_id,
+                ),
+            )
+
+        signal_collision_event = _event("signal-collision", 41)
+        original_signal = _signal(signal_collision_event)
+        with pytest.raises(EventReplayConflict, match="signal id"):
+            store.persist_detection_once(
+                signal_collision_event,
+                DetectionBatch(
+                    signals=(
+                        PreparedSignal(original_signal),
+                        PreparedSignal(
+                            replace(original_signal, summary="different content")
+                        ),
+                    ),
+                    checkpoint=_checkpoint(signal_collision_event),
+                ),
+            )
+        bad_source_event = _event("bad-source", 42)
+        with pytest.raises(ValueError, match="must match broker event"):
+            store.persist_detection_once(
+                bad_source_event,
+                DetectionBatch(
+                    signals=(
+                        PreparedSignal(
+                            replace(
+                                _signal(bad_source_event),
+                                source_event_id="different-event",
+                            )
+                        ),
+                    ),
+                    checkpoint=_checkpoint(bad_source_event),
+                ),
+            )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*) FROM processed_events
+                WHERE event_id IN (%s, %s)
+                """,
+                (signal_collision_event.event_id, bad_source_event.event_id),
+            )
+            assert cursor.fetchone()[0] == 0
+
+        older_event = _event("older-state", 0)
+        with pytest.raises(EventReplayConflict, match="did not advance"):
+            store.persist_detection_once(
+                older_event,
+                DetectionBatch(checkpoint=_checkpoint(older_event)),
+            )
+        assert store.load_state_checkpoints() == (_checkpoint(event),)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM processed_events WHERE event_id = %s",
+                (older_event.event_id,),
+            )
+            assert cursor.fetchone()[0] == 0
 
         queue = PostgresDeliveryQueue(connection)
         claim_at = datetime.now(tz=timezone.utc)
@@ -121,25 +225,27 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
             ),
         )
         with connection.cursor() as cursor:
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE FUNCTION fail_outbox_insert() RETURNS trigger
                 LANGUAGE plpgsql AS $$
                 BEGIN
                     RAISE EXCEPTION 'simulated outbox crash';
                 END
                 $$
-                """
-            )
-            cursor.execute(
-                """
+                """)
+            cursor.execute("""
                 CREATE TRIGGER fail_outbox_insert
                 BEFORE INSERT ON delivery_outbox
                 FOR EACH ROW EXECUTE FUNCTION fail_outbox_insert()
-                """
-            )
+                """)
         with pytest.raises(psycopg.errors.RaiseException):
-            store.persist_once(failed_event, failed_prepared)
+            store.persist_detection_once(
+                failed_event,
+                DetectionBatch(
+                    signals=failed_prepared,
+                    checkpoint=_checkpoint(failed_event),
+                ),
+            )
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*) FROM processed_events WHERE event_id = %s",
@@ -154,32 +260,35 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
             cursor.execute("DROP TRIGGER fail_outbox_insert ON delivery_outbox")
             cursor.execute("DROP FUNCTION fail_outbox_insert()")
 
-        retried = store.persist_once(failed_event, failed_prepared)
+        retried = store.persist_detection_once(
+            failed_event,
+            DetectionBatch(
+                signals=failed_prepared,
+                checkpoint=_checkpoint(failed_event),
+            ),
+        )
         assert retried.replayed is False
         assert len(retried.signals) == 1
 
         observation_event = _event("3", 3)
         observation_batch = DetectionBatch(
-            observations=(_observation(observation_event),)
+            observations=(_observation(observation_event),),
+            checkpoint=_checkpoint(observation_event),
         )
         with connection.cursor() as cursor:
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE FUNCTION fail_observation_insert() RETURNS trigger
                 LANGUAGE plpgsql AS $$
                 BEGIN
                     RAISE EXCEPTION 'simulated observation outbox crash';
                 END
                 $$
-                """
-            )
-            cursor.execute(
-                """
+                """)
+            cursor.execute("""
                 CREATE TRIGGER fail_observation_insert
                 BEFORE INSERT ON detector_observation_outbox
                 FOR EACH ROW EXECUTE FUNCTION fail_observation_insert()
-                """
-            )
+                """)
         with pytest.raises(psycopg.errors.RaiseException):
             store.persist_detection_once(observation_event, observation_batch)
         with connection.cursor() as cursor:
@@ -196,12 +305,10 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
                 (observation_event.event_id,),
             )
             assert cursor.fetchone()[0] == 0
-            cursor.execute(
-                """
+            cursor.execute("""
                 DROP TRIGGER fail_observation_insert
                 ON detector_observation_outbox
-                """
-            )
+                """)
             cursor.execute("DROP FUNCTION fail_observation_insert()")
 
         observation_retry = store.persist_detection_once(
@@ -210,10 +317,53 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
         )
         assert observation_retry.replayed is False
 
+        checkpoint_event = _event("checkpoint-failure", 7)
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE FUNCTION fail_checkpoint_write() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION 'simulated checkpoint crash';
+                END
+                $$
+                """)
+            cursor.execute("""
+                CREATE TRIGGER fail_checkpoint_write
+                BEFORE UPDATE ON detector_state_snapshots
+                FOR EACH ROW EXECUTE FUNCTION fail_checkpoint_write()
+                """)
+        with pytest.raises(psycopg.errors.RaiseException):
+            store.persist_detection_once(
+                checkpoint_event,
+                DetectionBatch(
+                    observations=(_observation(checkpoint_event),),
+                    checkpoint=_checkpoint(checkpoint_event),
+                ),
+            )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM processed_events WHERE event_id = %s",
+                (checkpoint_event.event_id,),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                """
+                SELECT count(*) FROM detector_observation_outbox
+                WHERE source_event_id = %s
+                """,
+                (checkpoint_event.event_id,),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                "DROP TRIGGER fail_checkpoint_write ON detector_state_snapshots"
+            )
+            cursor.execute("DROP FUNCTION fail_checkpoint_write()")
+
         collision_event = _event("4", 4)
         original = _observation(collision_event)
         collision_batch = DetectionBatch(
-            observations=(original, replace(original, metric_value=999.0))
+            observations=(original, replace(original, metric_value=999.0)),
+            checkpoint=_checkpoint(collision_event),
         )
         with pytest.raises(
             EventReplayConflict,
@@ -249,7 +399,10 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
         retry_event = _event("5", 5)
         store.persist_detection_once(
             retry_event,
-            DetectionBatch(observations=(_observation(retry_event),)),
+            DetectionBatch(
+                observations=(_observation(retry_event),),
+                checkpoint=_checkpoint(retry_event),
+            ),
         )
         retry_time = datetime.now(tz=timezone.utc)
         retry_task = observation_queue.claim(
@@ -278,7 +431,10 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
         reclaim_event = _event("6", 6)
         store.persist_detection_once(
             reclaim_event,
-            DetectionBatch(observations=(_observation(reclaim_event),)),
+            DetectionBatch(
+                observations=(_observation(reclaim_event),),
+                checkpoint=_checkpoint(reclaim_event),
+            ),
         )
         reclaim_time = datetime.now(tz=timezone.utc)
         leased = observation_queue.claim(
@@ -297,6 +453,61 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
             reclaimed,
             published_at=reclaim_time + timedelta(seconds=2),
         )
+
+        retention_source = event.event_id
+        old_payload = json.dumps(detector_observation_to_dict(_observation(event)))
+        old_published_id = str(uuid.uuid4())
+        old_dead_letter_id = str(uuid.uuid4())
+        old_time = datetime.now(tz=timezone.utc) - timedelta(days=8)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO detector_observation_outbox (
+                    observation_id, source_event_id, payload_json, status,
+                    attempt_count, next_attempt_at, created_at, published_at
+                ) VALUES (%s, %s, %s::jsonb, 'published', 1, %s, %s, %s)
+                """,
+                (
+                    old_published_id,
+                    retention_source,
+                    old_payload,
+                    old_time,
+                    old_time,
+                    old_time,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO detector_observation_outbox (
+                    observation_id, source_event_id, payload_json, status,
+                    attempt_count, next_attempt_at, created_at
+                ) VALUES (%s, %s, %s::jsonb, 'dead_letter', 8, %s, %s)
+                """,
+                (
+                    old_dead_letter_id,
+                    retention_source,
+                    old_payload,
+                    old_time,
+                    old_time,
+                ),
+            )
+        assert (
+            observation_queue.purge_published(
+                before=datetime.now(tz=timezone.utc) - timedelta(days=7),
+                limit=100,
+            )
+            == 1
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT observation_id, status
+                FROM detector_observation_outbox
+                WHERE observation_id IN (%s, %s)
+                """,
+                (old_published_id, old_dead_letter_id),
+            )
+            assert cursor.fetchall() == [(uuid.UUID(old_dead_letter_id), "dead_letter")]
     finally:
         with connection.cursor() as cursor:
             cursor.execute("SET search_path TO public")
@@ -312,7 +523,18 @@ def _event(suffix: str, offset: int) -> BrokerEvent:
         partition_id=0,
         offset_id=offset,
         payload_sha256=b"p" * 32,
-        payload={},
+        payload={"instrument_id": "SBER_TQBR"},
+    )
+
+
+def _checkpoint(event: BrokerEvent) -> DetectorStateCheckpoint:
+    payload = (f'{{"instrument_id":"SBER_TQBR","offset":{event.offset_id}}}').encode()
+    return DetectorStateCheckpoint(
+        instrument_id="SBER_TQBR",
+        state_schema_version="detector-state-v1",
+        detector_config_version="detector-1",
+        payload=payload,
+        payload_sha256=sha256(payload).digest(),
     )
 
 

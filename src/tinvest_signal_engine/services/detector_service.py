@@ -41,6 +41,7 @@ def main() -> None:
     detector = LegacyDetectionAdapter(
         settings,
         delivered_count_since=store.count_delivered_since,
+        checkpoints=store.load_state_checkpoints(),
     )
     metrics = PrometheusReliabilityMetrics()
     publisher = KafkaSignalPublisher(settings)

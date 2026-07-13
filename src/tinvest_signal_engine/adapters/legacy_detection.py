@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from typing import Callable
+from hashlib import sha256
+from typing import Callable, Sequence
 
-from tinvest_signal_engine.application.reliable_processing import DetectionBatch
+from tinvest_signal_engine.application.reliable_processing import (
+    DetectionBatch,
+    DetectorStateCheckpoint,
+)
 from tinvest_signal_engine.config import RuntimeSettings, load_detector_config
 from tinvest_signal_engine.delivery_policy import DELIVERY_DELIVERED, DeliveryPolicy
 from tinvest_signal_engine.detector_core import SignalDetector
+from tinvest_signal_engine.detector_state_persist import (
+    export_instrument_state,
+    replace_instrument_states,
+)
 from tinvest_signal_engine.domain.configuration import content_version
 from tinvest_signal_engine.domain.reliable_processing import (
     DeliveryTarget,
@@ -17,14 +26,12 @@ from tinvest_signal_engine.domain.reliable_processing import (
     SignalRecord,
 )
 from tinvest_signal_engine.models import NormalizedEvent, TriggerSignal
-from tinvest_signal_engine.redis_detector_state import (
-    flush_detector_to_redis,
-    hydrate_detector_from_redis,
-)
+from tinvest_signal_engine.redis_detector_state import flush_detector_to_redis
+from tinvest_signal_engine.serialization import json_dumps_bytes
 from tinvest_signal_engine.signal_enrichment import enrich_signal_for_delivery
 
-
 logger = logging.getLogger(__name__)
+_STATE_SCHEMA_VERSION = "detector-state-v1"
 
 
 class LegacyDetectionAdapter:
@@ -33,10 +40,11 @@ class LegacyDetectionAdapter:
         settings: RuntimeSettings,
         *,
         delivered_count_since: Callable[..., int],
+        checkpoints: Sequence[DetectorStateCheckpoint] = (),
     ) -> None:
         self._settings = settings
         self._detector = self._build_detector()
-        hydrate_detector_from_redis(self._detector, settings.redis_url)
+        self.replace_state(checkpoints)
         self._detector_mtime = settings.detector_path.stat().st_mtime
         self._overrides_mtime = self._current_overrides_mtime()
         self._last_config_poll = time.monotonic()
@@ -75,7 +83,35 @@ class LegacyDetectionAdapter:
                     delivery_targets=targets,
                 )
             )
-        return DetectionBatch(tuple(prepared), observations)
+        state_payload = json_dumps_bytes(
+            export_instrument_state(self._detector, event.instrument_id)
+        )
+        checkpoint = DetectorStateCheckpoint(
+            instrument_id=event.instrument_id,
+            state_schema_version=_STATE_SCHEMA_VERSION,
+            detector_config_version=self._detector_config_version(),
+            payload=state_payload,
+            payload_sha256=sha256(state_payload).digest(),
+        )
+        return DetectionBatch(tuple(prepared), observations, checkpoint)
+
+    def replace_state(
+        self,
+        checkpoints: Sequence[DetectorStateCheckpoint],
+    ) -> None:
+        payloads: list[dict[str, object]] = []
+        for checkpoint in checkpoints:
+            if checkpoint.state_schema_version != _STATE_SCHEMA_VERSION:
+                raise ValueError("unsupported detector checkpoint schema")
+            if sha256(checkpoint.payload).digest() != checkpoint.payload_sha256:
+                raise ValueError("detector checkpoint checksum mismatch")
+            decoded = json.loads(checkpoint.payload)
+            if not isinstance(decoded, dict):
+                raise ValueError("detector checkpoint must contain an object")
+            if decoded.get("instrument_id") != checkpoint.instrument_id:
+                raise ValueError("detector checkpoint instrument mismatch")
+            payloads.append(decoded)
+        replace_instrument_states(self._detector, payloads)
 
     def checkpoint(self) -> None:
         flush_detector_to_redis(self._detector, self._settings.redis_url)
@@ -126,8 +162,13 @@ class LegacyDetectionAdapter:
         ):
             return
         self.checkpoint()
+        payloads = [
+            export_instrument_state(self._detector, instrument_id)
+            for instrument_id in set(self._detector._states)
+            | set(self._detector._mid_track)
+        ]
         replacement = self._build_detector()
-        hydrate_detector_from_redis(replacement, self._settings.redis_url)
+        replace_instrument_states(replacement, payloads)
         self._detector = replacement
         self._detector_mtime = detector_mtime
         self._overrides_mtime = overrides_mtime

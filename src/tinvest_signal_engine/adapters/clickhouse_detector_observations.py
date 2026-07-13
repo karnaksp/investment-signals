@@ -1,9 +1,16 @@
-"""ClickHouse sink for validated detector observations."""
+"""At-least-once ClickHouse transport for immutable detector observations.
+
+Retries may create duplicate rows after an ambiguous HTTP result. Evidence readers
+must group by ``observation_id`` and require one canonical ``payload_fingerprint``;
+transport deduplication is deliberately not an evidence-correctness mechanism.
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Mapping
+from datetime import datetime, timezone
+from hashlib import sha256
+from typing import Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -13,39 +20,27 @@ from tinvest_signal_engine.application.observation_publication import (
     ObservationPublicationFailure,
 )
 from tinvest_signal_engine.domain.detector_observations import DetectorObservation
-
+from tinvest_signal_engine.serialization import parse_timestamp
 
 _MOSCOW = ZoneInfo("Europe/Moscow")
-
-INSERT_DETECTOR_OBSERVATION_SQL = """
-INSERT INTO detector_observations
-(
-    signal_type, instrument_id, session_date, observed_at,
-    observation_id, source_event_id, detector_config_version,
-    expectation_catalog_version, metric_value, threshold_value,
-    threshold_passed, sample_weight, features_json
+_INSERT_SQL = "INSERT INTO detector_observations FORMAT JSONEachRow\n"
+_FINGERPRINT_FIELDS = frozenset(
+    {
+        "signal_type",
+        "instrument_id",
+        "session_date",
+        "observed_at",
+        "observation_id",
+        "source_event_id",
+        "detector_config_version",
+        "expectation_catalog_version",
+        "metric_value",
+        "threshold_value",
+        "threshold_passed",
+        "sample_weight",
+        "features_json",
+    }
 )
-SELECT
-    {signal_type:String},
-    {instrument_id:String},
-    toDate({session_date:String}),
-    parseDateTime64BestEffort({observed_at:String}, 9, 'UTC'),
-    toUUID({observation_id:String}),
-    {source_event_id:String},
-    {detector_config_version:String},
-    {expectation_catalog_version:String},
-    {metric_value:Float64},
-    {threshold_value:Float64},
-    {threshold_passed:UInt8},
-    {sample_weight:Float64},
-    {features_json:String}
-WHERE NOT EXISTS
-(
-    SELECT 1
-    FROM detector_observations
-    WHERE observation_id = toUUID({observation_id:String})
-)
-""".strip()
 
 
 class ClickHouseDetectorObservationSink:
@@ -60,6 +55,8 @@ class ClickHouseDetectorObservationSink:
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("ClickHouse URL must use HTTP or HTTPS")
+        if timeout_seconds <= 0:
+            raise ValueError("ClickHouse timeout must be positive")
         self._base_url = base_url.rstrip("/")
         self._database = database
         self._username = username
@@ -67,15 +64,28 @@ class ClickHouseDetectorObservationSink:
         self._timeout_seconds = timeout_seconds
 
     def persist(self, observation: DetectorObservation) -> None:
-        parameters = _parameters(observation)
-        query = {
-            "database": self._database,
-            "insert_deduplication_token": observation.observation_id,
-        }
-        query.update({f"param_{key}": value for key, value in parameters.items()})
+        self.persist_many((observation,))
+
+    def persist_many(
+        self,
+        observations: Sequence[DetectorObservation],
+    ) -> None:
+        if not observations:
+            return
+        rows = [_row(observation) for observation in observations]
+        body = _INSERT_SQL + "\n".join(
+            json.dumps(
+                row,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            for row in rows
+        )
         request = Request(
-            f"{self._base_url}/?{urlencode(query)}",
-            data=INSERT_DETECTOR_OBSERVATION_SQL.encode("utf-8"),
+            f"{self._base_url}/?{urlencode({'database': self._database})}",
+            data=body.encode("utf-8"),
             headers={
                 "Content-Type": "text/plain; charset=utf-8",
                 "X-ClickHouse-User": self._username,
@@ -90,11 +100,11 @@ class ClickHouseDetectorObservationSink:
             raise ObservationPublicationFailure(
                 f"clickhouse_http_{error.code}"
             ) from error
-        except URLError as error:
+        except (URLError, TimeoutError, ConnectionResetError) as error:
             raise ObservationPublicationFailure("clickhouse_unavailable") from error
 
 
-def _parameters(observation: DetectorObservation) -> Mapping[str, str]:
+def _row(observation: DetectorObservation) -> dict[str, object]:
     features = {
         "baseline_value": observation.baseline_value,
         "detector_passed": observation.detector_passed,
@@ -105,19 +115,19 @@ def _parameters(observation: DetectorObservation) -> Mapping[str, str]:
         "window_seconds": observation.window_seconds,
         "z_score": observation.z_score,
     }
-    return {
+    row: dict[str, object] = {
         "signal_type": observation.signal_type,
         "instrument_id": observation.instrument_id,
         "session_date": observation.observed_at.astimezone(_MOSCOW).date().isoformat(),
-        "observed_at": observation.observed_at.isoformat(),
+        "observed_at": _canonical_utc_timestamp(observation.observed_at),
         "observation_id": observation.observation_id,
         "source_event_id": observation.source_event_id,
         "detector_config_version": observation.detector_config_version,
-        "expectation_catalog_version": (observation.expectation_catalog_version or ""),
-        "metric_value": repr(observation.metric_value),
-        "threshold_value": repr(observation.threshold_value),
-        "threshold_passed": "1" if observation.threshold_passed else "0",
-        "sample_weight": "1",
+        "expectation_catalog_version": observation.expectation_catalog_version or "",
+        "metric_value": observation.metric_value,
+        "threshold_value": observation.threshold_value,
+        "threshold_passed": 1 if observation.threshold_passed else 0,
+        "sample_weight": 1.0,
         "features_json": json.dumps(
             features,
             allow_nan=False,
@@ -126,3 +136,69 @@ def _parameters(observation: DetectorObservation) -> Mapping[str, str]:
             sort_keys=True,
         ),
     }
+    row["payload_fingerprint"] = detector_observation_payload_fingerprint(row)
+    return row
+
+
+def detector_observation_payload_fingerprint(
+    row_without_fingerprint: Mapping[str, object],
+) -> str:
+    """Reproduce the stored fingerprint from producer or ClickHouse readback values."""
+
+    if set(row_without_fingerprint) != _FINGERPRINT_FIELDS:
+        raise ValueError("detector observation fingerprint fields do not match contract")
+    features = row_without_fingerprint["features_json"]
+    if not isinstance(features, str):
+        raise ValueError("detector observation features_json must be a string")
+    decoded_features = json.loads(features)
+    if not isinstance(decoded_features, dict):
+        raise ValueError("detector observation features_json must contain an object")
+    threshold_passed = int(row_without_fingerprint["threshold_passed"])
+    if threshold_passed not in (0, 1):
+        raise ValueError("detector observation threshold_passed must be 0 or 1")
+    canonical_row = {
+        "signal_type": str(row_without_fingerprint["signal_type"]),
+        "instrument_id": str(row_without_fingerprint["instrument_id"]),
+        "session_date": str(row_without_fingerprint["session_date"]),
+        "observed_at": _canonical_utc_timestamp(
+            row_without_fingerprint["observed_at"]
+        ),
+        "observation_id": str(row_without_fingerprint["observation_id"]),
+        "source_event_id": str(row_without_fingerprint["source_event_id"]),
+        "detector_config_version": str(
+            row_without_fingerprint["detector_config_version"]
+        ),
+        "expectation_catalog_version": str(
+            row_without_fingerprint["expectation_catalog_version"]
+        ),
+        "metric_value": float(row_without_fingerprint["metric_value"]),
+        "threshold_value": float(row_without_fingerprint["threshold_value"]),
+        "threshold_passed": threshold_passed,
+        "sample_weight": float(row_without_fingerprint["sample_weight"]),
+        "features_json": json.dumps(
+            decoded_features,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }
+    canonical = json.dumps(
+        canonical_row,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(canonical).hexdigest()
+
+
+def _canonical_utc_timestamp(value: object) -> str:
+    if not isinstance(value, (str, datetime)):
+        raise ValueError("detector observation observed_at must be a timestamp")
+    return (
+        parse_timestamp(value)
+        .astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )

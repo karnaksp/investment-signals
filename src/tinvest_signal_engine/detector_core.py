@@ -158,7 +158,18 @@ class SignalDetector:
             detector_config_version=self._detector_config_version,
             delivery_config_version=self._delivery_config_version,
             cost_model_version=self._cost_model_version,
-            provenance_status="complete",
+            provenance_status=(
+                "complete"
+                if all(
+                    (
+                        self._expectation_catalog_version,
+                        self._detector_config_version,
+                        self._delivery_config_version,
+                        self._cost_model_version,
+                    )
+                )
+                else "legacy"
+            ),
         )
 
     @staticmethod
@@ -1005,7 +1016,10 @@ class SignalDetector:
                 detector_config_version=detector_config_version,
                 expectation_catalog_version=self._expectation_catalog_version,
                 provenance_status=(
-                    "complete" if self._detector_config_version else "legacy"
+                    "complete"
+                    if self._detector_config_version
+                    and self._expectation_catalog_version
+                    else "legacy"
                 ),
             )
         )

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timezone
 
+import pytest
+
+from tinvest_signal_engine.adapters.legacy_detection import LegacyDetectionAdapter
 from tinvest_signal_engine.application.reliable_processing import DetectionBatch
-from tinvest_signal_engine.config import DetectorSettings
+from tinvest_signal_engine.config import DetectorSettings, RuntimeSettings
 from tinvest_signal_engine.detector_core import InstrumentState, SignalDetector
 from tinvest_signal_engine.domain.detector_observations import (
     HISTORY_SAMPLING_POLICY_VERSION,
@@ -130,3 +134,39 @@ def test_detection_batch_keeps_signals_and_observations_in_one_unit() -> None:
 
     assert batch.signals == ()
     assert batch.observations == (observation,)
+
+
+def test_observation_provenance_requires_catalog_and_closed_status() -> None:
+    observation = _below_threshold_observation()
+    with pytest.raises(ValueError, match="expectation catalog"):
+        replace(observation, expectation_catalog_version=None)
+    with pytest.raises(ValueError, match="unsupported"):
+        replace(observation, provenance_status="unknown")
+
+
+def test_legacy_adapter_checkpoint_hydrates_restart_from_opaque_payload() -> None:
+    settings = RuntimeSettings.from_env()
+    first = LegacyDetectionAdapter(
+        settings,
+        delivered_count_since=lambda **kwargs: 0,
+    )
+    event = _event()
+    event = replace(
+        event,
+        payload={
+            "quantity": 10,
+            "price": {"units": 100, "nano": 0},
+        },
+    )
+
+    checkpoint = first.detect_batch(event.to_dict()).checkpoint
+
+    assert checkpoint is not None
+    restarted = LegacyDetectionAdapter(
+        settings,
+        delivered_count_since=lambda **kwargs: 0,
+        checkpoints=(checkpoint,),
+    )
+    restored = restarted._detector._states[event.instrument_id]
+    assert len(restored.trade_points) == 1
+    assert restored.trade_points[0].quantity == 10.0

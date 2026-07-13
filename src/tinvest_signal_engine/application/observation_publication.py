@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, Protocol
+from typing import Callable, Protocol, Sequence
 
 from tinvest_signal_engine.domain.detector_observations import DetectorObservation
 from tinvest_signal_engine.domain.reliable_processing import retry_decision
@@ -21,12 +21,13 @@ class ObservationPublicationTask:
 
 
 class ObservationPublicationQueue(Protocol):
-    def claim(
+    def claim_many(
         self,
         *,
         available_at: datetime,
         lease_until: datetime,
-    ) -> ObservationPublicationTask | None: ...
+        limit: int,
+    ) -> tuple[ObservationPublicationTask, ...]: ...
 
     def mark_published(
         self,
@@ -44,9 +45,11 @@ class ObservationPublicationQueue(Protocol):
         dead_letter: bool,
     ) -> None: ...
 
+    def purge_published(self, *, before: datetime, limit: int) -> int: ...
+
 
 class ObservationSink(Protocol):
-    def persist(self, observation: DetectorObservation) -> None: ...
+    def persist_many(self, observations: Sequence[DetectorObservation]) -> None: ...
 
 
 class ObservationPublicationMetrics(Protocol):
@@ -67,7 +70,7 @@ class ObservationPublicationFailure(RuntimeError):
 @dataclass(frozen=True)
 class ObservationPublicationResult:
     outcome: str
-    task: ObservationPublicationTask | None
+    tasks: tuple[ObservationPublicationTask, ...]
 
 
 class DurableObservationPublisher:
@@ -79,6 +82,7 @@ class DurableObservationPublisher:
         metrics: ObservationPublicationMetrics,
         clock: Callable[[], datetime],
         lease_seconds: int,
+        batch_size: int,
         maximum_attempts: int,
         retry_base_seconds: int,
         retry_maximum_seconds: int,
@@ -88,44 +92,54 @@ class DurableObservationPublisher:
         self._metrics = metrics
         self._clock = clock
         self._lease_seconds = max(1, lease_seconds)
+        self._batch_size = max(1, batch_size)
         self._maximum_attempts = max(1, maximum_attempts)
         self._retry_base_seconds = max(1, retry_base_seconds)
         self._retry_maximum_seconds = max(1, retry_maximum_seconds)
 
     def run_once(self) -> ObservationPublicationResult:
         now = self._clock()
-        task = self._queue.claim(
+        tasks = self._queue.claim_many(
             available_at=now,
             lease_until=now + timedelta(seconds=self._lease_seconds),
+            limit=self._batch_size,
         )
-        if task is None:
-            return ObservationPublicationResult("idle", None)
+        if not tasks:
+            return ObservationPublicationResult("idle", ())
         try:
-            self._sink.persist(task.observation)
+            self._sink.persist_many(tuple(task.observation for task in tasks))
         except ObservationPublicationFailure as failure:
-            decision = retry_decision(
-                attempt_count=task.attempt_count,
-                maximum_attempts=self._maximum_attempts,
-                base_delay_seconds=self._retry_base_seconds,
-                maximum_delay_seconds=self._retry_maximum_seconds,
-            )
             failed_at = self._clock()
-            self._queue.mark_failed(
-                task,
-                reason_code=failure.reason_code,
-                next_attempt_at=(failed_at + timedelta(seconds=decision.delay_seconds)),
-                dead_letter=decision.dead_letter,
-            )
-            outcome = "dead_letter" if decision.dead_letter else "retry"
+            outcomes: set[str] = set()
+            for task in tasks:
+                decision = retry_decision(
+                    attempt_count=task.attempt_count,
+                    maximum_attempts=self._maximum_attempts,
+                    base_delay_seconds=self._retry_base_seconds,
+                    maximum_delay_seconds=self._retry_maximum_seconds,
+                )
+                self._queue.mark_failed(
+                    task,
+                    reason_code=failure.reason_code,
+                    next_attempt_at=(
+                        failed_at + timedelta(seconds=decision.delay_seconds)
+                    ),
+                    dead_letter=decision.dead_letter,
+                )
+                outcome = "dead_letter" if decision.dead_letter else "retry"
+                outcomes.add(outcome)
+                self._metrics.publication_attempted(
+                    outcome=outcome,
+                    attempt_count=task.attempt_count,
+                )
+            batch_outcome = "dead_letter" if outcomes == {"dead_letter"} else "retry"
+            return ObservationPublicationResult(batch_outcome, tasks)
+
+        published_at = self._clock()
+        for task in tasks:
+            self._queue.mark_published(task, published_at=published_at)
             self._metrics.publication_attempted(
-                outcome=outcome,
+                outcome="published",
                 attempt_count=task.attempt_count,
             )
-            return ObservationPublicationResult(outcome, task)
-
-        self._queue.mark_published(task, published_at=self._clock())
-        self._metrics.publication_attempted(
-            outcome="published",
-            attempt_count=task.attempt_count,
-        )
-        return ObservationPublicationResult("published", task)
+        return ObservationPublicationResult("published", tasks)

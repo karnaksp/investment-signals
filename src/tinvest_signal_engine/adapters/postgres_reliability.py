@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any
 
 from psycopg import connect
 from psycopg.rows import dict_row
@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
     DetectionBatch,
+    DetectorStateCheckpoint,
     StoredEvent,
 )
 from tinvest_signal_engine.application.observation_publication import (
@@ -23,11 +24,10 @@ from tinvest_signal_engine.domain.detector_observations import DetectorObservati
 from tinvest_signal_engine.domain.reliable_processing import (
     DeliveryTask,
     EventReplayConflict,
-    PreparedSignal,
     SignalRecord,
     deterministic_outbox_id,
 )
-from tinvest_signal_engine.serialization import json_dumps
+from tinvest_signal_engine.serialization import json_dumps, parse_timestamp
 
 
 def _safe_identifier(value: str) -> str:
@@ -50,16 +50,6 @@ class PostgresReliableProcessingStore:
             self._validate_inbox_row(row, event)
             signals = self._load_signals(cursor, event.event_id)
         return StoredEvent(signals=signals, replayed=True)
-
-    def persist_once(
-        self,
-        event: BrokerEvent,
-        signals: Sequence[PreparedSignal],
-    ) -> StoredEvent:
-        return self.persist_detection_once(
-            event,
-            DetectionBatch(signals=tuple(signals)),
-        )
 
     def persist_detection_once(
         self,
@@ -98,14 +88,107 @@ class PostgresReliableProcessingStore:
                     )
 
                 for prepared in batch.signals:
+                    self._validate_signal_association(event, prepared.signal)
                     self._insert_signal(cursor, prepared.signal)
                     for target in prepared.delivery_targets:
                         self._insert_outbox(cursor, prepared.signal, target)
                 for observation in batch.observations:
                     self._insert_observation(cursor, event, observation)
+                if batch.checkpoint is None:
+                    raise ValueError("detection batch must include a state checkpoint")
+                self._upsert_checkpoint(cursor, event, batch.checkpoint)
 
                 stored = self._load_signals(cursor, event.event_id)
         return StoredEvent(signals=stored, replayed=False)
+
+    def load_state_checkpoints(self) -> tuple[DetectorStateCheckpoint, ...]:
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("""
+                SELECT instrument_id, state_schema_version,
+                       detector_config_version, snapshot_payload,
+                       snapshot_sha256
+                FROM detector_state_snapshots
+                ORDER BY instrument_id
+                """)
+            rows = cursor.fetchall()
+        return tuple(
+            DetectorStateCheckpoint(
+                instrument_id=str(row["instrument_id"]),
+                state_schema_version=str(row["state_schema_version"]),
+                detector_config_version=str(row["detector_config_version"]),
+                payload=bytes(row["snapshot_payload"]),
+                payload_sha256=bytes(row["snapshot_sha256"]),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _upsert_checkpoint(
+        cursor: Any,
+        event: BrokerEvent,
+        checkpoint: DetectorStateCheckpoint,
+    ) -> None:
+        payload_instrument = event.payload.get("instrument_id")
+        if payload_instrument != checkpoint.instrument_id:
+            raise ValueError("checkpoint instrument must match broker event")
+        cursor.execute(
+            """
+            INSERT INTO detector_state_snapshots (
+                instrument_id, source_event_id, topic, partition_id, offset_id,
+                state_schema_version, detector_config_version,
+                snapshot_payload, snapshot_sha256
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (instrument_id) DO UPDATE
+            SET source_event_id = EXCLUDED.source_event_id,
+                topic = EXCLUDED.topic,
+                partition_id = EXCLUDED.partition_id,
+                offset_id = EXCLUDED.offset_id,
+                state_schema_version = EXCLUDED.state_schema_version,
+                detector_config_version = EXCLUDED.detector_config_version,
+                snapshot_payload = EXCLUDED.snapshot_payload,
+                snapshot_sha256 = EXCLUDED.snapshot_sha256,
+                updated_at = now()
+            WHERE detector_state_snapshots.topic = EXCLUDED.topic
+              AND detector_state_snapshots.partition_id = EXCLUDED.partition_id
+              AND detector_state_snapshots.offset_id < EXCLUDED.offset_id
+            RETURNING source_event_id
+            """,
+            (
+                checkpoint.instrument_id,
+                event.event_id,
+                event.topic,
+                event.partition_id,
+                event.offset_id,
+                checkpoint.state_schema_version,
+                checkpoint.detector_config_version,
+                checkpoint.payload,
+                checkpoint.payload_sha256,
+            ),
+        )
+        if cursor.fetchone() is None:
+            raise EventReplayConflict(
+                "detector state checkpoint did not advance its broker partition"
+            )
+
+    @staticmethod
+    def _validate_signal_association(
+        event: BrokerEvent,
+        signal: SignalRecord,
+    ) -> None:
+        matches = (
+            signal.source_event_id == event.event_id
+            and signal.source_event_type == event.event_type
+            and signal.instrument_id == event.payload.get("instrument_id")
+        )
+        source_time = event.payload.get("source_time")
+        if source_time is not None:
+            matches = (
+                matches
+                and isinstance(source_time, (str, datetime))
+                and signal.source_event_at == parse_timestamp(source_time)
+            )
+        if not matches:
+            raise ValueError("signal source association must match broker event")
 
     @staticmethod
     def _insert_observation(
@@ -113,9 +196,13 @@ class PostgresReliableProcessingStore:
         event: BrokerEvent,
         observation: DetectorObservation,
     ) -> None:
-        if observation.source_event_id != event.event_id:
+        if (
+            observation.source_event_id != event.event_id
+            or observation.source_event_type != event.event_type
+            or observation.instrument_id != event.payload.get("instrument_id")
+        ):
             raise ValueError(
-                "detector observation source_event_id must match broker event"
+                "detector observation source association must match broker event"
             )
         payload = detector_observation_to_dict(observation)
         cursor.execute(
@@ -218,6 +305,8 @@ class PostgresReliableProcessingStore:
             )
 
     def _insert_signal(self, cursor: Any, signal: SignalRecord) -> None:
+        if signal.source_event_id is None:
+            raise ValueError("reliable signal requires source_event_id")
         cursor.execute(
             f"""
             INSERT INTO {self._signal_table} (
@@ -232,6 +321,7 @@ class PostgresReliableProcessingStore:
                 %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (signal_id) DO NOTHING
+            RETURNING signal_id
             """,
             (
                 signal.signal_id,
@@ -259,6 +349,25 @@ class PostgresReliableProcessingStore:
                 signal.provenance_status,
             ),
         )
+        if cursor.fetchone() is not None:
+            return
+        cursor.execute(
+            f"""
+            SELECT
+                signal_id, detected_at, instrument_id, ticker, class_code,
+                alias, source_event_type, signal_type, severity, metric_value,
+                baseline_value, z_score, window_seconds, summary, payload_json,
+                source_event_id, source_event_at, signal_schema_version,
+                expectation_catalog_version, detector_config_version,
+                delivery_config_version, cost_model_version, provenance_status
+            FROM {self._signal_table}
+            WHERE signal_id = %s
+            """,
+            (signal.signal_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or signal_record_from_row(dict(row)) != signal:
+            raise EventReplayConflict("signal id was reused with different content")
 
     @staticmethod
     def _insert_outbox(cursor: Any, signal: SignalRecord, target: Any) -> None:
@@ -275,6 +384,7 @@ class PostgresReliableProcessingStore:
             ) VALUES (%s, %s, %s, %s, %s::jsonb)
             ON CONFLICT (signal_id, destination_type, destination_key_hash)
             DO NOTHING
+            RETURNING outbox_id
             """,
             (
                 outbox_id,
@@ -284,6 +394,26 @@ class PostgresReliableProcessingStore:
                 json_dumps(signal_record_to_dict(signal)),
             ),
         )
+        if cursor.fetchone() is not None:
+            return
+        cursor.execute(
+            """
+            SELECT outbox_id, payload_json
+            FROM delivery_outbox
+            WHERE signal_id = %s AND destination_type = %s
+              AND destination_key_hash = %s
+            """,
+            (signal.signal_id, target.destination_type, target.key_hash),
+        )
+        row = cursor.fetchone()
+        expected_payload = signal_record_to_dict(signal)
+        if row is None or (
+            str(row["outbox_id"]) != outbox_id
+            or dict(row["payload_json"]) != expected_payload
+        ):
+            raise EventReplayConflict(
+                "delivery target was reused with different content"
+            )
 
     def _load_signals(self, cursor: Any, event_id: str) -> tuple[SignalRecord, ...]:
         cursor.execute(
@@ -411,6 +541,22 @@ class PostgresObservationPublicationQueue:
         available_at: datetime,
         lease_until: datetime,
     ) -> ObservationPublicationTask | None:
+        tasks = self.claim_many(
+            available_at=available_at,
+            lease_until=lease_until,
+            limit=1,
+        )
+        return tasks[0] if tasks else None
+
+    def claim_many(
+        self,
+        *,
+        available_at: datetime,
+        lease_until: datetime,
+        limit: int,
+    ) -> tuple[ObservationPublicationTask, ...]:
+        if limit < 1 or limit > 1000:
+            raise ValueError("observation claim limit must be between 1 and 1000")
         with self._connection.transaction():
             with self._connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
@@ -433,7 +579,7 @@ class PostgresObservationPublicationQueue:
                           AND status IN ('pending', 'failed')
                         ORDER BY next_attempt_at, observation_id
                         FOR UPDATE SKIP LOCKED
-                        LIMIT 1
+                        LIMIT %s
                     )
                     UPDATE detector_observation_outbox AS target
                     SET status = 'publishing',
@@ -445,15 +591,39 @@ class PostgresObservationPublicationQueue:
                     WHERE target.observation_id = candidate.observation_id
                     RETURNING target.payload_json, target.attempt_count
                     """,
-                    (available_at, available_at, lease_until),
+                    (available_at, limit, available_at, lease_until),
                 )
-                row = cursor.fetchone()
-        if row is None:
-            return None
-        return ObservationPublicationTask(
-            observation=detector_observation_from_dict(dict(row["payload_json"])),
-            attempt_count=int(row["attempt_count"]),
+                rows = cursor.fetchall()
+        return tuple(
+            ObservationPublicationTask(
+                observation=detector_observation_from_dict(dict(row["payload_json"])),
+                attempt_count=int(row["attempt_count"]),
+            )
+            for row in rows
         )
+
+    def purge_published(self, *, before: datetime, limit: int) -> int:
+        if limit < 1 or limit > 10_000:
+            raise ValueError("observation purge limit must be between 1 and 10000")
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH purgeable AS (
+                    SELECT observation_id
+                    FROM detector_observation_outbox
+                    WHERE status = 'published'
+                      AND published_at < %s
+                      AND published_at < now() - INTERVAL '7 days'
+                    ORDER BY published_at, observation_id
+                    LIMIT %s
+                )
+                DELETE FROM detector_observation_outbox AS target
+                USING purgeable
+                WHERE target.observation_id = purgeable.observation_id
+                """,
+                (before, limit),
+            )
+            return int(cursor.rowcount)
 
     def mark_published(
         self,
