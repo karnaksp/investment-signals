@@ -46,6 +46,17 @@ _delivery_attempt_number = Histogram(
     ("destination_type", "outcome"),
     buckets=(1, 2, 3, 4, 5, 8, 13, 21),
 )
+_observation_publication = Counter(
+    "detector_observation_publication_attempts_total",
+    "Durable detector observation publication attempts",
+    ("outcome",),
+)
+_observation_attempt_number = Histogram(
+    "detector_observation_publication_attempt_number",
+    "Attempt number when a detector observation publication reached an outcome",
+    ("outcome",),
+    buckets=(1, 2, 3, 4, 5, 8, 13, 21),
+)
 
 
 class PrometheusReliabilityMetrics:
@@ -81,6 +92,15 @@ class PrometheusReliabilityMetrics:
         }
         _delivery.labels(**labels).inc()
         _delivery_attempt_number.labels(**labels).observe(attempt_count)
+
+    def publication_attempted(
+        self,
+        *,
+        outcome: str,
+        attempt_count: int,
+    ) -> None:
+        _observation_publication.labels(outcome=outcome).inc()
+        _observation_attempt_number.labels(outcome=outcome).observe(attempt_count)
 
 
 def start_reliability_metrics_server(

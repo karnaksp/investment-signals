@@ -43,6 +43,9 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "local_notifier": frozenset(),
     "market_unary_emitter": frozenset({"TINVEST_TOKEN"}),
     "migration": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
+    "observation_worker": frozenset(
+        {"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}
+    ),
     "reference_tick_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
     "threshold_cron": frozenset({"TINVEST_TOKEN"}),
 }
@@ -303,6 +306,12 @@ class RuntimeSettings:
     delivery_worker_retry_base_seconds: int
     delivery_worker_retry_max_seconds: int
     delivery_worker_metrics_listen_port: int | None
+    observation_worker_poll_seconds: float
+    observation_worker_claim_lease_seconds: int
+    observation_worker_max_attempts: int
+    observation_worker_retry_base_seconds: int
+    observation_worker_retry_max_seconds: int
+    observation_worker_metrics_listen_port: int | None
 
     @classmethod
     def from_env(
@@ -562,6 +571,25 @@ class RuntimeSettings:
             ),
             delivery_worker_metrics_listen_port=_env_optional_int(
                 "DELIVERY_WORKER_METRICS_LISTEN_PORT"
+            ),
+            observation_worker_poll_seconds=max(
+                0.05,
+                float(os.getenv("OBSERVATION_WORKER_POLL_SECONDS", "1")),
+            ),
+            observation_worker_claim_lease_seconds=int(
+                os.getenv("OBSERVATION_WORKER_CLAIM_LEASE_SECONDS", "60")
+            ),
+            observation_worker_max_attempts=int(
+                os.getenv("OBSERVATION_WORKER_MAX_ATTEMPTS", "8")
+            ),
+            observation_worker_retry_base_seconds=int(
+                os.getenv("OBSERVATION_WORKER_RETRY_BASE_SECONDS", "5")
+            ),
+            observation_worker_retry_max_seconds=int(
+                os.getenv("OBSERVATION_WORKER_RETRY_MAX_SECONDS", "900")
+            ),
+            observation_worker_metrics_listen_port=_env_optional_int(
+                "OBSERVATION_WORKER_METRICS_LISTEN_PORT"
             ),
         )
 

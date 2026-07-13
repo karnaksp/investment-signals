@@ -47,6 +47,7 @@ tinvest-accuracy-metrics = "tinvest_signal_engine.services.accuracy_metrics:main
 tinvest-market-unary-emitter = "tinvest_signal_engine.services.market_unary_emitter:main"
 tinvest-migrate = "tinvest_signal_engine.services.migrate:main"
 tinvest-delivery-worker = "tinvest_signal_engine.services.delivery_worker:main"
+tinvest-observation-worker = "tinvest_signal_engine.services.observation_worker:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

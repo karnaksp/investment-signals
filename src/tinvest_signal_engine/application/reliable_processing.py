@@ -52,7 +52,7 @@ class BatchDetectionPort(Protocol):
 
 
 class AtomicDetectionStore(Protocol):
-    """Future persistence boundary; implementations must not dual-write."""
+    """Persist the inbox, signals, delivery, and observation outboxes atomically."""
 
     def find_processed(self, event: BrokerEvent) -> StoredEvent | None: ...
 
@@ -85,8 +85,8 @@ class ReliableEventProcessor:
     def __init__(
         self,
         *,
-        detector: DetectionPort,
-        store: ReliableProcessingStore,
+        detector: BatchDetectionPort,
+        store: AtomicDetectionStore,
         publisher: SignalPublisher,
         metrics: ReliabilityMetrics,
     ) -> None:
@@ -103,8 +103,8 @@ class ReliableEventProcessor:
             self._observe(event, existing, started)
             return existing
 
-        prepared = tuple(self._detector.detect(event.payload))
-        stored = self._store.persist_once(event, prepared)
+        batch = self._detector.detect_batch(event.payload)
+        stored = self._store.persist_detection_once(event, batch)
         self._publisher.publish(stored.signals)
         self._observe(event, stored, started)
         return stored

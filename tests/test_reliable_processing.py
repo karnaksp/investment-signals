@@ -12,6 +12,7 @@ from tinvest_signal_engine.application.delivery import (
 )
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
+    DetectionBatch,
     ReliableEventProcessor,
     StoredEvent,
 )
@@ -20,6 +21,7 @@ from tinvest_signal_engine.domain.reliable_processing import (
     PreparedSignal,
     SignalRecord,
 )
+from tinvest_signal_engine.domain.detector_observations import DetectorObservation
 
 
 @dataclass
@@ -81,32 +83,61 @@ def _event() -> BrokerEvent:
     )
 
 
+def _observation() -> DetectorObservation:
+    timestamp = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    return DetectorObservation(
+        observation_id="00000000-0000-0000-0000-000000000101",
+        source_event_id="event-1",
+        observed_at=timestamp,
+        instrument_id="SBER_TQBR",
+        source_event_type="trade",
+        signal_type="price_jump",
+        metric_value=1.0,
+        baseline_value=0.5,
+        z_score=2.0,
+        threshold_value=3.0,
+        threshold_passed=False,
+        detector_passed=False,
+        signal_emitted=False,
+        window_seconds=60,
+        sampling_policy_version="history-v1",
+        detector_config_version="detector-1",
+        expectation_catalog_version="catalog-1",
+        provenance_status="complete",
+    )
+
+
 @dataclass
 class FakeDetector:
     calls: int = 0
 
-    def detect(self, payload) -> tuple[PreparedSignal, ...]:
+    def detect_batch(self, payload) -> DetectionBatch:
         self.calls += 1
-        return (PreparedSignal(_signal()),)
+        return DetectionBatch(
+            signals=(PreparedSignal(_signal()),),
+            observations=(_observation(),),
+        )
 
 
 @dataclass
 class FakeStore:
     stored: StoredEvent | None = None
     fail_next_persist: bool = False
+    observations: tuple[DetectorObservation, ...] = ()
 
     def find_processed(self, event: BrokerEvent) -> StoredEvent | None:
         if self.stored is None:
             return None
         return StoredEvent(self.stored.signals, replayed=True)
 
-    def persist_once(self, event, signals) -> StoredEvent:
+    def persist_detection_once(self, event, batch) -> StoredEvent:
         if self.fail_next_persist:
             self.fail_next_persist = False
             raise RuntimeError("database unavailable")
         if self.stored is None:
+            self.observations = batch.observations
             self.stored = StoredEvent(
-                tuple(item.signal for item in signals),
+                tuple(item.signal for item in batch.signals),
                 replayed=False,
             )
         return self.stored
@@ -143,6 +174,7 @@ def test_crash_after_database_commit_replays_without_duplicate_detection() -> No
     assert detector.calls == 1
     assert publisher.published == [_signal().signal_id]
     assert len(store.stored.signals) == 1  # type: ignore[union-attr]
+    assert store.observations == (_observation(),)
 
 
 def test_database_rollback_allows_retry_without_losing_signal() -> None:

@@ -54,6 +54,40 @@ def test_unknown_service_name_is_rejected() -> None:
         load_secret("TINVEST_TOKEN", service_name="typo", environ={})
 
 
+def test_observation_worker_can_only_read_its_database_secrets() -> None:
+    environ = {
+        "CLICKHOUSE_PASSWORD": "clickhouse-secret",
+        "POSTGRES_PASSWORD": "postgres-secret",
+        "TINVEST_TOKEN": "broker-token",
+    }
+
+    assert (
+        load_secret(
+            "CLICKHOUSE_PASSWORD",
+            service_name="observation_worker",
+            environ=environ,
+        )
+        == "clickhouse-secret"
+    )
+    assert (
+        load_secret(
+            "POSTGRES_PASSWORD",
+            service_name="observation_worker",
+            environ=environ,
+        )
+        == "postgres-secret"
+    )
+    assert (
+        load_secret(
+            "TINVEST_TOKEN",
+            default="",
+            service_name="observation_worker",
+            environ=environ,
+        )
+        == ""
+    )
+
+
 @pytest.mark.parametrize("service_name", ["api", "detector"])
 def test_redis_url_secret_is_scoped_to_consumers(
     tmp_path: Path, service_name: str

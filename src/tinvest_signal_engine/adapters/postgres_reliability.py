@@ -12,9 +12,14 @@ from psycopg.rows import dict_row
 
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
+    DetectionBatch,
     StoredEvent,
 )
+from tinvest_signal_engine.application.observation_publication import (
+    ObservationPublicationTask,
+)
 from tinvest_signal_engine.config import RuntimeSettings
+from tinvest_signal_engine.domain.detector_observations import DetectorObservation
 from tinvest_signal_engine.domain.reliable_processing import (
     DeliveryTask,
     EventReplayConflict,
@@ -51,6 +56,16 @@ class PostgresReliableProcessingStore:
         event: BrokerEvent,
         signals: Sequence[PreparedSignal],
     ) -> StoredEvent:
+        return self.persist_detection_once(
+            event,
+            DetectionBatch(signals=tuple(signals)),
+        )
+
+    def persist_detection_once(
+        self,
+        event: BrokerEvent,
+        batch: DetectionBatch,
+    ) -> StoredEvent:
         with self._connection.transaction():
             with self._connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
@@ -82,13 +97,59 @@ class PostgresReliableProcessingStore:
                         replayed=True,
                     )
 
-                for prepared in signals:
+                for prepared in batch.signals:
                     self._insert_signal(cursor, prepared.signal)
                     for target in prepared.delivery_targets:
                         self._insert_outbox(cursor, prepared.signal, target)
+                for observation in batch.observations:
+                    self._insert_observation(cursor, event, observation)
 
                 stored = self._load_signals(cursor, event.event_id)
         return StoredEvent(signals=stored, replayed=False)
+
+    @staticmethod
+    def _insert_observation(
+        cursor: Any,
+        event: BrokerEvent,
+        observation: DetectorObservation,
+    ) -> None:
+        if observation.source_event_id != event.event_id:
+            raise ValueError(
+                "detector observation source_event_id must match broker event"
+            )
+        payload = detector_observation_to_dict(observation)
+        cursor.execute(
+            """
+            INSERT INTO detector_observation_outbox (
+                observation_id, source_event_id, payload_json
+            ) VALUES (%s, %s, %s::jsonb)
+            ON CONFLICT (observation_id) DO NOTHING
+            RETURNING observation_id
+            """,
+            (
+                observation.observation_id,
+                observation.source_event_id,
+                json_dumps(payload),
+            ),
+        )
+        if cursor.fetchone() is not None:
+            return
+        cursor.execute(
+            """
+            SELECT source_event_id, payload_json
+            FROM detector_observation_outbox
+            WHERE observation_id = %s
+            """,
+            (observation.observation_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or (
+            str(row["source_event_id"]) != observation.source_event_id
+            or dict(row["payload_json"]) != payload
+        ):
+            raise EventReplayConflict(
+                "observation id was reused with different content"
+            )
 
     def count_delivered_since(
         self,
@@ -338,6 +399,119 @@ class PostgresDeliveryQueue:
         self._connection.close()
 
 
+class PostgresObservationPublicationQueue:
+    """Lease-based queue over the immutable detector observation outbox."""
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+
+    def claim(
+        self,
+        *,
+        available_at: datetime,
+        lease_until: datetime,
+    ) -> ObservationPublicationTask | None:
+        with self._connection.transaction():
+            with self._connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    """
+                    UPDATE detector_observation_outbox
+                    SET status = 'failed', claimed_at = NULL,
+                        next_attempt_at = %s,
+                        last_error_code = 'claim_lease_expired'
+                    WHERE status = 'publishing'
+                      AND next_attempt_at <= %s
+                    """,
+                    (available_at, available_at),
+                )
+                cursor.execute(
+                    """
+                    WITH candidate AS (
+                        SELECT observation_id
+                        FROM detector_observation_outbox
+                        WHERE next_attempt_at <= %s
+                          AND status IN ('pending', 'failed')
+                        ORDER BY next_attempt_at, observation_id
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    UPDATE detector_observation_outbox AS target
+                    SET status = 'publishing',
+                        attempt_count = target.attempt_count + 1,
+                        claimed_at = %s,
+                        next_attempt_at = %s,
+                        last_error_code = NULL
+                    FROM candidate
+                    WHERE target.observation_id = candidate.observation_id
+                    RETURNING target.payload_json, target.attempt_count
+                    """,
+                    (available_at, available_at, lease_until),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            return None
+        return ObservationPublicationTask(
+            observation=detector_observation_from_dict(dict(row["payload_json"])),
+            attempt_count=int(row["attempt_count"]),
+        )
+
+    def mark_published(
+        self,
+        task: ObservationPublicationTask,
+        *,
+        published_at: datetime,
+    ) -> None:
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE detector_observation_outbox
+                SET status = 'published', claimed_at = NULL,
+                    published_at = %s, last_error_code = NULL
+                WHERE observation_id = %s AND status = 'publishing'
+                  AND attempt_count = %s
+                """,
+                (
+                    published_at,
+                    task.observation.observation_id,
+                    task.attempt_count,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("observation publication lease was lost")
+
+    def mark_failed(
+        self,
+        task: ObservationPublicationTask,
+        *,
+        reason_code: str,
+        next_attempt_at: datetime,
+        dead_letter: bool,
+    ) -> None:
+        status = "dead_letter" if dead_letter else "failed"
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE detector_observation_outbox
+                SET status = %s, claimed_at = NULL,
+                    next_attempt_at = %s, last_error_code = %s
+                WHERE observation_id = %s AND status = 'publishing'
+                  AND attempt_count = %s
+                """,
+                (
+                    status,
+                    next_attempt_at,
+                    reason_code[:200],
+                    task.observation.observation_id,
+                    task.attempt_count,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("observation publication lease was lost")
+
+    def close(self) -> None:
+        self._connection.close()
+
+
 def connect_reliable_processing_store(
     settings: RuntimeSettings,
 ) -> PostgresReliableProcessingStore:
@@ -351,6 +525,14 @@ def connect_reliable_processing_store(
 def connect_delivery_queue(settings: RuntimeSettings) -> PostgresDeliveryQueue:
     return PostgresDeliveryQueue(
         _connect_with_retry(settings, service_name="delivery-worker")
+    )
+
+
+def connect_observation_publication_queue(
+    settings: RuntimeSettings,
+) -> PostgresObservationPublicationQueue:
+    return PostgresObservationPublicationQueue(
+        _connect_with_retry(settings, service_name="observation-worker")
     )
 
 
@@ -377,6 +559,69 @@ def _connect_with_retry(settings: RuntimeSettings, *, service_name: str) -> Any:
         f"{service_name} could not connect to Postgres within "
         f"{settings.postgres_startup_timeout_seconds}s"
     ) from last_error
+
+
+def detector_observation_to_dict(
+    observation: DetectorObservation,
+) -> dict[str, object]:
+    """Map a domain observation to the immutable outbox transport record."""
+
+    return {
+        "observation_id": observation.observation_id,
+        "source_event_id": observation.source_event_id,
+        "observed_at": observation.observed_at.isoformat(),
+        "instrument_id": observation.instrument_id,
+        "source_event_type": observation.source_event_type,
+        "signal_type": observation.signal_type,
+        "metric_value": observation.metric_value,
+        "baseline_value": observation.baseline_value,
+        "z_score": observation.z_score,
+        "threshold_value": observation.threshold_value,
+        "threshold_passed": observation.threshold_passed,
+        "detector_passed": observation.detector_passed,
+        "signal_emitted": observation.signal_emitted,
+        "window_seconds": observation.window_seconds,
+        "sampling_policy_version": observation.sampling_policy_version,
+        "detector_config_version": observation.detector_config_version,
+        "expectation_catalog_version": observation.expectation_catalog_version,
+        "provenance_status": observation.provenance_status,
+    }
+
+
+def detector_observation_from_dict(
+    payload: dict[str, object],
+) -> DetectorObservation:
+    """Map an outbox record back to a validated domain observation."""
+
+    observed_at = datetime.fromisoformat(str(payload["observed_at"]))
+    catalog = payload.get("expectation_catalog_version")
+    return DetectorObservation(
+        observation_id=str(payload["observation_id"]),
+        source_event_id=str(payload["source_event_id"]),
+        observed_at=observed_at,
+        instrument_id=str(payload["instrument_id"]),
+        source_event_type=str(payload["source_event_type"]),
+        signal_type=str(payload["signal_type"]),
+        metric_value=float(payload["metric_value"]),
+        baseline_value=float(payload["baseline_value"]),
+        z_score=float(payload["z_score"]),
+        threshold_value=float(payload["threshold_value"]),
+        threshold_passed=_require_bool(payload, "threshold_passed"),
+        detector_passed=_require_bool(payload, "detector_passed"),
+        signal_emitted=_require_bool(payload, "signal_emitted"),
+        window_seconds=int(payload["window_seconds"]),
+        sampling_policy_version=str(payload["sampling_policy_version"]),
+        detector_config_version=str(payload["detector_config_version"]),
+        expectation_catalog_version=(str(catalog) if catalog is not None else None),
+        provenance_status=str(payload["provenance_status"]),
+    )
+
+
+def _require_bool(payload: dict[str, object], key: str) -> bool:
+    value = payload[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"observation field {key} must be boolean")
+    return value
 
 
 def signal_record_to_dict(signal: SignalRecord) -> dict[str, object]:
