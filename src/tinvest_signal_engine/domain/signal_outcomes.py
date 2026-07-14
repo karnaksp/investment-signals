@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -16,14 +17,15 @@ DIRECTIONAL_VERDICTS = frozenset(
 
 @dataclass(frozen=True)
 class DirectionalOutcomePolicy:
-    policy_version: str
-    cost_model_version: str
-    horizon_seconds: int
-    anchor_max_age_seconds: int
-    forward_grace_seconds: int
-    min_move_bps: Decimal
-    volatility_multiplier: Decimal
-    round_trip_cost_bps: Decimal
+    min_move_bps: Decimal | float
+    volatility_multiplier: Decimal | float
+    round_trip_cost_bps: Decimal | float
+    horizon_seconds: int = 300
+    anchor_max_age_seconds: int = 5
+    forward_grace_seconds: int = 30
+    baseline_volatility_window_seconds: int = 60
+    policy_version: str = "directional-outcome-v1"
+    cost_model_version: str = "study-round-trip-cost-v1"
 
     def __post_init__(self) -> None:
         if not self.policy_version.strip():
@@ -36,20 +38,55 @@ class DirectionalOutcomePolicy:
             raise ValueError("anchor_max_age_seconds must be non-negative")
         if self.forward_grace_seconds < 0:
             raise ValueError("forward_grace_seconds must be non-negative")
-        if self.min_move_bps < 0:
+        if self.baseline_volatility_window_seconds <= 0:
+            raise ValueError("baseline_volatility_window_seconds must be positive")
+        if _as_decimal(self.min_move_bps) < 0:
             raise ValueError("min_move_bps must be non-negative")
-        if self.volatility_multiplier < 0:
+        if _as_decimal(self.volatility_multiplier) < 0:
             raise ValueError("volatility_multiplier must be non-negative")
-        if self.round_trip_cost_bps < 0:
+        if _as_decimal(self.round_trip_cost_bps) < 0:
             raise ValueError("round_trip_cost_bps must be non-negative")
 
     def materiality_bps(self, realized_volatility_bps: Decimal) -> Decimal:
         if realized_volatility_bps < 0:
             raise ValueError("realized_volatility_bps must be non-negative")
         return max(
-            self.min_move_bps,
-            self.volatility_multiplier * realized_volatility_bps,
+            _as_decimal(self.min_move_bps),
+            _as_decimal(self.volatility_multiplier) * realized_volatility_bps,
         )
+
+
+@dataclass(frozen=True)
+class DirectionalReturnAssessment:
+    """Verdict for one signed directional return at a predeclared horizon."""
+
+    verdict: str
+    gross_expected_bps: Decimal
+    net_expected_bps: Decimal
+    net_reverse_bps: Decimal
+    materiality_bps: Decimal
+    inverse_hypothesis_candidate: bool
+
+    def __post_init__(self) -> None:
+        if self.verdict not in DIRECTIONAL_VERDICTS - {"inconclusive"}:
+            raise ValueError("unsupported directional return verdict")
+        if self.materiality_bps < 0:
+            raise ValueError("directional return materiality must be non-negative")
+
+
+@dataclass(frozen=True)
+class DirectionalOutcomeAssessment:
+    """Float-facing assessment used by historical studies and reports."""
+
+    verdict: str
+    net_expected_bps: float
+    net_reverse_bps: float
+    materiality_bps: float
+    inverse_hypothesis_candidate: bool
+
+    def __post_init__(self) -> None:
+        if self.verdict not in DIRECTIONAL_VERDICTS - {"inconclusive"}:
+            raise ValueError("unsupported directional outcome verdict")
 
 
 @dataclass(frozen=True)
@@ -97,6 +134,75 @@ def reference_price(tick: ReferenceTick) -> Decimal | None:
     if tick.has_trade:
         return tick.trade_price
     return None
+
+
+def classify_directional_outcome(
+    *,
+    gross_expected_bps: float,
+    baseline_sigma_bps: float,
+    horizon_seconds: int,
+    policy: DirectionalOutcomePolicy,
+) -> DirectionalOutcomeAssessment:
+    """Classify a directional hypothesis with horizon-scaled volatility."""
+
+    if not math.isfinite(gross_expected_bps):
+        raise ValueError("gross_expected_bps must be finite")
+    if not math.isfinite(baseline_sigma_bps) or baseline_sigma_bps < 0:
+        raise ValueError("baseline sigma must be finite and non-negative")
+    if horizon_seconds <= 0:
+        raise ValueError("horizon must be positive")
+    scaled_sigma = baseline_sigma_bps * math.sqrt(
+        horizon_seconds / policy.baseline_volatility_window_seconds
+    )
+    assessment = classify_directional_return(
+        gross_expected_bps=_as_decimal(gross_expected_bps),
+        realized_volatility_bps=_as_decimal(scaled_sigma),
+        policy=policy,
+    )
+    return DirectionalOutcomeAssessment(
+        verdict=assessment.verdict,
+        net_expected_bps=float(assessment.net_expected_bps),
+        net_reverse_bps=float(assessment.net_reverse_bps),
+        materiality_bps=float(assessment.materiality_bps),
+        inverse_hypothesis_candidate=assessment.inverse_hypothesis_candidate,
+    )
+
+
+def classify_directional_return(
+    *,
+    gross_expected_bps: Decimal,
+    realized_volatility_bps: Decimal,
+    policy: DirectionalOutcomePolicy,
+) -> DirectionalReturnAssessment:
+    """Classify a signed directional return against cost and materiality.
+
+    ``gross_expected_bps`` is already signed to the signal expectation:
+    positive means the market moved in the expected direction, negative means it
+    moved against the signal.  The reverse hypothesis is evaluated explicitly so
+    contradicted outcomes can be accumulated as inverse-hypothesis candidates.
+    """
+
+    materiality_bps = policy.materiality_bps(realized_volatility_bps)
+    cost_bps = _as_decimal(policy.round_trip_cost_bps)
+    net_expected_bps = gross_expected_bps - cost_bps
+    net_reverse_bps = -gross_expected_bps - cost_bps
+    if net_expected_bps >= materiality_bps:
+        verdict = "confirmed"
+        inverse_candidate = False
+    elif net_reverse_bps >= materiality_bps:
+        verdict = "contradicted"
+        inverse_candidate = True
+    else:
+        verdict = "insignificant"
+        inverse_candidate = False
+    return DirectionalReturnAssessment(
+        verdict=verdict,
+        gross_expected_bps=gross_expected_bps,
+        net_expected_bps=net_expected_bps,
+        net_reverse_bps=net_reverse_bps,
+        materiality_bps=materiality_bps,
+        inverse_hypothesis_candidate=inverse_candidate,
+    )
 
 
 def evaluate_directional_outcome(
@@ -184,17 +290,11 @@ def evaluate_directional_outcome(
 
     raw_return_bps = (forward_price - anchor_price) / anchor_price * Decimal(10_000)
     signed_return_bps = raw_return_bps * Decimal(expected_direction)
-    net_expected_bps = signed_return_bps - policy.round_trip_cost_bps
-    net_reverse_bps = -signed_return_bps - policy.round_trip_cost_bps
-    if net_expected_bps >= materiality_bps:
-        verdict = "confirmed"
-        inverse_candidate = False
-    elif net_reverse_bps >= materiality_bps:
-        verdict = "contradicted"
-        inverse_candidate = True
-    else:
-        verdict = "insignificant"
-        inverse_candidate = False
+    assessment = classify_directional_return(
+        gross_expected_bps=signed_return_bps,
+        realized_volatility_bps=realized_volatility_bps,
+        policy=policy,
+    )
 
     return DirectionalSignalOutcome(
         signal_id=signal_id,
@@ -202,18 +302,18 @@ def evaluate_directional_outcome(
         signal_type=signal_type,
         source_event_at=source_event_at,
         horizon_seconds=policy.horizon_seconds,
-        verdict=verdict,
-        reason_code=verdict,
+        verdict=assessment.verdict,
+        reason_code=assessment.verdict,
         expected_direction=expected_direction,
         anchor_price=anchor_price,
         forward_price=forward_price,
         raw_return_bps=raw_return_bps,
-        net_expected_bps=net_expected_bps,
-        net_reverse_bps=net_reverse_bps,
-        materiality_bps=materiality_bps,
+        net_expected_bps=assessment.net_expected_bps,
+        net_reverse_bps=assessment.net_reverse_bps,
+        materiality_bps=assessment.materiality_bps,
         cost_model_version=policy.cost_model_version,
         policy_version=policy.policy_version,
-        inverse_hypothesis_candidate=inverse_candidate,
+        inverse_hypothesis_candidate=assessment.inverse_hypothesis_candidate,
     )
 
 
@@ -248,3 +348,11 @@ def _inconclusive(
         policy_version=policy.policy_version,
         inverse_hypothesis_candidate=False,
     )
+
+
+def _as_decimal(value: Decimal | float) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if not math.isfinite(value):
+        raise ValueError("numeric value must be finite")
+    return Decimal(str(value))

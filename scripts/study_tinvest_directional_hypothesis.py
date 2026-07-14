@@ -499,7 +499,12 @@ def classify_directional(
         baseline_sigma_bps=baseline_sigma_bps,
         horizon_seconds=horizon_minutes * 60,
         policy=DirectionalOutcomePolicy(
-            minimum_move_bps=policy.outcome_min_move_bps,
+            policy_version=policy.version,
+            cost_model_version=policy.version,
+            horizon_seconds=horizon_minutes * 60,
+            anchor_max_age_seconds=0,
+            forward_grace_seconds=policy.forward_grace_minutes * 60,
+            min_move_bps=policy.outcome_min_move_bps,
             volatility_multiplier=policy.outcome_volatility_multiplier,
             round_trip_cost_bps=policy.round_trip_cost_bps,
         ),
