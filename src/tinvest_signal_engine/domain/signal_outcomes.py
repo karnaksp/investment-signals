@@ -15,6 +15,10 @@ DIRECTIONAL_VERDICTS = frozenset(
 )
 
 
+class SignalOutcomeConflict(RuntimeError):
+    """An immutable signal outcome key was reused with different content."""
+
+
 @dataclass(frozen=True)
 class DirectionalOutcomePolicy:
     min_move_bps: Decimal | float
