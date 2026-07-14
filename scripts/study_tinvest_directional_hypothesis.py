@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import math
 import random
@@ -22,6 +23,7 @@ import ssl
 import statistics
 import sys
 import time
+import zipfile
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
@@ -34,6 +36,11 @@ import httpx
 
 API_ROOT = "https://invest-public-api.tbank.ru/rest/"
 API_SERVICE = "tinkoff.public.invest.api.contract.v1"
+RUSSIAN_TRUSTED_CA_ZIP_URL = "https://gu-st.ru/content/lending/russiantrustedca.zip"
+RUSSIAN_TRUSTED_CA_MEMBER = "russiantrustedca2024.pem"
+RUSSIAN_TRUSTED_CA_SHA256 = (
+    "e1a1602f9b4bbed3628e535b3dfb90da49a0fdf144858ebe7fed7ef0e8b29b3c"
+)
 MOSCOW = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
 REGULAR_SESSION_START = datetime_time(10, 5)
@@ -271,6 +278,55 @@ def write_failure_artifact(
         encoding="utf-8",
     )
     return run_dir
+
+
+def _verify_pinned_ca_bundle(data: bytes) -> str:
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != RUSSIAN_TRUSTED_CA_SHA256:
+        raise RuntimeError(
+            "Downloaded Russian Trusted CA bundle hash mismatch; "
+            f"expected {RUSSIAN_TRUSTED_CA_SHA256}, got {digest}"
+        )
+    if data.count(b"BEGIN CERTIFICATE") != 2 or data.count(b"END CERTIFICATE") != 2:
+        raise RuntimeError(
+            "Downloaded Russian Trusted CA bundle must contain exactly two PEM certificates"
+        )
+    return digest
+
+
+def prepare_russian_trusted_ca(
+    output_path: Path, *, client: httpx.Client | None = None
+) -> dict:
+    """Download the official Russian Trusted CA bundle and pin-check it."""
+
+    own_client = client is None
+    active_client = client or httpx.Client(timeout=45.0, follow_redirects=True)
+    try:
+        response = active_client.get(RUSSIAN_TRUSTED_CA_ZIP_URL)
+        response.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            data = archive.read(RUSSIAN_TRUSTED_CA_MEMBER)
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Official CA archive does not contain {RUSSIAN_TRUSTED_CA_MEMBER}"
+        ) from exc
+    except (zipfile.BadZipFile, httpx.HTTPError) as exc:
+        raise RuntimeError(
+            f"Could not prepare Russian Trusted CA bundle: {redact_diagnostic(exc)}"
+        ) from exc
+    finally:
+        if own_client:
+            active_client.close()
+    digest = _verify_pinned_ca_bundle(data)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(data)
+    return {
+        "path": str(output_path),
+        "sha256": digest,
+        "source_url": RUSSIAN_TRUSTED_CA_ZIP_URL,
+        "archive_member": RUSSIAN_TRUSTED_CA_MEMBER,
+        "certificate_count": 2,
+    }
 
 
 def resolve_instruments(client: httpx.Client, tickers: Sequence[str]) -> dict[str, str]:
@@ -1033,11 +1089,27 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Additional PEM CA certificate. TLS verification remains enabled.",
     )
+    parser.add_argument(
+        "--prepare-russian-trusted-ca",
+        type=Path,
+        help=(
+            "Download the official Russian Trusted CA bundle to this path, "
+            "verify its pinned SHA-256, print redacted metadata and exit."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.prepare_russian_trusted_ca is not None:
+        print(
+            json.dumps(
+                prepare_russian_trusted_ca(args.prepare_russian_trusted_ca),
+                ensure_ascii=False,
+            )
+        )
+        return 0
     if args.calendar_days < 2:
         raise SystemExit("--calendar-days must be at least 2")
     tickers = tuple(item.strip().upper() for item in args.tickers.split(",") if item.strip())

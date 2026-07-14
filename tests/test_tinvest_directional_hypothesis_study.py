@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -218,3 +220,64 @@ def test_failure_artifact_persists_only_redacted_operational_context(tmp_path: P
     }
     assert payload["tls_verification"] == "enabled"
     assert "abc.def" not in report
+
+
+class _Response:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _Client:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.urls: list[str] = []
+
+    def get(self, url: str) -> _Response:
+        self.urls.append(url)
+        return _Response(self.content)
+
+
+def _zip_with_member(name: str, content: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+def test_prepare_russian_trusted_ca_writes_only_pinned_bundle(tmp_path: Path) -> None:
+    bundle = (
+        b"-----BEGIN CERTIFICATE-----\nfirst\n-----END CERTIFICATE-----\n"
+        b"-----BEGIN CERTIFICATE-----\nsecond\n-----END CERTIFICATE-----\n"
+    )
+    expected_digest = study.hashlib.sha256(bundle).hexdigest()
+    old_digest = study.RUSSIAN_TRUSTED_CA_SHA256
+    study.RUSSIAN_TRUSTED_CA_SHA256 = expected_digest
+    client = _Client(_zip_with_member(study.RUSSIAN_TRUSTED_CA_MEMBER, bundle))
+    output = tmp_path / "russiantrustedca2024.pem"
+    try:
+        metadata = study.prepare_russian_trusted_ca(output, client=client)
+    finally:
+        study.RUSSIAN_TRUSTED_CA_SHA256 = old_digest
+
+    assert output.read_bytes() == bundle
+    assert metadata == {
+        "path": str(output),
+        "sha256": expected_digest,
+        "source_url": study.RUSSIAN_TRUSTED_CA_ZIP_URL,
+        "archive_member": study.RUSSIAN_TRUSTED_CA_MEMBER,
+        "certificate_count": 2,
+    }
+    assert client.urls == [study.RUSSIAN_TRUSTED_CA_ZIP_URL]
+
+
+def test_prepare_russian_trusted_ca_rejects_changed_bundle(tmp_path: Path) -> None:
+    bundle = b"-----BEGIN CERTIFICATE-----\nchanged\n-----END CERTIFICATE-----\n"
+    client = _Client(_zip_with_member(study.RUSSIAN_TRUSTED_CA_MEMBER, bundle))
+
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        study.prepare_russian_trusted_ca(tmp_path / "ca.pem", client=client)
+
+    assert not (tmp_path / "ca.pem").exists()
