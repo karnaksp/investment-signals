@@ -65,7 +65,7 @@ class PostgresDirectionalSignalOutcomeCandidateSource:
                   AND ms.cost_model_version = %(cost_model_version)s
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM signal_outcomes so
+                      FROM core_directional_signal_outcomes so
                       WHERE so.signal_id = ms.signal_id
                         AND so.horizon_seconds = %(horizon_seconds)s
                         AND so.policy_version = %(policy_version)s
@@ -128,7 +128,7 @@ class PostgresSignalOutcomeStore:
             with self._connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO signal_outcomes (
+                    INSERT INTO core_directional_signal_outcomes (
                         outcome_id, signal_id, instrument_id, signal_type,
                         source_event_at, horizon_seconds, verdict, reason_code,
                         expected_direction, anchor_price, forward_price,
@@ -166,7 +166,7 @@ class PostgresSignalOutcomeStore:
                            net_reverse_bps, materiality_bps,
                            cost_model_version, policy_version,
                            inverse_hypothesis_candidate
-                    FROM signal_outcomes
+                    FROM core_directional_signal_outcomes
                     WHERE signal_id = %(signal_id)s
                       AND horizon_seconds = %(horizon_seconds)s
                       AND policy_version = %(policy_version)s

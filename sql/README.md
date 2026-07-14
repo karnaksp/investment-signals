@@ -22,7 +22,9 @@ Migration `0103` introduces the idempotent event inbox and durable delivery
 outbox. The detector commits a Kafka offset only after the inbox, signals, and
 outbox entries commit in one PostgreSQL transaction.
 
-Migration `0107` introduces `signal_outcomes`, the durable ledger for automatic
-signal self-evaluation. It stores the predeclared horizon, verdict, cost/policy
-versions, materiality, and inverse-hypothesis candidate marker for every
-evaluated signal.
+Migrations `0107`-`0108` introduce `core_directional_signal_outcomes`, the
+durable core ledger for automatic directional signal self-evaluation. The
+product layer owns its own `signal_outcomes` table, so the core ledger is
+namespaced to avoid public/private migration collisions. It stores the
+predeclared horizon, verdict, cost/policy versions, materiality, and
+inverse-hypothesis candidate marker for every evaluated signal.

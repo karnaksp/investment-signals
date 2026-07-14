@@ -132,7 +132,7 @@ def test_postgres_signal_outcome_store_inserts_parameterized_row() -> None:
 
     sql, params = cursor.executions[0]
     assert outcome_id == str(deterministic_signal_outcome_id(outcome))
-    assert "INSERT INTO signal_outcomes" in sql
+    assert "INSERT INTO core_directional_signal_outcomes" in sql
     assert "ON CONFLICT" in sql
     assert SIGNAL_ID not in sql
     assert params["signal_id"] == UUID(SIGNAL_ID)
@@ -205,7 +205,7 @@ def test_postgres_candidate_source_emits_price_jump_directional_requests() -> No
     sql, params = cursor.executions[0]
     assert "FROM market_signals ms" in sql
     assert "NOT EXISTS" in sql
-    assert "signal_outcomes so" in sql
+    assert "core_directional_signal_outcomes so" in sql
     assert SIGNAL_ID not in sql
     assert params == {
         "matured_before": now - timedelta(seconds=330),

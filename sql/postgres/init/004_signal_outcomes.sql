@@ -1,5 +1,5 @@
--- Development compatibility. Product upgrades use migration 0107.
-CREATE TABLE IF NOT EXISTS signal_outcomes (
+-- Development compatibility. Product upgrades use migrations 0107-0108.
+CREATE TABLE IF NOT EXISTS core_directional_signal_outcomes (
     outcome_id UUID PRIMARY KEY,
     signal_id UUID NOT NULL
         REFERENCES market_signals(signal_id) ON DELETE CASCADE,
@@ -30,15 +30,15 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     UNIQUE (signal_id, horizon_seconds, policy_version, cost_model_version)
 );
 
-CREATE INDEX IF NOT EXISTS signal_outcomes_signal_idx
-    ON signal_outcomes (signal_id, horizon_seconds);
+CREATE INDEX IF NOT EXISTS core_directional_signal_outcomes_signal_idx
+    ON core_directional_signal_outcomes (signal_id, horizon_seconds);
 
-CREATE INDEX IF NOT EXISTS signal_outcomes_verdict_idx
-    ON signal_outcomes (verdict, evaluated_at DESC);
+CREATE INDEX IF NOT EXISTS core_directional_signal_outcomes_verdict_idx
+    ON core_directional_signal_outcomes (verdict, evaluated_at DESC);
 
-CREATE INDEX IF NOT EXISTS signal_outcomes_inverse_candidate_idx
-    ON signal_outcomes (signal_type, evaluated_at DESC)
+CREATE INDEX IF NOT EXISTS core_directional_signal_outcomes_inverse_candidate_idx
+    ON core_directional_signal_outcomes (signal_type, evaluated_at DESC)
     WHERE inverse_hypothesis_candidate;
 
-CREATE INDEX IF NOT EXISTS signal_outcomes_instrument_source_idx
-    ON signal_outcomes (instrument_id, source_event_at DESC);
+CREATE INDEX IF NOT EXISTS core_directional_signal_outcomes_instrument_source_idx
+    ON core_directional_signal_outcomes (instrument_id, source_event_at DESC);

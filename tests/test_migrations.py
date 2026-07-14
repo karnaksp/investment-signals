@@ -146,7 +146,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
     expected = {
         "postgresql": (
             root / "postgres" / "migrations",
-            (100, 101, 102, 103, 104, 105, 106, 107),
+            (100, 101, 102, 103, 104, 105, 106, 107, 108),
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
@@ -263,6 +263,20 @@ def test_signal_outcomes_migration_persists_automatic_verdicts() -> None:
     assert "inverse_hypothesis_candidate BOOLEAN NOT NULL DEFAULT false" in sql
     assert "UNIQUE (signal_id, horizon_seconds, policy_version, cost_model_version)" in sql
     assert "signal_outcomes_inverse_candidate_idx" in sql
+
+
+def test_core_outcomes_are_renamed_before_product_migrations() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0108_rename_core_signal_outcomes.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "RENAME TO core_directional_signal_outcomes" in sql
+    assert "core_directional_signal_outcomes_inverse_candidate_idx" in sql
 
 
 def test_clickhouse_reference_ticks_migration_supports_outcome_evaluation() -> None:
