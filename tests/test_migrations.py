@@ -146,7 +146,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
     expected = {
         "postgresql": (
             root / "postgres" / "migrations",
-            (100, 101, 102, 103, 104, 105, 106),
+            (100, 101, 102, 103, 104, 105, 106, 107),
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
@@ -242,3 +242,24 @@ def test_detector_config_acknowledgement_migration_is_runtime_proof() -> None:
     assert "failure_reason_code TEXT" in sql
     assert "configured_instruments_count INTEGER NOT NULL DEFAULT 0" in sql
     assert "detector_config_acknowledgements_latest_idx" in sql
+
+
+def test_signal_outcomes_migration_persists_automatic_verdicts() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0107_add_signal_outcomes.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS signal_outcomes" in sql
+    assert "REFERENCES market_signals(signal_id) ON DELETE CASCADE" in sql
+    assert "'confirmed', 'contradicted', 'insignificant', 'inconclusive'" in sql
+    assert "expected_direction SMALLINT NOT NULL CHECK (expected_direction IN (-1, 1))" in sql
+    assert "cost_model_version TEXT NOT NULL" in sql
+    assert "policy_version TEXT NOT NULL" in sql
+    assert "inverse_hypothesis_candidate BOOLEAN NOT NULL DEFAULT false" in sql
+    assert "UNIQUE (signal_id, horizon_seconds, policy_version, cost_model_version)" in sql
+    assert "signal_outcomes_inverse_candidate_idx" in sql

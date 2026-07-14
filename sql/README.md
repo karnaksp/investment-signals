@@ -21,3 +21,8 @@ re-execute init-only SQL.
 Migration `0103` introduces the idempotent event inbox and durable delivery
 outbox. The detector commits a Kafka offset only after the inbox, signals, and
 outbox entries commit in one PostgreSQL transaction.
+
+Migration `0107` introduces `signal_outcomes`, the durable ledger for automatic
+signal self-evaluation. It stores the predeclared horizon, verdict, cost/policy
+versions, materiality, and inverse-hypothesis candidate marker for every
+evaluated signal.
