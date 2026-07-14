@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
 from tinvest_signal_engine.application.signal_outcomes import (
+    DirectionalSignalOutcomeProcessor,
     DirectionalSignalOutcomeRequest,
     evaluate_directional_signal_from_ticks,
 )
 from tinvest_signal_engine.domain.reference_ticks import ReferenceTick
-from tinvest_signal_engine.domain.signal_outcomes import DirectionalOutcomePolicy
+from tinvest_signal_engine.domain.signal_outcomes import (
+    DirectionalOutcomePolicy,
+    DirectionalSignalOutcome,
+)
 
 
 def _policy(**overrides: object) -> DirectionalOutcomePolicy:
@@ -56,6 +61,16 @@ def _tick(
         last_price=Decimal(price),
         has_last_price=True,
     )
+
+
+@dataclass
+class _OutcomeStore:
+    outcome_id: str = "outcome-1"
+    outcomes: list[DirectionalSignalOutcome] = field(default_factory=list)
+
+    def persist(self, outcome: DirectionalSignalOutcome) -> str:
+        self.outcomes.append(outcome)
+        return self.outcome_id
 
 
 def test_evaluate_directional_signal_selects_anchor_without_lookahead() -> None:
@@ -134,3 +149,60 @@ def test_evaluate_directional_signal_returns_inconclusive_without_forward_price(
     assert outcome.reason_code == "forward_price_unavailable"
     assert outcome.anchor_price == Decimal("100")
     assert outcome.forward_price is None
+
+
+def test_directional_signal_outcome_processor_waits_until_horizon_matures() -> None:
+    source_at = datetime(2026, 7, 10, 7, 5, tzinfo=timezone.utc)
+    store = _OutcomeStore()
+
+    result = DirectionalSignalOutcomeProcessor(store).process(
+        request=_request(source_at),
+        ticks=[
+            _tick(event_at=source_at, price="100"),
+            _tick(event_at=source_at + timedelta(seconds=300), price="102"),
+        ],
+        now=source_at + timedelta(seconds=329),
+    )
+
+    assert result.status == "pending"
+    assert result.reason_code == "outcome_horizon_not_mature"
+    assert result.outcome is None
+    assert result.outcome_id is None
+    assert store.outcomes == []
+
+
+def test_directional_signal_outcome_processor_persists_mature_outcome() -> None:
+    source_at = datetime(2026, 7, 10, 7, 5, tzinfo=timezone.utc)
+    store = _OutcomeStore(outcome_id="stored-outcome")
+
+    result = DirectionalSignalOutcomeProcessor(store).process(
+        request=_request(source_at),
+        ticks=[
+            _tick(event_at=source_at, price="100"),
+            _tick(event_at=source_at + timedelta(seconds=300), price="102"),
+        ],
+        now=source_at + timedelta(seconds=330),
+    )
+
+    assert result.status == "stored"
+    assert result.reason_code == "confirmed"
+    assert result.outcome_id == "stored-outcome"
+    assert result.outcome is store.outcomes[0]
+    assert store.outcomes[0].verdict == "confirmed"
+
+
+def test_directional_signal_outcome_processor_persists_mature_unavailable_outcome() -> None:
+    source_at = datetime(2026, 7, 10, 7, 5, tzinfo=timezone.utc)
+    store = _OutcomeStore()
+
+    result = DirectionalSignalOutcomeProcessor(store).process(
+        request=_request(source_at),
+        ticks=[_tick(event_at=source_at, price="100")],
+        now=source_at + timedelta(seconds=330),
+    )
+
+    assert result.status == "stored"
+    assert result.reason_code == "forward_price_unavailable"
+    assert result.outcome is not None
+    assert result.outcome.verdict == "inconclusive"
+    assert store.outcomes[0].reason_code == "forward_price_unavailable"

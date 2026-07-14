@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Sequence
+from typing import Literal, Protocol, Sequence
 
 from tinvest_signal_engine.domain.reference_ticks import ReferenceTick
 from tinvest_signal_engine.domain.signal_outcomes import (
@@ -25,6 +25,51 @@ class DirectionalSignalOutcomeRequest:
     expected_direction: int
     realized_volatility_bps: Decimal
     policy: DirectionalOutcomePolicy
+
+
+class DirectionalSignalOutcomeStore(Protocol):
+    def persist(self, outcome: DirectionalSignalOutcome) -> str: ...
+
+
+@dataclass(frozen=True)
+class DirectionalSignalOutcomeProcessingResult:
+    status: Literal["pending", "stored"]
+    reason_code: str
+    outcome: DirectionalSignalOutcome | None = None
+    outcome_id: str | None = None
+
+
+class DirectionalSignalOutcomeProcessor:
+    def __init__(self, store: DirectionalSignalOutcomeStore) -> None:
+        self._store = store
+
+    def process(
+        self,
+        *,
+        request: DirectionalSignalOutcomeRequest,
+        ticks: Sequence[ReferenceTick],
+        now: datetime,
+    ) -> DirectionalSignalOutcomeProcessingResult:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        maturity_at = request.source_event_at + timedelta(
+            seconds=(
+                request.policy.horizon_seconds + request.policy.forward_grace_seconds
+            )
+        )
+        if now < maturity_at:
+            return DirectionalSignalOutcomeProcessingResult(
+                status="pending",
+                reason_code="outcome_horizon_not_mature",
+            )
+        outcome = evaluate_directional_signal_from_ticks(request=request, ticks=ticks)
+        outcome_id = self._store.persist(outcome)
+        return DirectionalSignalOutcomeProcessingResult(
+            status="stored",
+            reason_code=outcome.reason_code,
+            outcome=outcome,
+            outcome_id=outcome_id,
+        )
 
 
 def evaluate_directional_signal_from_ticks(
