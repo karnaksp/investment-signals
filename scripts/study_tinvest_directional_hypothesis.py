@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import ssl
 import statistics
 import sys
@@ -37,6 +38,9 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
 REGULAR_SESSION_START = datetime_time(10, 5)
 REGULAR_SESSION_END = datetime_time(18, 39)
+SECRET_VALUE_PATTERN = re.compile(
+    r"(?i)(bearer|token|password|secret|api[-_ ]?key)([=: ]+)([^\s,;]+)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +162,115 @@ def api_post(
             f"code={code}; message={message}"
         )
     raise RuntimeError(f"T-Invest {method} did not recover after bounded retries")
+
+
+def redact_diagnostic(value: object, *, limit: int = 360) -> str:
+    """Return bounded diagnostic text that is safe to persist in study artifacts."""
+
+    text = str(value).replace("\n", " ").replace("\r", " ")
+    text = SECRET_VALUE_PATTERN.sub(r"\1\2<redacted>", text)
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def classify_tinvest_failure(exc: BaseException) -> tuple[str, str, str]:
+    """Classify a failed T-Invest study without persisting sensitive details."""
+
+    diagnostic = redact_diagnostic(exc)
+    if isinstance(exc, httpx.ConnectError) and "CERTIFICATE_VERIFY_FAILED" in str(exc):
+        return (
+            "tls_certificate_verify_failed",
+            "TLS certificate verification failed before the study could read T-Invest data.",
+            "Keep TLS verification enabled. Install the intercepting/root CA into the OS trust store "
+            "or pass the correct PEM bundle with --ca-cert, then rerun the study.",
+        )
+    if isinstance(exc, httpx.TimeoutException):
+        return (
+            "tinvest_timeout",
+            "T-Invest request timed out before the study could complete.",
+            "Check network connectivity and rerun with the same parameters; the script uses bounded retries.",
+        )
+    if isinstance(exc, httpx.HTTPError):
+        return (
+            "tinvest_transport_error",
+            f"T-Invest transport failed: {diagnostic}",
+            "Check local network/proxy/TLS configuration and rerun. Do not disable TLS verification.",
+        )
+    if isinstance(exc, RuntimeError) and "Required environment key" in str(exc):
+        return (
+            "required_environment_key_absent",
+            diagnostic,
+            "Provide a local .env containing TINVEST_TOKEN or pass --env-file pointing to one.",
+        )
+    return (
+        "tinvest_study_failed",
+        diagnostic,
+        "Fix the reported local/API condition and rerun; no raw market rows or secrets were persisted.",
+    )
+
+
+def write_failure_artifact(
+    output_dir: Path,
+    *,
+    scope: dict,
+    reason_code: str,
+    message: str,
+    remediation: str,
+    ca_cert: Path | None,
+) -> Path:
+    generated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "scope": scope,
+                "reason_code": reason_code,
+                "message": message,
+                "ca_cert": str(ca_cert) if ca_cert is not None else None,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    run_dir = output_dir / f"failed-{fingerprint}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    payload = {
+        "status": "failed",
+        "generated_at": generated_at,
+        "scope": scope,
+        "reason_code": reason_code,
+        "message": message,
+        "remediation": remediation,
+        "tls_verification": "enabled",
+        "additional_ca_sha256": hashlib.sha256(ca_cert.read_bytes()).hexdigest()
+        if ca_cert is not None
+        else None,
+        "data_boundary": {
+            "raw_candles_persisted": False,
+            "instrument_uids_persisted": False,
+            "token_persisted": False,
+        },
+    }
+    (run_dir / "failure.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (run_dir / "report.md").write_text(
+        "\n".join(
+            [
+                "# T-Invest directional hypothesis study failed",
+                "",
+                "The study did not persist raw candles, instrument UIDs, account identifiers or tokens.",
+                "",
+                f"- Reason: `{reason_code}`",
+                f"- Message: {message}",
+                f"- Remediation: {remediation}",
+                "- TLS verification: enabled",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return run_dir
 
 
 def resolve_instruments(client: httpx.Client, tickers: Sequence[str]) -> dict[str, str]:
@@ -936,25 +1049,53 @@ def main() -> int:
         raise SystemExit("Configured primary horizon must be included in --horizons")
     end_day = args.end_day or (datetime.now(MOSCOW).date() - timedelta(days=1))
     start_day = end_day - timedelta(days=args.calendar_days - 1)
-    token = load_env_value(args.env_file, "TINVEST_TOKEN")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "x-app-name": "investment-signals-ga-study",
+    scope = {
+        "tickers": list(tickers),
+        "from": start_day.isoformat(),
+        "to": end_day.isoformat(),
+        "horizons": list(horizons),
     }
     verify: bool | ssl.SSLContext = True
     if args.ca_cert is not None:
         verify = ssl.create_default_context()
         verify.load_verify_locations(cafile=args.ca_cert)
-    with httpx.Client(headers=headers, timeout=45.0, verify=verify) as client:
-        instruments = resolve_instruments(client, tickers)
-        candles = fetch_candles(
-            client,
-            instruments,
-            start_day,
-            end_day,
-            request_interval_seconds=args.request_interval,
+    try:
+        token = load_env_value(args.env_file, "TINVEST_TOKEN")
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "x-app-name": "investment-signals-ga-study",
+        }
+        with httpx.Client(headers=headers, timeout=45.0, verify=verify) as client:
+            instruments = resolve_instruments(client, tickers)
+            candles = fetch_candles(
+                client,
+                instruments,
+                start_day,
+                end_day,
+                request_interval_seconds=args.request_interval,
+            )
+    except (RuntimeError, httpx.HTTPError) as exc:
+        reason_code, message, remediation = classify_tinvest_failure(exc)
+        run_dir = write_failure_artifact(
+            args.output_dir,
+            scope=scope,
+            reason_code=reason_code,
+            message=message,
+            remediation=remediation,
+            ca_cert=args.ca_cert,
         )
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "reason_code": reason_code,
+                    "report": str(run_dir / "report.md"),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
     input_fingerprint = fingerprint_candles(candles)
     grouped, quality = prepare_candles(candles)
     events, eligible_observations, detector_quality = detect_events(grouped, policy)

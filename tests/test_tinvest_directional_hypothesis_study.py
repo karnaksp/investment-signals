@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -178,3 +179,42 @@ def test_exploratory_horizon_cannot_clear_primary_gate() -> None:
 
     assert continuation is False
     assert inverse is False
+
+
+def test_failure_diagnostic_redacts_secrets() -> None:
+    diagnostic = study.redact_diagnostic(
+        "Authorization: Bearer abc.def token=plain password:pw secret value"
+    )
+
+    assert "abc.def" not in diagnostic
+    assert "plain" not in diagnostic
+    assert "password:pw" not in diagnostic
+    assert "<redacted>" in diagnostic
+
+
+def test_failure_artifact_persists_only_redacted_operational_context(tmp_path: Path) -> None:
+    run_dir = study.write_failure_artifact(
+        tmp_path,
+        scope={
+            "tickers": ["SBER"],
+            "from": "2026-07-01",
+            "to": "2026-07-13",
+            "horizons": [1, 5, 15],
+        },
+        reason_code="tls_certificate_verify_failed",
+        message="TLS certificate verification failed before the study could read T-Invest data.",
+        remediation="Pass the correct PEM bundle with --ca-cert.",
+        ca_cert=None,
+    )
+
+    payload = json.loads((run_dir / "failure.json").read_text(encoding="utf-8"))
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+
+    assert payload["status"] == "failed"
+    assert payload["data_boundary"] == {
+        "raw_candles_persisted": False,
+        "instrument_uids_persisted": False,
+        "token_persisted": False,
+    }
+    assert payload["tls_verification"] == "enabled"
+    assert "abc.def" not in report
