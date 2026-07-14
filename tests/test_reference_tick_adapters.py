@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 
 from tinvest_signal_engine.adapters.clickhouse_reference_ticks import (
+    ClickHouseReferenceTickReader,
     ClickHouseReferenceTickStore,
 )
 from tinvest_signal_engine.adapters.kafka_reference_ticks import (
@@ -23,6 +24,9 @@ NOW_TEXT = "2026-07-10T09:30:00+00:00"
 
 
 class _Response:
+    def __init__(self, payload: bytes = b"") -> None:
+        self._payload = payload
+
     def __enter__(self):
         return self
 
@@ -30,7 +34,7 @@ class _Response:
         return None
 
     def read(self) -> bytes:
-        return b""
+        return self._payload
 
 
 def test_clickhouse_store_uses_parameterized_idempotent_insert(monkeypatch) -> None:
@@ -71,6 +75,64 @@ def test_clickhouse_store_uses_parameterized_idempotent_insert(monkeypatch) -> N
     assert query["param_event_id"] == [EVENT_ID]
     assert query["param_trade_price"] == ["312.123456789"]
     assert request.headers["X-clickhouse-key"] == "secret"
+
+
+def test_clickhouse_reader_loads_bounded_reference_ticks(monkeypatch) -> None:
+    captured = {}
+    payload = (
+        b'{"instrument_id":"SBER_TQBR","event_at":"2026-07-10T09:30:00.123456789Z",'
+        b'"received_at":"2026-07-10T09:30:00.223456789Z",'
+        b'"event_id":"fd56ea27-aeb3-47f1-b038-182f747f5aa2",'
+        b'"source_kind":"orderbook","bid_price":"312.100000000",'
+        b'"ask_price":"312.300000000","last_price":"0","trade_price":"0",'
+        b'"bid_quantity":10,"ask_quantity":12,"has_valid_book":1,'
+        b'"has_last_price":0,"has_trade":0}\n'
+    )
+
+    def fake_urlopen(request, *, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _Response(payload)
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.clickhouse_reference_ticks.urlopen",
+        fake_urlopen,
+    )
+    start_at = datetime(2026, 7, 10, 9, 30, tzinfo=timezone.utc)
+    end_at = datetime(2026, 7, 10, 9, 35, tzinfo=timezone.utc)
+
+    ticks = ClickHouseReferenceTickReader(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+        limit=500,
+    ).load(instrument_id="SBER_TQBR", start_at=start_at, end_at=end_at)
+
+    request = captured["request"]
+    query = parse_qs(urlparse(request.full_url).query)
+    sql = request.data.decode("utf-8")
+    assert "FORMAT JSONEachRow" in sql
+    assert "market_reference_ticks" in sql
+    assert EVENT_ID not in sql
+    assert query["param_instrument_id"] == ["SBER_TQBR"]
+    assert query["param_start_at"] == [start_at.isoformat()]
+    assert query["param_end_at"] == [end_at.isoformat()]
+    assert query["param_limit"] == ["500"]
+    assert ticks == (
+        ReferenceTick(
+            instrument_id="SBER_TQBR",
+            event_at=datetime(2026, 7, 10, 9, 30, 0, 123456, tzinfo=timezone.utc),
+            received_at=datetime(2026, 7, 10, 9, 30, 0, 223456, tzinfo=timezone.utc),
+            event_id=UUID(EVENT_ID),
+            source_kind="orderbook",
+            bid_price=Decimal("312.100000000"),
+            ask_price=Decimal("312.300000000"),
+            bid_quantity=10,
+            ask_quantity=12,
+            has_valid_book=True,
+        ),
+    )
 
 
 @dataclass

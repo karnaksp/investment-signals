@@ -48,6 +48,7 @@ tinvest-market-unary-emitter = "tinvest_signal_engine.services.market_unary_emit
 tinvest-migrate = "tinvest_signal_engine.services.migrate:main"
 tinvest-delivery-worker = "tinvest_signal_engine.services.delivery_worker:main"
 tinvest-observation-worker = "tinvest_signal_engine.services.observation_worker:main"
+tinvest-signal-outcome-worker = "tinvest_signal_engine.services.signal_outcome_worker:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

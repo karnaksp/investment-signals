@@ -150,7 +150,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
-            (100, 101, 102, 103, 104),
+            (100, 101, 102, 103, 104, 105),
         ),
     }
     for engine, (directory, versions) in expected.items():
@@ -263,3 +263,21 @@ def test_signal_outcomes_migration_persists_automatic_verdicts() -> None:
     assert "inverse_hypothesis_candidate BOOLEAN NOT NULL DEFAULT false" in sql
     assert "UNIQUE (signal_id, horizon_seconds, policy_version, cost_model_version)" in sql
     assert "signal_outcomes_inverse_candidate_idx" in sql
+
+
+def test_clickhouse_reference_ticks_migration_supports_outcome_evaluation() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "clickhouse"
+        / "migrations"
+        / "0105_create_market_reference_ticks.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS signal_engine.market_reference_ticks" in sql
+    assert "event_at DateTime64(9, 'UTC')" in sql
+    assert "event_id UUID" in sql
+    assert "has_valid_book UInt8" in sql
+    assert "ORDER BY (instrument_id, toDate(event_at), event_at, event_id)" in sql
+    assert "TTL toDateTime(event_at) + toIntervalDay(35)" in sql

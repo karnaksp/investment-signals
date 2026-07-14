@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from decimal import Decimal
 from typing import Mapping
+from uuid import UUID
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -39,6 +43,39 @@ WHERE NOT EXISTS
     FROM market_reference_ticks
     WHERE event_id = toUUID({event_id:String})
 )
+""".strip()
+
+
+SELECT_REFERENCE_TICKS_SQL = """
+SELECT
+    instrument_id,
+    formatDateTime(event_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS event_at,
+    formatDateTime(received_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS received_at,
+    toString(event_id) AS event_id,
+    source_kind,
+    toString(bid_price) AS bid_price,
+    toString(ask_price) AS ask_price,
+    toString(last_price) AS last_price,
+    toString(trade_price) AS trade_price,
+    toUInt64(bid_quantity) AS bid_quantity,
+    toUInt64(ask_quantity) AS ask_quantity,
+    toUInt8(has_valid_book) AS has_valid_book,
+    toUInt8(has_last_price) AS has_last_price,
+    toUInt8(has_trade) AS has_trade
+FROM market_reference_ticks
+WHERE instrument_id = {instrument_id:String}
+  AND toDate(event_at) BETWEEN
+      toDate(parseDateTime64BestEffort({start_at:String}, 9, 'UTC'))
+      AND toDate(parseDateTime64BestEffort({end_at:String}, 9, 'UTC'))
+  AND event_at >= parseDateTime64BestEffort({start_at:String}, 9, 'UTC')
+  AND event_at <= parseDateTime64BestEffort({end_at:String}, 9, 'UTC')
+ORDER BY event_at ASC, event_id ASC
+LIMIT {limit:UInt32}
+SETTINGS
+    max_execution_time = 15,
+    timeout_before_checking_execution_speed = 0,
+    max_rows_to_read = 1000000
+FORMAT JSONEachRow
 """.strip()
 
 
@@ -104,3 +141,102 @@ def _parameters(tick: ReferenceTick) -> Mapping[str, str]:
         "has_last_price": "1" if tick.has_last_price else "0",
         "has_trade": "1" if tick.has_trade else "0",
     }
+
+
+class ClickHouseReferenceTickReader:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        database: str,
+        username: str,
+        password: str,
+        timeout_seconds: float = 15.0,
+        limit: int = 20_000,
+    ) -> None:
+        if not base_url.startswith(("http://", "https://")):
+            raise ValueError("ClickHouse URL must use HTTP or HTTPS")
+        if limit <= 0:
+            raise ValueError("reference tick read limit must be positive")
+        self._base_url = base_url.rstrip("/")
+        self._database = database
+        self._username = username
+        self._password = password
+        self._timeout_seconds = timeout_seconds
+        self._limit = limit
+
+    def load(
+        self,
+        *,
+        instrument_id: str,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> tuple[ReferenceTick, ...]:
+        if not instrument_id.strip():
+            raise ValueError("instrument_id must not be empty")
+        if start_at.tzinfo is None or start_at.utcoffset() is None:
+            raise ValueError("start_at must be timezone-aware")
+        if end_at.tzinfo is None or end_at.utcoffset() is None:
+            raise ValueError("end_at must be timezone-aware")
+        if end_at < start_at:
+            raise ValueError("end_at must not be before start_at")
+        query = {
+            "database": self._database,
+            "param_instrument_id": instrument_id,
+            "param_start_at": start_at.isoformat(),
+            "param_end_at": end_at.isoformat(),
+            "param_limit": str(self._limit),
+        }
+        request = Request(
+            f"{self._base_url}/?{urlencode(query)}",
+            data=SELECT_REFERENCE_TICKS_SQL.encode("utf-8"),
+            headers={
+                "Content-Type": "text/plain; charset=utf-8",
+                "X-ClickHouse-User": self._username,
+                "X-ClickHouse-Key": self._password,
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                payload = response.read().decode("utf-8")
+        except HTTPError as error:
+            raise RuntimeError(
+                f"ClickHouse reference tick select failed with status {error.code}"
+            ) from error
+        except URLError as error:
+            raise RuntimeError(
+                "ClickHouse reference tick select connection failed"
+            ) from error
+        return tuple(
+            _tick_from_row(json.loads(line))
+            for line in payload.splitlines()
+            if line
+        )
+
+
+def _tick_from_row(row: Mapping[str, object]) -> ReferenceTick:
+    return ReferenceTick(
+        instrument_id=str(row["instrument_id"]),
+        event_at=_parse_clickhouse_time(str(row["event_at"])),
+        received_at=_parse_clickhouse_time(str(row["received_at"])),
+        event_id=UUID(str(row["event_id"])),
+        source_kind=str(row["source_kind"]),
+        bid_price=Decimal(str(row["bid_price"])),
+        ask_price=Decimal(str(row["ask_price"])),
+        last_price=Decimal(str(row["last_price"])),
+        trade_price=Decimal(str(row["trade_price"])),
+        bid_quantity=int(row["bid_quantity"]),
+        ask_quantity=int(row["ask_quantity"]),
+        has_valid_book=bool(int(row["has_valid_book"])),
+        has_last_price=bool(int(row["has_last_price"])),
+        has_trade=bool(int(row["has_trade"])),
+    )
+
+
+def _parse_clickhouse_time(value: str) -> datetime:
+    text = value.rstrip("Z")
+    if "." in text:
+        prefix, fraction = text.split(".", 1)
+        text = f"{prefix}.{fraction[:6]}"
+    return datetime.fromisoformat(f"{text}+00:00")
