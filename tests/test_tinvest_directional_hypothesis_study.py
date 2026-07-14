@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import httpx
 
 
 SCRIPT = (
@@ -192,6 +193,89 @@ def test_failure_diagnostic_redacts_secrets() -> None:
     assert "plain" not in diagnostic
     assert "password:pw" not in diagnostic
     assert "<redacted>" in diagnostic
+
+
+class _APIResponse:
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _RetryingAPIClient:
+    def __init__(self, failures: list[BaseException], response: _APIResponse) -> None:
+        self.failures = failures
+        self.response = response
+        self.calls = 0
+
+    def post(self, _url: str, *, json: dict) -> _APIResponse:
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return self.response
+
+
+def test_api_post_retries_timeout_without_leaking_payload() -> None:
+    request = httpx.Request("POST", "https://example.invalid")
+    client = _RetryingAPIClient(
+        [httpx.ReadTimeout("token=secret", request=request)],
+        _APIResponse(200, {"ok": True}),
+    )
+    sleeps: list[float] = []
+
+    result = study.api_post(
+        client,  # type: ignore[arg-type]
+        "MarketDataService/GetCandles",
+        {"instrumentId": "secret-uid"},
+        attempts=2,
+        sleeper=sleeps.append,
+    )
+
+    assert result == {"ok": True}
+    assert client.calls == 2
+    assert sleeps == [0.75]
+
+
+def test_api_post_does_not_retry_certificate_verification_failure() -> None:
+    request = httpx.Request("POST", "https://example.invalid")
+    client = _RetryingAPIClient(
+        [httpx.ConnectError("CERTIFICATE_VERIFY_FAILED token=secret", request=request)],
+        _APIResponse(200, {"ok": True}),
+    )
+
+    with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
+        study.api_post(
+            client,  # type: ignore[arg-type]
+            "MarketDataService/GetCandles",
+            {},
+            attempts=3,
+            sleeper=lambda _seconds: None,
+        )
+
+    assert client.calls == 1
+
+
+def test_api_post_exhausted_transport_retry_is_redacted() -> None:
+    request = httpx.Request("POST", "https://example.invalid")
+    client = _RetryingAPIClient(
+        [httpx.ReadTimeout("token=secret", request=request)],
+        _APIResponse(200, {"ok": True}),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        study.api_post(
+            client,  # type: ignore[arg-type]
+            "MarketDataService/GetCandles",
+            {},
+            attempts=1,
+            sleeper=lambda _seconds: None,
+        )
+
+    assert "secret" not in str(error.value)
+    reason_code, _, _ = study.classify_tinvest_failure(error.value)
+    assert reason_code == "tinvest_transport_retry_exhausted"
 
 
 def test_failure_artifact_persists_only_redacted_operational_context(tmp_path: Path) -> None:

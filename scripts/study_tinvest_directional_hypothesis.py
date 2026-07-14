@@ -146,17 +146,30 @@ def api_post(
     payload: dict,
     *,
     attempts: int = 7,
+    sleeper=time.sleep,
 ) -> dict:
     url = f"{API_ROOT}{API_SERVICE}.{method}"
+    last_transport_error: httpx.HTTPError | None = None
     for attempt in range(attempts):
-        response = client.post(url, json=payload)
+        try:
+            response = client.post(url, json=payload)
+        except httpx.ConnectError as exc:
+            if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+                raise
+            last_transport_error = exc
+            sleeper(min(20.0, 0.75 * (2**attempt)))
+            continue
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_transport_error = exc
+            sleeper(min(20.0, 0.75 * (2**attempt)))
+            continue
         if response.status_code == 200:
             body = response.json()
             if not isinstance(body, dict):
                 raise RuntimeError(f"T-Invest {method} returned an invalid response")
             return body
         if response.status_code in {429, 500, 502, 503, 504}:
-            time.sleep(min(20.0, 0.75 * (2**attempt)))
+            sleeper(min(20.0, 0.75 * (2**attempt)))
             continue
         try:
             error = response.json()
@@ -168,6 +181,11 @@ def api_post(
             f"T-Invest {method} failed with HTTP {response.status_code}; "
             f"code={code}; message={message}"
         )
+    if last_transport_error is not None:
+        raise RuntimeError(
+            f"T-Invest {method} transport did not recover after bounded retries: "
+            f"{redact_diagnostic(last_transport_error)}"
+        ) from last_transport_error
     raise RuntimeError(f"T-Invest {method} did not recover after bounded retries")
 
 
@@ -197,6 +215,12 @@ def classify_tinvest_failure(exc: BaseException) -> tuple[str, str, str]:
             "tinvest_timeout",
             "T-Invest request timed out before the study could complete.",
             "Check network connectivity and rerun with the same parameters; the script uses bounded retries.",
+        )
+    if isinstance(exc, RuntimeError) and "transport did not recover after bounded retries" in str(exc):
+        return (
+            "tinvest_transport_retry_exhausted",
+            diagnostic,
+            "Check network stability and rerun with the same parameters. The script already used bounded retries.",
         )
     if isinstance(exc, httpx.HTTPError):
         return (
@@ -329,7 +353,9 @@ def prepare_russian_trusted_ca(
     }
 
 
-def resolve_instruments(client: httpx.Client, tickers: Sequence[str]) -> dict[str, str]:
+def resolve_instruments(
+    client: httpx.Client, tickers: Sequence[str], *, request_attempts: int
+) -> dict[str, str]:
     """Resolve canonical TQBR share UIDs; UIDs are never persisted."""
 
     result: dict[str, str] = {}
@@ -342,6 +368,7 @@ def resolve_instruments(client: httpx.Client, tickers: Sequence[str]) -> dict[st
                 "instrumentKind": "INSTRUMENT_TYPE_SHARE",
                 "apiTradeAvailableFlag": True,
             },
+            attempts=request_attempts,
         )
         matches = [
             item
@@ -358,6 +385,10 @@ def resolve_instruments(client: httpx.Client, tickers: Sequence[str]) -> dict[st
     return result
 
 
+def study_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 def fetch_candles(
     client: httpx.Client,
     instruments: dict[str, str],
@@ -365,6 +396,7 @@ def fetch_candles(
     end_day: date,
     *,
     request_interval_seconds: float,
+    request_attempts: int,
 ) -> list[Candle]:
     rows: list[Candle] = []
     day = start_day
@@ -373,6 +405,7 @@ def fetch_candles(
         # exchange daytime window needed by the predeclared study.
         start = datetime.combine(day, datetime_time(10, 0), tzinfo=MOSCOW).astimezone(UTC)
         end = datetime.combine(day, datetime_time(19, 0), tzinfo=MOSCOW).astimezone(UTC)
+        study_progress(f"fetching candles for {day.isoformat()} ({len(instruments)} ticker(s))")
         for ticker, uid in instruments.items():
             body = api_post(
                 client,
@@ -384,6 +417,7 @@ def fetch_candles(
                     "instrumentId": uid,
                     "candleSourceType": "CANDLE_SOURCE_EXCHANGE",
                 },
+                attempts=request_attempts,
             )
             for item in body.get("candles", []):
                 rows.append(
@@ -1084,6 +1118,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--horizons", default="1,5,15")
     parser.add_argument("--output-dir", type=Path, default=Path(".tmp/ga-real-data"))
     parser.add_argument("--request-interval", type=float, default=0.22)
+    parser.add_argument("--request-timeout", type=float, default=20.0)
+    parser.add_argument("--request-attempts", type=int, default=7)
     parser.add_argument(
         "--ca-cert",
         type=Path,
@@ -1112,6 +1148,10 @@ def main() -> int:
         return 0
     if args.calendar_days < 2:
         raise SystemExit("--calendar-days must be at least 2")
+    if args.request_timeout <= 0:
+        raise SystemExit("--request-timeout must be positive")
+    if args.request_attempts < 1:
+        raise SystemExit("--request-attempts must be at least 1")
     tickers = tuple(item.strip().upper() for item in args.tickers.split(",") if item.strip())
     horizons = tuple(sorted({int(item) for item in args.horizons.split(",")}))
     if not tickers or not horizons or any(item <= 0 for item in horizons):
@@ -1138,14 +1178,24 @@ def main() -> int:
             "Content-Type": "application/json",
             "x-app-name": "investment-signals-ga-study",
         }
-        with httpx.Client(headers=headers, timeout=45.0, verify=verify) as client:
-            instruments = resolve_instruments(client, tickers)
+        timeout = httpx.Timeout(
+            args.request_timeout,
+            connect=min(args.request_timeout, 10.0),
+            read=args.request_timeout,
+            write=min(args.request_timeout, 10.0),
+            pool=min(args.request_timeout, 10.0),
+        )
+        with httpx.Client(headers=headers, timeout=timeout, verify=verify) as client:
+            instruments = resolve_instruments(
+                client, tickers, request_attempts=args.request_attempts
+            )
             candles = fetch_candles(
                 client,
                 instruments,
                 start_day,
                 end_day,
                 request_interval_seconds=args.request_interval,
+                request_attempts=args.request_attempts,
             )
     except (RuntimeError, httpx.HTTPError) as exc:
         reason_code, message, remediation = classify_tinvest_failure(exc)
