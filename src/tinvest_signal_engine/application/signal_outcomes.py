@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -31,12 +32,40 @@ class DirectionalSignalOutcomeStore(Protocol):
     def persist(self, outcome: DirectionalSignalOutcome) -> str: ...
 
 
+class DirectionalSignalOutcomeCandidateSource(Protocol):
+    def due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> Sequence[DirectionalSignalOutcomeRequest]: ...
+
+
+class ReferenceTickReader(Protocol):
+    def load(
+        self,
+        *,
+        instrument_id: str,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> Sequence[ReferenceTick]: ...
+
+
 @dataclass(frozen=True)
 class DirectionalSignalOutcomeProcessingResult:
     status: Literal["pending", "stored"]
     reason_code: str
     outcome: DirectionalSignalOutcome | None = None
     outcome_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DirectionalSignalOutcomeBatchResult:
+    scanned: int
+    stored: int
+    pending: int
+    outcome_ids: tuple[str, ...]
+    reason_counts: tuple[tuple[str, int], ...]
 
 
 class DirectionalSignalOutcomeProcessor:
@@ -69,6 +98,80 @@ class DirectionalSignalOutcomeProcessor:
             reason_code=outcome.reason_code,
             outcome=outcome,
             outcome_id=outcome_id,
+        )
+
+
+class DirectionalSignalOutcomeBatchProcessor:
+    """Process due directional signals through application-owned ports.
+
+    Adapters decide how stored signal records become
+    ``DirectionalSignalOutcomeRequest`` instances and how reference ticks are
+    loaded.  This use case only coordinates maturity, bounded tick retrieval,
+    deterministic evaluation, and durable outcome persistence.
+    """
+
+    def __init__(
+        self,
+        *,
+        candidates: DirectionalSignalOutcomeCandidateSource,
+        ticks: ReferenceTickReader,
+        store: DirectionalSignalOutcomeStore,
+    ) -> None:
+        self._candidates = candidates
+        self._ticks = ticks
+        self._processor = DirectionalSignalOutcomeProcessor(store)
+
+    def process_due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> DirectionalSignalOutcomeBatchResult:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+
+        requests = tuple(self._candidates.due(now=now, limit=limit))
+        stored = 0
+        pending = 0
+        outcome_ids: list[str] = []
+        reason_counts: Counter[str] = Counter()
+
+        for request in requests:
+            maturity_at = _maturity_at(request)
+            if now < maturity_at:
+                pending += 1
+                reason_counts["outcome_horizon_not_mature"] += 1
+                continue
+
+            tick_window_start = request.source_event_at - timedelta(
+                seconds=request.policy.anchor_max_age_seconds,
+            )
+            tick_window_end = maturity_at
+            result = self._processor.process(
+                request=request,
+                ticks=self._ticks.load(
+                    instrument_id=request.instrument_id,
+                    start_at=tick_window_start,
+                    end_at=tick_window_end,
+                ),
+                now=now,
+            )
+            reason_counts[result.reason_code] += 1
+            if result.status == "stored":
+                stored += 1
+                if result.outcome_id is not None:
+                    outcome_ids.append(result.outcome_id)
+            else:
+                pending += 1
+
+        return DirectionalSignalOutcomeBatchResult(
+            scanned=len(requests),
+            stored=stored,
+            pending=pending,
+            outcome_ids=tuple(outcome_ids),
+            reason_counts=tuple(sorted(reason_counts.items())),
         )
 
 
@@ -116,6 +219,12 @@ def evaluate_directional_signal_from_ticks(
         forward_tick=forward,
         realized_volatility_bps=request.realized_volatility_bps,
         policy=request.policy,
+    )
+
+
+def _maturity_at(request: DirectionalSignalOutcomeRequest) -> datetime:
+    return request.source_event_at + timedelta(
+        seconds=request.policy.horizon_seconds + request.policy.forward_grace_seconds,
     )
 
 

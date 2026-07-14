@@ -6,6 +6,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from tinvest_signal_engine.application.signal_outcomes import (
+    DirectionalSignalOutcomeBatchProcessor,
     DirectionalSignalOutcomeProcessor,
     DirectionalSignalOutcomeRequest,
     evaluate_directional_signal_from_ticks,
@@ -71,6 +72,42 @@ class _OutcomeStore:
     def persist(self, outcome: DirectionalSignalOutcome) -> str:
         self.outcomes.append(outcome)
         return self.outcome_id
+
+
+@dataclass
+class _CandidateSource:
+    requests: list[DirectionalSignalOutcomeRequest]
+    calls: list[tuple[datetime, int]] = field(default_factory=list)
+
+    def due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[DirectionalSignalOutcomeRequest]:
+        self.calls.append((now, limit))
+        return self.requests[:limit]
+
+
+@dataclass
+class _ReferenceTickReader:
+    ticks: list[ReferenceTick]
+    calls: list[tuple[str, datetime, datetime]] = field(default_factory=list)
+
+    def load(
+        self,
+        *,
+        instrument_id: str,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> list[ReferenceTick]:
+        self.calls.append((instrument_id, start_at, end_at))
+        return [
+            tick
+            for tick in self.ticks
+            if tick.instrument_id == instrument_id
+            and start_at <= tick.event_at <= end_at
+        ]
 
 
 def test_evaluate_directional_signal_selects_anchor_without_lookahead() -> None:
@@ -206,3 +243,87 @@ def test_directional_signal_outcome_processor_persists_mature_unavailable_outcom
     assert result.outcome is not None
     assert result.outcome.verdict == "inconclusive"
     assert store.outcomes[0].reason_code == "forward_price_unavailable"
+
+
+def test_directional_signal_outcome_batch_processes_due_candidates() -> None:
+    source_at = datetime(2026, 7, 10, 7, 5, tzinfo=timezone.utc)
+    request = _request(source_at)
+    candidate_source = _CandidateSource([request])
+    tick_reader = _ReferenceTickReader(
+        [
+            _tick(event_at=source_at - timedelta(seconds=5), price="100"),
+            _tick(event_at=source_at + timedelta(seconds=300), price="102"),
+            _tick(event_at=source_at + timedelta(seconds=331), price="110"),
+        ]
+    )
+    store = _OutcomeStore(outcome_id="stored-outcome")
+
+    result = DirectionalSignalOutcomeBatchProcessor(
+        candidates=candidate_source,
+        ticks=tick_reader,
+        store=store,
+    ).process_due(now=source_at + timedelta(seconds=330), limit=25)
+
+    assert candidate_source.calls == [(source_at + timedelta(seconds=330), 25)]
+    assert tick_reader.calls == [
+        (
+            "SBER",
+            source_at - timedelta(seconds=5),
+            source_at + timedelta(seconds=330),
+        )
+    ]
+    assert result.scanned == 1
+    assert result.stored == 1
+    assert result.pending == 0
+    assert result.outcome_ids == ("stored-outcome",)
+    assert result.reason_counts == (("confirmed", 1),)
+    assert store.outcomes[0].forward_price == Decimal("102")
+
+
+def test_directional_signal_outcome_batch_does_not_load_ticks_before_maturity() -> None:
+    source_at = datetime(2026, 7, 10, 7, 5, tzinfo=timezone.utc)
+    candidate_source = _CandidateSource([_request(source_at)])
+    tick_reader = _ReferenceTickReader(
+        [
+            _tick(event_at=source_at, price="100"),
+            _tick(event_at=source_at + timedelta(seconds=300), price="102"),
+        ]
+    )
+    store = _OutcomeStore()
+
+    result = DirectionalSignalOutcomeBatchProcessor(
+        candidates=candidate_source,
+        ticks=tick_reader,
+        store=store,
+    ).process_due(now=source_at + timedelta(seconds=329), limit=25)
+
+    assert tick_reader.calls == []
+    assert result.scanned == 1
+    assert result.stored == 0
+    assert result.pending == 1
+    assert result.outcome_ids == ()
+    assert result.reason_counts == (("outcome_horizon_not_mature", 1),)
+    assert store.outcomes == []
+
+
+def test_directional_signal_outcome_batch_rejects_invalid_clock_and_limit() -> None:
+    source_at = datetime(2026, 7, 10, 7, 5, tzinfo=timezone.utc)
+    processor = DirectionalSignalOutcomeBatchProcessor(
+        candidates=_CandidateSource([_request(source_at)]),
+        ticks=_ReferenceTickReader([]),
+        store=_OutcomeStore(),
+    )
+
+    try:
+        processor.process_due(now=source_at.replace(tzinfo=None), limit=1)
+    except ValueError as exc:
+        assert str(exc) == "now must be timezone-aware"
+    else:
+        raise AssertionError("naive now must be rejected")
+
+    try:
+        processor.process_due(now=source_at, limit=0)
+    except ValueError as exc:
+        assert str(exc) == "limit must be positive"
+    else:
+        raise AssertionError("non-positive limit must be rejected")
