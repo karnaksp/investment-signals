@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Run a redacted directional event study on official T-Invest candles.
 
-The study is intentionally separate from production outcome computation.  It
-uses historical one-minute exchange candles to validate the automatic-verdict
-math and to decide whether a continuation detector deserves further shadow
-testing.  It does *not* claim tick/order-book or execution parity.
+The study is intentionally separate from production outcome orchestration.  It
+uses historical one-minute exchange candles and the production directional
+verdict classifier to decide whether a continuation detector deserves further
+shadow testing.  It does *not* claim tick/order-book or execution parity.
 
 Only aggregate JSON and Markdown are written.  Tokens, instrument UIDs, account
 identifiers, raw candles and individual event rows remain in memory.
@@ -32,6 +32,11 @@ from typing import Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 import httpx
+
+from tinvest_signal_engine.domain.signal_outcomes import (
+    DirectionalOutcomePolicy,
+    classify_directional_outcome,
+)
 
 
 API_ROOT = "https://invest-public-api.tbank.ru/rest/"
@@ -489,20 +494,22 @@ def classify_directional(
 ) -> tuple[str, float, float, float]:
     """Return verdict, expected net, reverse net and predeclared materiality."""
 
-    scaled_sigma = baseline_sigma_bps * math.sqrt(horizon_minutes)
-    materiality = max(
-        policy.outcome_min_move_bps,
-        policy.outcome_volatility_multiplier * scaled_sigma,
+    assessment = classify_directional_outcome(
+        gross_expected_bps=gross_expected_bps,
+        baseline_sigma_bps=baseline_sigma_bps,
+        horizon_seconds=horizon_minutes * 60,
+        policy=DirectionalOutcomePolicy(
+            minimum_move_bps=policy.outcome_min_move_bps,
+            volatility_multiplier=policy.outcome_volatility_multiplier,
+            round_trip_cost_bps=policy.round_trip_cost_bps,
+        ),
     )
-    net_expected = gross_expected_bps - policy.round_trip_cost_bps
-    net_reverse = -gross_expected_bps - policy.round_trip_cost_bps
-    if net_expected >= materiality:
-        verdict = "confirmed"
-    elif net_reverse >= materiality:
-        verdict = "contradicted"
-    else:
-        verdict = "insignificant"
-    return verdict, net_expected, net_reverse, materiality
+    return (
+        assessment.verdict,
+        assessment.net_expected_bps,
+        assessment.net_reverse_bps,
+        assessment.materiality_bps,
+    )
 
 
 def prepare_candles(candles: Sequence[Candle]) -> tuple[dict[tuple[str, date], list[Candle]], dict]:
