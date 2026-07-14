@@ -146,7 +146,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
     expected = {
         "postgresql": (
             root / "postgres" / "migrations",
-            (100, 101, 102, 103, 104, 105),
+            (100, 101, 102, 103, 104, 105, 106),
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
@@ -223,3 +223,22 @@ def test_detector_state_snapshot_is_versioned_and_broker_monotonic() -> None:
     assert "NEW.offset_id <= OLD.offset_id" in sql
     assert "detector_state_snapshots_advance_guard" in sql
     assert "detector_state_snapshots_delete_guard" in sql
+
+
+def test_detector_config_acknowledgement_migration_is_runtime_proof() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0106_add_detector_config_acknowledgements.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE detector_config_acknowledgements" in sql
+    assert "detector_instance_id TEXT NOT NULL" in sql
+    assert "detector_config_version TEXT NOT NULL" in sql
+    assert "status TEXT NOT NULL CHECK (status IN ('loaded', 'failed'))" in sql
+    assert "failure_reason_code TEXT" in sql
+    assert "configured_instruments_count INTEGER NOT NULL DEFAULT 0" in sql
+    assert "detector_config_acknowledgements_latest_idx" in sql

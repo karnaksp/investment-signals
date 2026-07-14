@@ -42,6 +42,7 @@ def main() -> None:
         settings,
         delivered_count_since=store.count_delivered_since,
         checkpoints=store.load_state_checkpoints(),
+        config_ack_sink=store,
     )
     metrics = PrometheusReliabilityMetrics()
     publisher = KafkaSignalPublisher(settings)

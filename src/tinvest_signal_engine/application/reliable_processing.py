@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from time import monotonic
 from typing import Protocol, Sequence
 
@@ -61,6 +62,32 @@ class DetectorStateCheckpoint:
 
 
 @dataclass(frozen=True)
+class DetectorConfigAcknowledgement:
+    """Runtime proof that a detector instance loaded a config revision."""
+
+    detector_instance_id: str
+    detector_config_version: str
+    status: str
+    loaded_at: datetime
+    configured_instruments_count: int = 0
+    failure_reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.detector_instance_id:
+            raise ValueError("detector_instance_id must not be empty")
+        if not self.detector_config_version:
+            raise ValueError("detector_config_version must not be empty")
+        if self.status not in {"loaded", "failed"}:
+            raise ValueError("detector config acknowledgement status is invalid")
+        if self.configured_instruments_count < 0:
+            raise ValueError("configured_instruments_count must be non-negative")
+        if self.status == "failed" and not self.failure_reason_code:
+            raise ValueError("failed acknowledgement requires a reason code")
+        if self.status == "loaded" and self.failure_reason_code:
+            raise ValueError("loaded acknowledgement cannot include failure reason")
+
+
+@dataclass(frozen=True)
 class DetectionBatch:
     """Application-owned unit that must be staged in one durable transaction."""
 
@@ -75,6 +102,13 @@ class BatchDetectionPort(Protocol):
     def replace_state(
         self,
         checkpoints: Sequence[DetectorStateCheckpoint],
+    ) -> None: ...
+
+
+class DetectorConfigAcknowledgementSink(Protocol):
+    def persist_detector_config_ack(
+        self,
+        acknowledgement: DetectorConfigAcknowledgement,
     ) -> None: ...
 
 

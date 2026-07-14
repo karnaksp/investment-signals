@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -170,3 +171,64 @@ def test_legacy_adapter_checkpoint_hydrates_restart_from_opaque_payload() -> Non
     restored = restarted._detector._states[event.instrument_id]
     assert len(restored.trade_points) == 1
     assert restored.trade_points[0].quantity == 10.0
+
+
+def test_legacy_adapter_acks_detector_config_on_startup() -> None:
+    sink = _AckSink()
+    settings = RuntimeSettings.from_env()
+
+    LegacyDetectionAdapter(
+        settings,
+        delivered_count_since=lambda **kwargs: 0,
+        config_ack_sink=sink,
+        detector_instance_id="detector-test-1",
+    )
+
+    assert len(sink.acks) == 1
+    ack = sink.acks[0]
+    assert ack.detector_instance_id == "detector-test-1"
+    assert ack.detector_config_version.startswith("sha256:")
+    assert ack.status == "loaded"
+    assert ack.failure_reason_code is None
+    assert ack.configured_instruments_count >= 0
+
+
+def test_legacy_adapter_acks_detector_config_after_hot_reload(tmp_path: Path) -> None:
+    detector_path = tmp_path / "detectors.yaml"
+    overrides_path = tmp_path / "detectors.overrides.yaml"
+    detector_path.write_text(
+        Path("conf/detectors.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    overrides_path.write_text("{}\n", encoding="utf-8")
+    settings = replace(
+        RuntimeSettings.from_env(),
+        detector_path=detector_path,
+        detector_overrides_path=overrides_path,
+        config_reload_interval_seconds=1,
+    )
+    sink = _AckSink()
+    adapter = LegacyDetectionAdapter(
+        settings,
+        delivered_count_since=lambda **kwargs: 0,
+        config_ack_sink=sink,
+        detector_instance_id="detector-test-2",
+    )
+    detector_path.write_text(
+        detector_path.read_text(encoding="utf-8") + "\n# reload-test\n",
+        encoding="utf-8",
+    )
+    adapter._last_config_poll = 0
+
+    adapter._maybe_reload()
+
+    assert [ack.status for ack in sink.acks] == ["loaded", "loaded"]
+    assert sink.acks[0].detector_config_version != sink.acks[1].detector_config_version
+
+
+class _AckSink:
+    def __init__(self) -> None:
+        self.acks = []
+
+    def persist_detector_config_ack(self, acknowledgement) -> None:
+        self.acks.append(acknowledgement)

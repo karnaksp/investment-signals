@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
     DetectionBatch,
+    DetectorConfigAcknowledgement,
     DetectorStateCheckpoint,
     StoredEvent,
 )
@@ -121,6 +122,30 @@ class PostgresReliableProcessingStore:
             )
             for row in rows
         )
+
+    def persist_detector_config_ack(
+        self,
+        acknowledgement: DetectorConfigAcknowledgement,
+    ) -> None:
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO detector_config_acknowledgements (
+                    detector_instance_id, detector_config_version, status,
+                    failure_reason_code, configured_instruments_count, loaded_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    acknowledgement.detector_instance_id,
+                    acknowledgement.detector_config_version,
+                    acknowledgement.status,
+                    acknowledgement.failure_reason_code,
+                    acknowledgement.configured_instruments_count,
+                    acknowledgement.loaded_at,
+                ),
+            )
+            self._connection.commit()
 
     @staticmethod
     def _upsert_checkpoint(

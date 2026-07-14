@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Callable, Sequence
+from uuid import uuid4
 
 from tinvest_signal_engine.application.reliable_processing import (
     DetectionBatch,
+    DetectorConfigAcknowledgement,
+    DetectorConfigAcknowledgementSink,
     DetectorStateCheckpoint,
 )
 from tinvest_signal_engine.config import RuntimeSettings, load_detector_config
@@ -41,9 +45,15 @@ class LegacyDetectionAdapter:
         *,
         delivered_count_since: Callable[..., int],
         checkpoints: Sequence[DetectorStateCheckpoint] = (),
+        config_ack_sink: DetectorConfigAcknowledgementSink | None = None,
+        detector_instance_id: str | None = None,
     ) -> None:
         self._settings = settings
+        self._config_ack_sink = config_ack_sink
+        self._detector_instance_id = detector_instance_id or str(uuid4())
+        self._configured_instruments_count = 0
         self._detector = self._build_detector()
+        self._ack_detector_config("loaded", self._detector_config_version())
         self.replace_state(checkpoints)
         self._detector_mtime = settings.detector_path.stat().st_mtime
         self._overrides_mtime = self._current_overrides_mtime()
@@ -121,6 +131,7 @@ class LegacyDetectionAdapter:
             self._settings.detector_path,
             self._settings.detector_overrides_path,
         )
+        self._configured_instruments_count = len(loaded.per_instrument)
         return SignalDetector(
             loaded.default,
             loaded.per_instrument,
@@ -167,15 +178,44 @@ class LegacyDetectionAdapter:
             for instrument_id in set(self._detector._states)
             | set(self._detector._mid_track)
         ]
-        replacement = self._build_detector()
+        try:
+            replacement = self._build_detector()
+        except Exception:
+            self._ack_detector_config(
+                "failed",
+                self._detector_config_version(),
+                failure_reason_code="detector_config_reload_failed",
+            )
+            raise
         replace_instrument_states(replacement, payloads)
         self._detector = replacement
         self._detector_mtime = detector_mtime
         self._overrides_mtime = overrides_mtime
+        self._ack_detector_config("loaded", self._detector_config_version())
         logger.info(
             "Reloaded detector config from %s (+ %s)",
             self._settings.detector_path,
             self._settings.detector_overrides_path,
+        )
+
+    def _ack_detector_config(
+        self,
+        status: str,
+        detector_config_version: str,
+        *,
+        failure_reason_code: str | None = None,
+    ) -> None:
+        if self._config_ack_sink is None:
+            return
+        self._config_ack_sink.persist_detector_config_ack(
+            DetectorConfigAcknowledgement(
+                detector_instance_id=self._detector_instance_id,
+                detector_config_version=detector_config_version,
+                status=status,
+                loaded_at=datetime.now(UTC),
+                configured_instruments_count=self._configured_instruments_count,
+                failure_reason_code=failure_reason_code,
+            )
         )
 
     def _delivery_targets(self) -> tuple[DeliveryTarget, ...]:
