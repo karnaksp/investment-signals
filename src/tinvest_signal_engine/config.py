@@ -266,6 +266,7 @@ class RuntimeSettings:
     detector_path: Path
     detector_overrides_path: Path
     config_reload_interval_seconds: int
+    ingestor_orderbook_min_interval_ms: int
     threshold_recalc_interval_hours: int
     threshold_lookback_days: int
     threshold_hourly_deviation_multiplier: float
@@ -424,6 +425,9 @@ class RuntimeSettings:
             detector_overrides_path=detector_overrides_path,
             config_reload_interval_seconds=int(
                 os.getenv("CONFIG_RELOAD_INTERVAL_SECONDS", "10")
+            ),
+            ingestor_orderbook_min_interval_ms=max(
+                0, int(os.getenv("INGESTOR_ORDERBOOK_MIN_INTERVAL_MS", "0"))
             ),
             threshold_recalc_interval_hours=int(
                 os.getenv("THRESHOLD_RECALC_INTERVAL_HOURS", "24")

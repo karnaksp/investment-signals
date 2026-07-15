@@ -235,6 +235,7 @@ def main() -> None:
                     )
                     market_data_stream = client.create_market_data_stream()
                     subscribe_to_stream(market_data_stream, instrument_configs)
+                    last_published_at: dict[tuple[str, str], float] = {}
 
                     for message in market_data_stream:
                         if reload_iv > 0:
@@ -257,6 +258,8 @@ def main() -> None:
                                     )
                         normalized = normalize_stream_message(message, registry)
                         if normalized is None:
+                            continue
+                        if not _should_publish(normalized, settings, last_published_at):
                             continue
                         out_val: Any = (
                             normalized
@@ -301,6 +304,25 @@ def _extract_plain_field(message, field_name: str) -> dict[str, Any] | None:
     if isinstance(plain_value, dict):
         return plain_value
     return {"value": plain_value}
+
+
+def _should_publish(
+    event: NormalizedEvent,
+    settings: RuntimeSettings,
+    last_published_at: dict[tuple[str, str], float],
+) -> bool:
+    if event.event_type != "orderbook":
+        return True
+    interval_ms = settings.ingestor_orderbook_min_interval_ms
+    if interval_ms <= 0:
+        return True
+    key = (event.instrument_id, event.event_type)
+    event_time = event.source_time.timestamp()
+    previous = last_published_at.get(key)
+    if previous is not None and (event_time - previous) * 1000.0 < interval_ms:
+        return False
+    last_published_at[key] = event_time
+    return True
 
 
 def _resolve_metadata(registry, payload: dict[str, Any]) -> InstrumentMetadata:
