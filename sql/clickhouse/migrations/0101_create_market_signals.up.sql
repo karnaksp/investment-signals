@@ -29,4 +29,4 @@ CREATE TABLE IF NOT EXISTS signal_engine.market_signals
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(detected_at)
 ORDER BY (signal_type, instrument_id, toDate(detected_at), detected_at, signal_id)
-TTL detected_at + INTERVAL 365 DAY DELETE;
+TTL toDateTime(detected_at) + INTERVAL 365 DAY DELETE;

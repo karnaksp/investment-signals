@@ -150,7 +150,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
-            (100, 101, 102, 103, 104, 105),
+            (100, 101, 102, 103, 104, 105, 106, 107),
         ),
     }
     for engine, (directory, versions) in expected.items():
