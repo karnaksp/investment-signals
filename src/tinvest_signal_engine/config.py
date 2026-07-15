@@ -20,6 +20,8 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
             "POSTGRES_PASSWORD",
             "REDIS_URL",
             "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
             "TINVEST_TOKEN",
         }
     ),
@@ -30,6 +32,8 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
             "POSTGRES_PASSWORD",
             "REDIS_URL",
             "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
         }
     ),
     "delivery_worker": frozenset(
@@ -37,6 +41,8 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
             "ALERT_WEBHOOK_URL",
             "POSTGRES_PASSWORD",
             "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
         }
     ),
     "ingestor": frozenset({"TINVEST_TOKEN"}),
@@ -109,6 +115,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _env_optional_int(name: str) -> int | None:
     raw_value = os.getenv(name)
+    if raw_value is None:
+        return None
+    value = raw_value.strip()
+    return int(value) if value else None
+
+
+def _secret_optional_int(name: str, *, service_name: str | None = None) -> int | None:
+    raw_value = load_secret(name, service_name=service_name)
     if raw_value is None:
         return None
     value = raw_value.strip()
@@ -397,9 +411,12 @@ class RuntimeSettings:
                 "TELEGRAM_BOT_TOKEN", service_name=service_name
             )
             or None,
-            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
-            telegram_message_thread_id=_env_optional_int(
-                "TELEGRAM_MESSAGE_THREAD_ID"
+            telegram_chat_id=load_secret(
+                "TELEGRAM_CHAT_ID", service_name=service_name
+            )
+            or None,
+            telegram_message_thread_id=_secret_optional_int(
+                "TELEGRAM_MESSAGE_THREAD_ID", service_name=service_name
             ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             instruments_path=instruments_path,

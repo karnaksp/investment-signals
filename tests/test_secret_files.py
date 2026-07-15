@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tinvest_signal_engine.config import load_secret
+from tinvest_signal_engine.config import RuntimeSettings, load_secret
 
 
 def test_secret_can_be_loaded_from_utf8_file(tmp_path: Path) -> None:
@@ -102,3 +102,23 @@ def test_redis_url_secret_is_scoped_to_consumers(
     )
 
     assert value == "redis://detector:secret@redis:6379/0"
+
+
+def test_delivery_worker_reads_telegram_config_from_service_secret_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_file = tmp_path / "telegram-bot-token"
+    chat_file = tmp_path / "telegram-chat-id"
+    thread_file = tmp_path / "telegram-message-thread-id"
+    token_file.write_text("bot-token\n", encoding="utf-8")
+    chat_file.write_text("-1001234567890\n", encoding="utf-8")
+    thread_file.write_text("42\n", encoding="utf-8")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_FILE", str(chat_file))
+    monkeypatch.setenv("TELEGRAM_MESSAGE_THREAD_ID_FILE", str(thread_file))
+
+    settings = RuntimeSettings.from_env(service_name="delivery_worker")
+
+    assert settings.telegram_bot_token == "bot-token"
+    assert settings.telegram_chat_id == "-1001234567890"
+    assert settings.telegram_message_thread_id == 42
