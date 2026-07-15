@@ -119,6 +119,39 @@ def test_study_window_defaults_to_rolling_calendar_days() -> None:
     assert days == 160
 
 
+def test_env_loader_supports_token_file_without_logging_secret(tmp_path: Path) -> None:
+    secret = tmp_path / "tinvest-token"
+    secret.write_text("broker-secret-token\n", encoding="utf-8")
+    env = tmp_path / ".env"
+    env.write_text("TINVEST_TOKEN_FILE=tinvest-token\n", encoding="utf-8")
+
+    assert study.load_env_value(env, "TINVEST_TOKEN") == "broker-secret-token"
+
+
+def test_env_loader_prefers_direct_token_over_token_file(tmp_path: Path) -> None:
+    secret = tmp_path / "tinvest-token"
+    secret.write_text("file-token\n", encoding="utf-8")
+    env = tmp_path / ".env"
+    env.write_text(
+        "export TINVEST_TOKEN=direct-token\nTINVEST_TOKEN_FILE=tinvest-token\n",
+        encoding="utf-8",
+    )
+
+    assert study.load_env_value(env, "TINVEST_TOKEN") == "direct-token"
+
+
+def test_env_loader_rejects_empty_token_file_without_leaking_path(tmp_path: Path) -> None:
+    secret = tmp_path / "tinvest-token"
+    secret.write_text("\n", encoding="utf-8")
+    env = tmp_path / ".env"
+    env.write_text(f"TINVEST_TOKEN_FILE={secret}\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="TINVEST_TOKEN file is empty") as failure:
+        study.load_env_value(env, "TINVEST_TOKEN")
+
+    assert str(secret) not in str(failure.value)
+
+
 def test_study_window_supports_explicit_non_overlapping_cohort() -> None:
     start, end, selection, days = study.resolve_study_window(
         start_day=date(2026, 7, 15),

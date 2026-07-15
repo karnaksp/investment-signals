@@ -128,15 +128,32 @@ class EventOutcome:
 def load_env_value(path: Path, key: str) -> str:
     """Read one dotenv value without adding the secret to logs or errors."""
 
+    values: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         candidate, value = line.split("=", 1)
-        if candidate.strip() == key:
-            result = value.strip().strip('"').strip("'")
-            if result:
-                return result
+        candidate = candidate.strip()
+        if candidate.startswith("export "):
+            candidate = candidate.removeprefix("export ").strip()
+        result = value.strip().strip('"').strip("'")
+        if result:
+            values[candidate] = result
+    if direct := values.get(key):
+        return direct
+    token_file_key = f"{key}_FILE"
+    if token_file := values.get(token_file_key):
+        token_path = Path(token_file)
+        if not token_path.is_absolute():
+            token_path = path.parent / token_path
+        try:
+            token = token_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Required environment key {key} file is unreadable") from exc
+        if token:
+            return token
+        raise RuntimeError(f"Required environment key {key} file is empty")
     raise RuntimeError(f"Required environment key {key} is absent")
 
 
