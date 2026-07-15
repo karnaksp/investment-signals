@@ -105,6 +105,44 @@ def test_chronological_split_uses_all_supplied_trading_days() -> None:
     assert max(train) < min(validation)
 
 
+def test_study_window_defaults_to_rolling_calendar_days() -> None:
+    start, end, selection, days = study.resolve_study_window(
+        start_day=None,
+        end_day=date(2026, 7, 14),
+        calendar_days=160,
+        today=date(2026, 7, 15),
+    )
+
+    assert start == date(2026, 2, 5)
+    assert end == date(2026, 7, 14)
+    assert selection == "rolling_calendar_days"
+    assert days == 160
+
+
+def test_study_window_supports_explicit_non_overlapping_cohort() -> None:
+    start, end, selection, days = study.resolve_study_window(
+        start_day=date(2026, 7, 15),
+        end_day=date(2026, 8, 31),
+        calendar_days=160,
+        today=date(2026, 9, 1),
+    )
+
+    assert start == date(2026, 7, 15)
+    assert end == date(2026, 8, 31)
+    assert selection == "explicit_date_range"
+    assert days == 48
+
+
+def test_explicit_study_window_rejects_single_day_cohort() -> None:
+    with pytest.raises(ValueError, match="at least 2 calendar days"):
+        study.resolve_study_window(
+            start_day=date(2026, 7, 15),
+            end_day=date(2026, 7, 15),
+            calendar_days=160,
+            today=date(2026, 7, 16),
+        )
+
+
 def test_day_cluster_bootstrap_is_deterministic() -> None:
     values = [
         (date(2026, 1, 1), 1.0),

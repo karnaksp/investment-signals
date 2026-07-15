@@ -1126,6 +1126,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--tickers", default="SBER,GAZP,LKOH,YDEX,T")
     parser.add_argument("--calendar-days", type=int, default=160)
+    parser.add_argument(
+        "--start-day",
+        type=date.fromisoformat,
+        help=(
+            "Inclusive first calendar day for an explicit non-overlapping cohort. "
+            "When set, --calendar-days is ignored."
+        ),
+    )
     parser.add_argument("--end-day", type=date.fromisoformat)
     parser.add_argument("--horizons", default="1,5,15")
     parser.add_argument("--output-dir", type=Path, default=Path(".tmp/ga-real-data"))
@@ -1148,6 +1156,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_study_window(
+    *,
+    start_day: date | None,
+    end_day: date | None,
+    calendar_days: int,
+    today: date,
+) -> tuple[date, date, str, int]:
+    if calendar_days < 2:
+        raise ValueError("--calendar-days must be at least 2")
+    resolved_end = end_day or (today - timedelta(days=1))
+    if start_day is None:
+        resolved_start = resolved_end - timedelta(days=calendar_days - 1)
+        return (
+            resolved_start,
+            resolved_end,
+            "rolling_calendar_days",
+            calendar_days,
+        )
+    resolved_start = start_day
+    resolved_days = (resolved_end - resolved_start).days + 1
+    if resolved_days < 2:
+        raise ValueError("explicit study window must contain at least 2 calendar days")
+    return (
+        resolved_start,
+        resolved_end,
+        "explicit_date_range",
+        resolved_days,
+    )
+
+
 def main() -> int:
     args = parse_args()
     if args.prepare_russian_trusted_ca is not None:
@@ -1158,8 +1196,15 @@ def main() -> int:
             )
         )
         return 0
-    if args.calendar_days < 2:
-        raise SystemExit("--calendar-days must be at least 2")
+    try:
+        start_day, end_day, date_selection, resolved_calendar_days = resolve_study_window(
+            start_day=args.start_day,
+            end_day=args.end_day,
+            calendar_days=args.calendar_days,
+            today=datetime.now(MOSCOW).date(),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.request_timeout <= 0:
         raise SystemExit("--request-timeout must be positive")
     if args.request_attempts < 1:
@@ -1171,13 +1216,12 @@ def main() -> int:
     policy = StudyPolicy()
     if policy.primary_horizon_minutes not in horizons:
         raise SystemExit("Configured primary horizon must be included in --horizons")
-    end_day = args.end_day or (datetime.now(MOSCOW).date() - timedelta(days=1))
-    start_day = end_day - timedelta(days=args.calendar_days - 1)
     scope = {
         "tickers": list(tickers),
         "from": start_day.isoformat(),
         "to": end_day.isoformat(),
         "horizons": list(horizons),
+        "date_selection": date_selection,
     }
     verify: bool | ssl.SSLContext = True
     if args.ca_cert is not None:
@@ -1254,7 +1298,8 @@ def main() -> int:
         "policy": asdict(policy),
         "tickers": tickers,
         "horizons": horizons,
-        "calendar_days": args.calendar_days,
+        "date_selection": date_selection,
+        "calendar_days": resolved_calendar_days,
         "return_formula": "simple_return_bps",
         "candle_source": "CANDLE_SOURCE_EXCHANGE",
         "session": [
@@ -1271,6 +1316,8 @@ def main() -> int:
             "tickers": list(tickers),
             "from": start_day.isoformat(),
             "to": end_day.isoformat(),
+            "date_selection": date_selection,
+            "calendar_days": resolved_calendar_days,
         },
         "quality": quality,
         "split": {
