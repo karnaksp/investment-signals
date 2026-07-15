@@ -16,7 +16,7 @@ from tinvest_signal_engine.application.reliable_processing import (
     DetectorConfigAcknowledgementSink,
     DetectorStateCheckpoint,
 )
-from tinvest_signal_engine.config import RuntimeSettings, load_detector_config
+from tinvest_signal_engine.config import RuntimeSettings, load_detector_config, load_secret
 from tinvest_signal_engine.delivery_policy import DELIVERY_DELIVERED, DeliveryPolicy
 from tinvest_signal_engine.detector_core import SignalDetector
 from tinvest_signal_engine.detector_state_persist import (
@@ -220,16 +220,34 @@ class LegacyDetectionAdapter:
 
     def _delivery_targets(self) -> tuple[DeliveryTarget, ...]:
         targets: list[DeliveryTarget] = []
-        if self._settings.alert_webhook_url:
-            targets.append(
-                DeliveryTarget("webhook", self._settings.alert_webhook_url)
+        alert_webhook_url = (
+            load_secret("ALERT_WEBHOOK_URL", service_name="detector")
+            or self._settings.alert_webhook_url
+        )
+        telegram_bot_token = (
+            load_secret("TELEGRAM_BOT_TOKEN", service_name="detector")
+            or self._settings.telegram_bot_token
+        )
+        telegram_chat_id = (
+            load_secret("TELEGRAM_CHAT_ID", service_name="detector")
+            or self._settings.telegram_chat_id
+        )
+        telegram_thread_raw = load_secret(
+            "TELEGRAM_MESSAGE_THREAD_ID", service_name="detector"
+        )
+        telegram_message_thread_id = self._settings.telegram_message_thread_id
+        if telegram_thread_raw is not None:
+            stripped_thread = telegram_thread_raw.strip()
+            telegram_message_thread_id = (
+                int(stripped_thread) if stripped_thread else None
             )
-        if self._settings.telegram_bot_token and self._settings.telegram_chat_id:
-            thread = self._settings.telegram_message_thread_id
+        if alert_webhook_url:
+            targets.append(DeliveryTarget("webhook", alert_webhook_url))
+        if telegram_bot_token and telegram_chat_id:
             targets.append(
                 DeliveryTarget(
                     "telegram",
-                    f"{self._settings.telegram_chat_id}:{thread or ''}",
+                    f"{telegram_chat_id}:{telegram_message_thread_id or ''}",
                 )
             )
         return tuple(targets)
