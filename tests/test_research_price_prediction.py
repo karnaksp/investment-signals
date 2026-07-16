@@ -26,6 +26,15 @@ trainer = importlib.util.module_from_spec(TRAIN_SPEC)
 sys.modules["research_train_price_models"] = trainer
 TRAIN_SPEC.loader.exec_module(trainer)
 
+PATTERN_SPEC = importlib.util.spec_from_file_location(
+    "research_mine_price_patterns",
+    ROOT / "scripts" / "research_mine_price_patterns.py",
+)
+assert PATTERN_SPEC and PATTERN_SPEC.loader
+patterns = importlib.util.module_from_spec(PATTERN_SPEC)
+sys.modules["research_mine_price_patterns"] = patterns
+PATTERN_SPEC.loader.exec_module(patterns)
+
 
 def _candle(index: int, close: float, *, volume: float = 100.0) -> object:
     at = datetime(2026, 7, 15, 7, 5, tzinfo=timezone.utc) + timedelta(minutes=index)
@@ -204,3 +213,59 @@ def test_research_runner_writes_required_artifacts(tmp_path: Path) -> None:
     assert (run_dir / "feature-importance.csv").exists()
     assert (run_dir / "slice-report.csv").exists()
     assert (run_dir / "report.md").exists()
+
+
+def test_pattern_mining_promotes_positive_top_decile_rule() -> None:
+    rows = []
+    for index in range(320):
+        rows.append(
+            {
+                "ticker": "SBER",
+                "signal_type": "price_jump",
+                "horizon_seconds": "900",
+                "session_bucket": "0",
+                "_volatility_bucket": "high",
+                "combo_key_300s": "price_jump+volume_spike",
+                "trading_day": f"2026-07-{1 + index % 25:02d}",
+                "_target": 1 if index % 2 == 0 else 0,
+                "_predicted_probability": 0.9 - index / 10_000,
+                "_cost_adjusted_directional_bps": 8.0 if index % 2 == 0 else 1.0,
+                "_reverse_directional_bps": -18.0,
+            }
+        )
+    for index in range(80):
+        rows.append(
+            {
+                "ticker": "SBER",
+                "signal_type": "volume_spike",
+                "horizon_seconds": "60",
+                "session_bucket": "3",
+                "_volatility_bucket": "low",
+                "combo_key_300s": "volume_spike",
+                "trading_day": "2026-07-01",
+                "_target": 0,
+                "_predicted_probability": 0.1,
+                "_cost_adjusted_directional_bps": -10.0,
+                "_reverse_directional_bps": 0.0,
+            }
+        )
+
+    candidates = patterns.mine_pattern_candidates(
+        rows,
+        naive_positive_rate=0.05,
+        top_fraction=0.80,
+        min_n=100,
+        accepted_min_n=300,
+    )
+
+    accepted = [row for row in candidates if row["accepted_exploratory"]]
+    assert accepted
+    detailed = [
+        row
+        for row in accepted
+        if row["group_set"] == "signal_horizon_session_volatility"
+    ]
+    assert detailed
+    assert "signal_type=price_jump" in detailed[0]["rule"]
+    assert detailed[0]["positive_rate"] == 0.5
+    assert detailed[0]["mean_cost_adjusted_directional_bps"] > 0

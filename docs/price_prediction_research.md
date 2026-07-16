@@ -77,6 +77,28 @@ Each run writes:
 - `slice-report.csv`;
 - `report.md`.
 
+## 4. Mine interpretable working patterns
+
+```bash
+python scripts/research_mine_price_patterns.py \
+  --dataset var/research/datasets/signal_price_prediction.parquet \
+  --run-dir var/research/runs/<run_id> \
+  --top-fraction 0.10 \
+  --min-n 100 \
+  --accepted-min-n 300
+```
+
+The miner retrains the LightGBM classifier on the chronological train split,
+scores validation rows, and writes:
+
+- `probability-deciles.csv`;
+- `pattern-candidates.csv`;
+- `pattern-report.md`.
+
+Accepted exploratory patterns require a validation-only top-probability group
+with at least 300 rows, at least 20 sessions, positive rate materially above
+the naive validation rate, and positive mean cost-adjusted directional result.
+
 The first research track is intentionally explainable:
 
 - event-study baseline;
