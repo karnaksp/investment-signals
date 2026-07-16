@@ -79,6 +79,11 @@ backtest = [
   "clickhouse-connect>=0.7.0",
   "duckdb>=1.0.0",
 ]
+research = [
+  "duckdb>=1.0.0",
+  "scikit-learn>=1.4",
+  "lightgbm>=4.0",
+]
 proto = [
   "grpcio-tools>=1.62,<1.82",
 ]
