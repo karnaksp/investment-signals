@@ -13,6 +13,7 @@ import json
 import ssl
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -24,6 +25,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from research_price_prediction_lib import (  # noqa: E402
+    CANDLE_CACHE_FIELDS,
     DEFAULT_RESEARCH_TICKERS,
     MOSCOW,
     UTC,
@@ -165,6 +167,7 @@ def run_cache(
     request_timeout: float,
     request_attempts: int,
     request_interval: float,
+    max_workers: int,
     ca_cert: Path | None,
 ) -> dict[str, Any]:
     require_duckdb()
@@ -185,46 +188,89 @@ def run_cache(
         write=min(request_timeout, 10.0),
         pool=min(request_timeout, 10.0),
     )
+    with httpx.Client(headers=headers, timeout=timeout, verify=verify) as client:
+        instruments = resolve_instruments(client, tickers, attempts=request_attempts)
     row_counts: dict[str, int] = {}
     all_records: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     skipped = 0
-    with httpx.Client(headers=headers, timeout=timeout, verify=verify) as client:
-        instruments = resolve_instruments(client, tickers, attempts=request_attempts)
-        day = start_day
-        while day <= end_day:
-            for ticker in tickers:
-                target = partition_path(cache_dir, ticker, day)
-                key = f"{ticker}/{day.isoformat()}"
-                if valid_partition(target):
-                    skipped += 1
-                    rows = read_existing_records(target)
-                    row_counts[key] = len(rows)
-                    all_records.extend(rows)
-                    continue
-                try:
-                    candles = fetch_day_candles(
-                        client,
-                        ticker=ticker,
-                        instrument_uid=instruments[ticker],
-                        day=day,
-                        attempts=request_attempts,
-                    )
-                    records = candle_rows_for_storage(candles)
-                    write_table(target, records)
-                    row_counts[key] = len(records)
-                    all_records.extend(records)
-                except Exception as exc:
-                    failures.append(
+    tasks: list[tuple[str, date]] = []
+    day = start_day
+    while day <= end_day:
+        for ticker in tickers:
+            target = partition_path(cache_dir, ticker, day)
+            key = f"{ticker}/{day.isoformat()}"
+            if valid_partition(target):
+                skipped += 1
+                rows = read_existing_records(target)
+                row_counts[key] = len(rows)
+                all_records.extend(rows)
+                continue
+            tasks.append((ticker, day))
+        day += timedelta(days=1)
+    print(
+        json.dumps(
+            {
+                "progress": "cache_plan",
+                "tickers": len(tickers),
+                "pending_partitions": len(tasks),
+                "skipped_existing_partitions": skipped,
+                "max_workers": max_workers,
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+        futures = {
+            executor.submit(
+                fetch_partition_records,
+                token=token,
+                ticker=ticker,
+                instrument_uid=instruments[ticker],
+                day=day,
+                request_timeout=request_timeout,
+                request_attempts=request_attempts,
+                ca_cert=ca_cert,
+                request_interval=request_interval,
+            ): (ticker, day)
+            for ticker, day in tasks
+        }
+        for future in as_completed(futures):
+            ticker, day = futures[future]
+            target = partition_path(cache_dir, ticker, day)
+            key = f"{ticker}/{day.isoformat()}"
+            try:
+                records = future.result()
+                write_table(target, records, fields=CANDLE_CACHE_FIELDS)
+                row_counts[key] = len(records)
+                all_records.extend(records)
+            except Exception as exc:
+                failures.append(
+                    {
+                        "ticker": ticker,
+                        "date": day.isoformat(),
+                        "reason_code": "tinvest_candle_partition_failed",
+                        "diagnostic": redact_diagnostic(exc),
+                    }
+                )
+            completed += 1
+            if completed == len(tasks) or completed % 100 == 0:
+                print(
+                    json.dumps(
                         {
-                            "ticker": ticker,
-                            "date": day.isoformat(),
-                            "reason_code": "tinvest_candle_partition_failed",
-                            "diagnostic": redact_diagnostic(exc),
-                        }
-                    )
-                time.sleep(request_interval)
-            day += timedelta(days=1)
+                            "progress": "cache_partitions",
+                            "completed": completed,
+                            "pending": len(tasks),
+                            "failures": len(failures),
+                        },
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
     manifest = build_cache_manifest(
         tickers=tickers,
         start_day=start_day,
@@ -238,6 +284,45 @@ def run_cache(
     if failures:
         write_json(cache_dir / "failure-summary.json", {"failures": failures})
     return manifest
+
+
+def fetch_partition_records(
+    *,
+    token: str,
+    ticker: str,
+    instrument_uid: str,
+    day: date,
+    request_timeout: float,
+    request_attempts: int,
+    request_interval: float,
+    ca_cert: Path | None,
+) -> list[dict[str, Any]]:
+    verify: bool | ssl.SSLContext = True
+    if ca_cert is not None:
+        verify = ssl.create_default_context()
+        verify.load_verify_locations(cafile=ca_cert)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "x-app-name": "investment-signals-price-research-cache",
+    }
+    timeout = httpx.Timeout(
+        request_timeout,
+        connect=min(request_timeout, 10.0),
+        read=request_timeout,
+        write=min(request_timeout, 10.0),
+        pool=min(request_timeout, 10.0),
+    )
+    with httpx.Client(headers=headers, timeout=timeout, verify=verify) as client:
+        candles = fetch_day_candles(
+            client,
+            ticker=ticker,
+            instrument_uid=instrument_uid,
+            day=day,
+            attempts=request_attempts,
+        )
+    time.sleep(request_interval)
+    return candle_rows_for_storage(candles)
 
 
 def read_existing_records(path: Path) -> list[dict[str, Any]]:
@@ -256,6 +341,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-timeout", type=float, default=30.0)
     parser.add_argument("--request-attempts", type=int, default=7)
     parser.add_argument("--request-interval", type=float, default=0.05)
+    parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--ca-cert", type=Path)
     return parser.parse_args(argv)
 
@@ -276,6 +362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_timeout=args.request_timeout,
             request_attempts=args.request_attempts,
             request_interval=args.request_interval,
+            max_workers=args.max_workers,
             ca_cert=args.ca_cert,
         )
     except Exception as exc:

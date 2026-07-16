@@ -170,6 +170,17 @@ DATASET_FIELDS = (
     "meta_label",
 )
 
+CANDLE_CACHE_FIELDS = (
+    "ticker",
+    "at",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "complete",
+)
+
 
 def load_env_value(path: Path, key: str) -> str:
     values: dict[str, str] = {}
@@ -277,7 +288,11 @@ def candles_from_records(records: Iterable[Mapping[str, Any]]) -> tuple[Research
 def fingerprint_records(records: Sequence[Mapping[str, Any]]) -> str:
     digest = hashlib.sha256()
     for row in sorted(records, key=lambda item: (str(item.get("ticker")), str(item.get("at")))):
-        digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        digest.update(
+            json.dumps(row, sort_keys=True, separators=(",", ":"), default=str).encode(
+                "utf-8"
+            )
+        )
         digest.update(b"\n")
     return digest.hexdigest()
 
@@ -317,11 +332,26 @@ def build_cache_manifest(
     }
 
 
-def write_csv_records(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
+def write_csv_records(
+    path: Path,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    fields: Sequence[str] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = list(records[0].keys()) if records else list(DATASET_FIELDS)
+    if fields is not None:
+        resolved_fields = list(fields)
+    elif records:
+        seen: list[str] = []
+        for row in records:
+            for field in row:
+                if field not in seen:
+                    seen.append(field)
+        resolved_fields = seen
+    else:
+        resolved_fields = list(DATASET_FIELDS)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=resolved_fields)
         writer.writeheader()
         writer.writerows(records)
 
@@ -337,20 +367,39 @@ def require_duckdb() -> Any:
     return duckdb
 
 
-def write_table(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
+def _sql_path_literal(path: Path) -> str:
+    return str(path).replace("'", "''")
+
+
+def write_table(
+    path: Path,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    fields: Sequence[str] | None = None,
+) -> None:
     if path.suffix.lower() == ".csv":
-        write_csv_records(path, records)
+        write_csv_records(path, records, fields=fields)
         return
     duckdb = require_duckdb()
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_csv = path.with_suffix(path.suffix + ".tmp.csv")
-    write_csv_records(temp_csv, records)
+    resolved_fields = list(fields or (records[0].keys() if records else DATASET_FIELDS))
+    write_csv_records(temp_csv, records, fields=resolved_fields)
     con = duckdb.connect(database=":memory:")
     try:
-        con.execute(
-            "COPY (SELECT * FROM read_csv_auto(?)) TO ? (FORMAT PARQUET)",
-            [str(temp_csv), str(path)],
-        )
+        output = _sql_path_literal(path)
+        if records:
+            source = _sql_path_literal(temp_csv)
+            con.execute(
+                f"COPY (SELECT * FROM read_csv_auto('{source}')) TO '{output}' (FORMAT PARQUET)"
+            )
+        else:
+            projection = ", ".join(
+                f"CAST(NULL AS VARCHAR) AS \"{field}\"" for field in resolved_fields
+            )
+            con.execute(
+                f"COPY (SELECT {projection} WHERE false) TO '{output}' (FORMAT PARQUET)"
+            )
     finally:
         con.close()
         temp_csv.unlink(missing_ok=True)
@@ -384,7 +433,8 @@ def valid_partition(path: Path) -> bool:
     if not path.exists() or path.stat().st_size <= 0:
         return False
     try:
-        return len(read_table(path)) > 0
+        read_table(path)
+        return True
     except Exception:
         return False
 

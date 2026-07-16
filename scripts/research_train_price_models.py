@@ -244,6 +244,7 @@ def build_leaderboard(
     event_study: Sequence[Mapping[str, Any]],
     *,
     validation_sessions: int,
+    naive_positive_rate: float | None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in model_results:
@@ -258,14 +259,25 @@ def build_leaderboard(
                 }
             )
             continue
-        score = item.get("precision") or item.get("accuracy") or -item.get("mae_bps", 0)
+        if item["model"].endswith("_regressor"):
+            score = -item.get("mae_bps", 0)
+            accepted = False
+        else:
+            score = item.get("precision") or item.get("accuracy")
+            accepted = bool(
+                validation_sessions >= 30
+                and int(item.get("n", 0)) >= 300
+                and score is not None
+                and naive_positive_rate is not None
+                and float(score) > naive_positive_rate
+            )
         rows.append(
             {
                 "model": item["model"],
                 "status": "ok",
                 "n": item.get("n", 0),
                 "score": score,
-                "accepted": bool(validation_sessions >= 30 and int(item.get("n", 0)) >= 300 and score is not None),
+                "accepted": accepted,
             }
         )
     for item in event_study:
@@ -293,6 +305,7 @@ def run_research(dataset: Path, output_dir: Path) -> dict[str, Any]:
     rows = read_table(dataset)
     train_rows, validation_rows = chronological_split(rows)
     validation_sessions = _validation_sessions(validation_rows)
+    naive_positive_rate = _naive_positive_rate(validation_rows)
     event_study = event_study_summary(validation_rows, split="validation")
     bayesian = bayesian_score_summary(train_rows, split="train") + bayesian_score_summary(validation_rows, split="validation")
     model_results: list[dict[str, Any]] = []
@@ -301,7 +314,12 @@ def run_research(dataset: Path, output_dir: Path) -> dict[str, Any]:
         result, importance = runner(train_rows, validation_rows)
         model_results.append(result)
         feature_importance.extend(importance)
-    leaderboard = build_leaderboard(model_results, event_study, validation_sessions=validation_sessions)
+    leaderboard = build_leaderboard(
+        model_results,
+        event_study,
+        validation_sessions=validation_sessions,
+        naive_positive_rate=naive_positive_rate,
+    )
     payload = {
         "schema_version": 1,
         "kind": "signal_price_prediction_research_run",
@@ -311,7 +329,7 @@ def run_research(dataset: Path, output_dir: Path) -> dict[str, Any]:
         "train_rows": len(train_rows),
         "validation_rows": len(validation_rows),
         "validation_sessions": validation_sessions,
-        "naive_positive_rate": _naive_positive_rate(validation_rows),
+        "naive_positive_rate": naive_positive_rate,
         "event_study": event_study,
         "bayesian_score": bayesian,
         "models": model_results,
@@ -328,7 +346,7 @@ def run_research(dataset: Path, output_dir: Path) -> dict[str, Any]:
         ).encode("utf-8")
     ).hexdigest()[:16]
     run_dir = output_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir.mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "model-results.json", payload)
     write_json(run_dir / "dataset-manifest.json", {"dataset": str(dataset), "fingerprint": payload["dataset_fingerprint"]})
     write_csv_records(run_dir / "leaderboard.csv", leaderboard or [{"model": "", "status": "", "n": "", "score": "", "accepted": ""}])
