@@ -23,6 +23,9 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from tinvest_signal_engine.adapters.hypothesis_replay_evidence import (
+    LocalReplayEvidenceReader,
+)
 from tinvest_signal_engine.adapters.jump_activity_replay import (
     JsonJumpReplayArtifactAdapter,
     ParquetCandleCacheAdapter,
@@ -133,7 +136,37 @@ class ReplayResultResponse(BaseModel):
     dataset_fingerprint: str
     hypothesis_ids: tuple[str, ...]
     engines: tuple[Mapping[str, Any], ...]
+    evidence: tuple["ReplayEvidenceResponse", ...]
     network_download_performed: Literal[False] = False
+
+
+class ReplayEvidenceResponse(BaseModel):
+    """Strict product-facing aggregate for one requested hypothesis."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    hypothesis_id: str = Field(pattern=r"^H[1-7]$")
+    decision: Literal["passed", "rejected", "inconclusive", "blocked_by_data"]
+    independent_validation: bool
+    cost_adjusted: bool
+    sample_count: int = Field(ge=0)
+    trading_days: int = Field(ge=0)
+    generated_at: datetime
+    artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    dataset_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    formula_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    cost_model_version: str = Field(min_length=1, max_length=128)
+    primary_metric_value: float | None = None
+    matched_control_lift_ci95_lower: float | None = None
+    matched_control_lift_ci95_upper: float | None = None
+    matched_controls: int = Field(ge=0)
+    controls_per_event: int = Field(ge=1)
+    adjusted_p_value: float | None = Field(default=None, ge=0.0, le=1.0)
+    stable_blocks: int = Field(ge=0)
+    total_blocks: int = Field(ge=0)
+    maximum_ticker_share: float | None = Field(default=None, ge=0.0, le=1.0)
+    maximum_period_share: float | None = Field(default=None, ge=0.0, le=1.0)
+    abstention_rate: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class ReplayRunner(Protocol):
@@ -147,6 +180,24 @@ class ReplayRunner(Protocol):
     ) -> Mapping[str, Any]: ...
 
     def readiness(self) -> tuple[bool, str | None]: ...
+
+
+class ReplayEvidenceReader(Protocol):
+    def read_general(
+        self,
+        artifact_dir: str | Path,
+        requested_hypotheses: Sequence[str],
+        *,
+        generated_at: str,
+    ) -> tuple[Mapping[str, Any], ...]: ...
+
+    def read_jump(
+        self,
+        artifact_dir: str | Path,
+        requested_hypotheses: Sequence[str],
+        *,
+        generated_at: str,
+    ) -> tuple[Mapping[str, Any], ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +373,7 @@ class ReplayJobManager:
                 "dataset_fingerprint": record["dataset_fingerprint"],
                 "hypothesis_ids": request.hypothesis_ids,
                 "engines": result["engines"],
+                "evidence": result["evidence"],
                 "network_download_performed": False,
             }
             self._store.save_result(job_id, completed)
@@ -351,10 +403,17 @@ class IdempotencyConflict(RuntimeError):
 class LocalHypothesisPortfolioRunner:
     """Composition adapter for the existing H1-H7 application use cases."""
 
-    def __init__(self, *, cache_dir: str | Path, artifact_root: str | Path) -> None:
+    def __init__(
+        self,
+        *,
+        cache_dir: str | Path,
+        artifact_root: str | Path,
+        evidence_reader: ReplayEvidenceReader | None = None,
+    ) -> None:
         self._cache_dir = Path(cache_dir)
         self._artifact_root = Path(artifact_root)
         self._descriptor_cache = LocalCandleCache(self._cache_dir)
+        self._evidence_reader = evidence_reader or LocalReplayEvidenceReader()
 
     def dataset_fingerprint(self) -> str:
         return self._descriptor_cache.describe().dataset_fingerprint
@@ -376,17 +435,22 @@ class LocalHypothesisPortfolioRunner:
         run_fingerprint: str,
     ) -> Mapping[str, Any]:
         engines: list[Mapping[str, Any]] = []
-        general = tuple(
+        evidence: list[Mapping[str, Any]] = []
+        generated_at = _now()
+        requested_general = tuple(
             HypothesisId(value)
             for value in request.hypothesis_ids
             if value in GENERAL_HYPOTHESES
         )
-        if general:
+        if requested_general:
+            executed_general = tuple(
+                HypothesisId(value) for value in sorted(GENERAL_HYPOTHESES)
+            )
             execution = RunHistoricalHypothesisReplay(
                 cache=LocalCandleCache(self._cache_dir),
                 artifacts=ImmutableReplayArtifactStore(self._artifact_root / "h1-h2-h5-h6-h7"),
             ).execute(HistoricalReplayRequest(
-                selected_hypotheses=general,
+                selected_hypotheses=executed_general,
                 cost_model=ReplayCostModel(
                     version=request.cost_model.version,
                     commission_bps=request.cost_model.commission_bps,
@@ -399,7 +463,13 @@ class LocalHypothesisPortfolioRunner:
             ))
             engines.append({
                 "engine": "scientific_candle_replay",
-                "hypothesis_ids": tuple(item.value for item in general),
+                "hypothesis_ids": tuple(item.value for item in requested_general),
+                "requested_hypothesis_ids": tuple(
+                    item.value for item in requested_general
+                ),
+                "executed_hypothesis_ids": tuple(
+                    item.value for item in executed_general
+                ),
                 "application_run_id": execution.completion.run_id,
                 "artifact_fingerprint": execution.completion.artifact_fingerprint,
                 "artifact_uri": str(
@@ -407,6 +477,11 @@ class LocalHypothesisPortfolioRunner:
                 ),
                 "resumed": execution.completion.resumed,
             })
+            evidence.extend(self._evidence_reader.read_general(
+                engines[-1]["artifact_uri"],
+                tuple(item.value for item in requested_general),
+                generated_at=generated_at,
+            ))
         if set(request.hypothesis_ids) & JUMP_HYPOTHESES:
             jump = RunJumpActivityReplay(
                 candle_cache=ParquetCandleCacheAdapter(self._cache_dir),
@@ -427,7 +502,19 @@ class LocalHypothesisPortfolioRunner:
                 "artifact_uri": jump.artifact_uri,
                 "resumed": jump.reused,
             })
-        return {"run_fingerprint": run_fingerprint, "engines": tuple(engines)}
+            evidence.extend(self._evidence_reader.read_jump(
+                jump.artifact_uri,
+                tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
+                generated_at=generated_at,
+            ))
+        ordered = tuple(sorted(evidence, key=lambda item: str(item["hypothesis_id"])))
+        if tuple(item["hypothesis_id"] for item in ordered) != request.hypothesis_ids:
+            raise ValueError("replay must produce exactly one evidence row per hypothesis")
+        return {
+            "run_fingerprint": run_fingerprint,
+            "engines": tuple(engines),
+            "evidence": ordered,
+        }
 
 
 def create_app(

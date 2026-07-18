@@ -5,16 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Event
 import time
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from fastapi.testclient import TestClient
 
 from tinvest_signal_engine.services.hypothesis_replay_api import (
+    LocalHypothesisPortfolioRunner,
     LocalReplayJobStore,
     ReplayJobManager,
     StartReplayRequest,
     create_app,
 )
+import tinvest_signal_engine.services.hypothesis_replay_api as replay_api
 
 
 class FakeReplayRunner:
@@ -47,7 +50,36 @@ class FakeReplayRunner:
                 "artifact_uri": "/local/immutable/artifacts/run",
                 "resumed": False,
             },),
+            "evidence": tuple(_fake_evidence(item) for item in request.hypothesis_ids),
         }
+
+
+def _fake_evidence(hypothesis_id: str) -> Mapping[str, Any]:
+    fingerprint = "sha256:" + "b" * 64
+    return {
+        "hypothesis_id": hypothesis_id,
+        "decision": "blocked_by_data",
+        "independent_validation": True,
+        "cost_adjusted": True,
+        "sample_count": 0,
+        "trading_days": 0,
+        "generated_at": "2026-07-19T10:00:00+00:00",
+        "artifact_fingerprint": fingerprint,
+        "dataset_fingerprint": "sha256:" + "a" * 64,
+        "formula_fingerprint": fingerprint,
+        "cost_model_version": "fixture-cost-v1",
+        "primary_metric_value": None,
+        "matched_control_lift_ci95_lower": None,
+        "matched_control_lift_ci95_upper": None,
+        "matched_controls": 0,
+        "controls_per_event": 5,
+        "adjusted_p_value": None,
+        "stable_blocks": 0,
+        "total_blocks": 0,
+        "maximum_ticker_share": None,
+        "maximum_period_share": None,
+        "abstention_rate": None,
+    }
 
 
 def _client(
@@ -94,6 +126,12 @@ def test_health_readiness_and_completed_result(tmp_path: Path) -> None:
         assert result.status_code == 200
         assert result.json()["network_download_performed"] is False
         assert result.json()["engines"][0]["engine"] == "fake_application_use_case"
+        assert [item["hypothesis_id"] for item in result.json()["evidence"]] == [
+            "H1",
+            "H3",
+            "H4",
+            "H7",
+        ]
 
     assert len(runner.calls) == 1
 
@@ -165,6 +203,9 @@ def test_transport_rejects_token_and_unknown_fields(tmp_path: Path) -> None:
             json={"hypothesis_ids": ["H3"]},
         )
         assert unpaired_jump.status_code == 422
+
+    assert StartReplayRequest().cost_model.version == "research-cost-v1.0.0"
+    assert StartReplayRequest().cost_model.round_trip_bps == 10.0
 
 
 def test_failure_is_persisted_without_traceback(tmp_path: Path) -> None:
@@ -245,3 +286,56 @@ def test_completed_result_is_available_after_restart(tmp_path: Path) -> None:
         assert status_response.json()["status"] == "completed"
         assert result_response.status_code == 200
         assert result_response.json()["job_id"] == submission["job_id"]
+
+
+def test_single_general_request_executes_fixed_portfolio_but_returns_requested_only(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeGeneralUseCase:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def execute(self, request: Any) -> Any:
+            captured["selected"] = tuple(
+                item.value for item in request.selected_hypotheses
+            )
+            return SimpleNamespace(completion=SimpleNamespace(
+                run_id="sha256:" + "c" * 64,
+                artifact_fingerprint="sha256:" + "d" * 64,
+                resumed=False,
+            ))
+
+    class FakeEvidenceReader:
+        def read_general(
+            self,
+            _: object,
+            requested: tuple[str, ...],
+            *,
+            generated_at: str,
+        ) -> tuple[Mapping[str, Any], ...]:
+            captured["evidence_requested"] = requested
+            row = dict(_fake_evidence("H1"))
+            row["generated_at"] = generated_at
+            return (row,)
+
+    monkeypatch.setattr(replay_api, "RunHistoricalHypothesisReplay", FakeGeneralUseCase)
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "unused-cache",
+        artifact_root=tmp_path / "artifacts",
+        evidence_reader=FakeEvidenceReader(),
+    )
+
+    result = runner.execute(
+        StartReplayRequest(hypothesis_ids=("H1",)),
+        run_fingerprint="sha256:" + "e" * 64,
+    )
+
+    assert captured["selected"] == ("H1", "H2", "H5", "H6", "H7")
+    assert captured["evidence_requested"] == ("H1",)
+    assert tuple(item["hypothesis_id"] for item in result["evidence"]) == ("H1",)
+    engine = result["engines"][0]
+    assert engine["requested_hypothesis_ids"] == ("H1",)
+    assert engine["executed_hypothesis_ids"] == ("H1", "H2", "H5", "H6", "H7")
