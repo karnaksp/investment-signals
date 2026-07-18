@@ -1,4 +1,4 @@
-"""Loopback-only HTTP composition root for immutable hypothesis replay.
+"""Internal HTTP composition root for immutable hypothesis replay.
 
 The service deliberately owns no broker client.  It composes the existing
 application use cases with local cache and filesystem adapters, and persists
@@ -298,20 +298,20 @@ class ReplayJobManager:
         if not key or len(key) > 256:
             raise ValueError("Idempotency-Key must contain 1 to 256 characters")
         key_hash = _fingerprint({"idempotency_key": key})
-        dataset_fingerprint = self._runner.dataset_fingerprint()
         request_payload = request.model_dump(mode="json")
-        run_fingerprint = _fingerprint({
-            "schema_version": JOB_SCHEMA_VERSION,
-            "dataset_fingerprint": dataset_fingerprint,
-            "request": request_payload,
-        })
         with self._lock:
             for existing in self._store.records():
                 if existing.get("idempotency_key_hash") != key_hash:
                     continue
-                if existing.get("run_fingerprint") != run_fingerprint:
+                if existing.get("request") != request_payload:
                     raise IdempotencyConflict
                 return _Submission(existing, reused=True)
+            dataset_fingerprint = self._runner.dataset_fingerprint()
+            run_fingerprint = _fingerprint({
+                "schema_version": JOB_SCHEMA_VERSION,
+                "dataset_fingerprint": dataset_fingerprint,
+                "request": request_payload,
+            })
             job_id = "job-" + sha256(f"{key_hash}:{run_fingerprint}".encode()).hexdigest()[:32]
             now = _now()
             record: dict[str, Any] = {
@@ -634,7 +634,7 @@ def build_app(*, cache_dir: Path, state_dir: Path, artifact_dir: Path) -> FastAP
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Loopback-only internal API for local scientific hypothesis replay",
+        description="Internal API for local scientific hypothesis replay",
     )
     parser.add_argument(
         "--cache-dir",
@@ -651,6 +651,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=Path("var/research/hypothesis-replay-api/artifacts"),
     )
+    parser.add_argument(
+        "--host",
+        choices=("127.0.0.1", "0.0.0.0"),
+        default="127.0.0.1",
+    )
     parser.add_argument("--port", type=int, default=18181)
     args = parser.parse_args(argv)
     import uvicorn
@@ -661,7 +666,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             state_dir=args.state_dir,
             artifact_dir=args.artifact_dir,
         ),
-        host="127.0.0.1",
+        host=args.host,
         port=args.port,
     )
     return 0

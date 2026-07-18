@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from threading import Event
 import time
 from types import SimpleNamespace
@@ -25,9 +26,10 @@ class FakeReplayRunner:
         self.blocker = blocker
         self.failure = failure
         self.calls: list[tuple[StartReplayRequest, str]] = []
+        self.fingerprint = "sha256:" + "a" * 64
 
     def dataset_fingerprint(self) -> str:
-        return "sha256:" + "a" * 64
+        return self.fingerprint
 
     def readiness(self) -> tuple[bool, str | None]:
         return True, None
@@ -186,6 +188,36 @@ def test_same_idempotency_key_rejects_different_input(tmp_path: Path) -> None:
         assert conflict.json()["detail"]["code"] == "idempotency_key_conflict"
 
 
+def test_same_key_and_request_reuses_original_job_after_cache_changes(
+    tmp_path: Path,
+) -> None:
+    runner = FakeReplayRunner()
+    client, store = _client(tmp_path, runner)
+
+    with client:
+        first = client.post(
+            "/internal/v1/hypothesis-replays",
+            headers={"Idempotency-Key": "stable-across-cache-change"},
+            json={"hypothesis_ids": ["H1"]},
+        ).json()
+        _wait_for_status(client, first["job_id"], "completed")
+        runner.fingerprint = "sha256:" + "f" * 64
+        repeated = client.post(
+            "/internal/v1/hypothesis-replays",
+            headers={"Idempotency-Key": "stable-across-cache-change"},
+            json={"hypothesis_ids": ["H1"]},
+        )
+
+    assert repeated.status_code == 202
+    assert repeated.json()["reused"] is True
+    assert repeated.json()["job_id"] == first["job_id"]
+    assert repeated.json()["run_fingerprint"] == first["run_fingerprint"]
+    original = store.load(first["job_id"])
+    assert original is not None
+    assert original["dataset_fingerprint"] == "sha256:" + "a" * 64
+    assert len(runner.calls) == 1
+
+
 def test_transport_rejects_token_and_unknown_fields(tmp_path: Path) -> None:
     client, _ = _client(tmp_path, FakeReplayRunner())
 
@@ -339,3 +371,42 @@ def test_single_general_request_executes_fixed_portfolio_but_returns_requested_o
     engine = result["engines"][0]
     assert engine["requested_hypothesis_ids"] == ("H1",)
     assert engine["executed_hypothesis_ids"] == ("H1", "H2", "H5", "H6", "H7")
+
+
+def test_cli_host_defaults_to_loopback_and_allows_explicit_internal_bind(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    fake_uvicorn = SimpleNamespace(
+        run=lambda app, **kwargs: calls.append({"app": app, **kwargs})
+    )
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setattr(replay_api, "build_app", lambda **_: "app")
+
+    assert replay_api.main([
+        "--cache-dir", str(tmp_path / "cache"),
+        "--state-dir", str(tmp_path / "state"),
+        "--artifact-dir", str(tmp_path / "artifacts"),
+    ]) == 0
+    assert calls[-1]["host"] == "127.0.0.1"
+
+    assert replay_api.main([
+        "--host", "0.0.0.0",
+        "--cache-dir", str(tmp_path / "cache"),
+        "--state-dir", str(tmp_path / "state"),
+        "--artifact-dir", str(tmp_path / "artifacts"),
+    ]) == 0
+    assert calls[-1]["host"] == "0.0.0.0"
+
+
+def test_cli_rejects_non_internal_host(tmp_path: Path) -> None:
+    try:
+        replay_api.main([
+            "--host", "192.0.2.1",
+            "--cache-dir", str(tmp_path / "cache"),
+        ])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("unsupported bind host must be rejected")
