@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _ALWAYS_TYPES = {"trading_status_changed", "market_access_changed"}
 _COMBO_TYPES = {"microstructure_combo_long", "microstructure_combo_short"}
 _LARGE_TRADE_TYPES = {"large_trade_print"}
+_VALIDATED_LONG_HORIZON_TYPES = {"bond_maturity_convergence"}
 _ACTIVITY_CONTEXT_TYPES = {
     "volume_spike",
     "trade_rate_spike",
@@ -165,6 +166,27 @@ class DeliveryPolicy:
                 reason="status_or_access_change",
                 rule="status_access_always",
                 delivered_at=now,
+            )
+
+        if st in _VALIDATED_LONG_HORIZON_TYPES:
+            success_rate = _payload_number(signal, "historical_success_rate")
+            lower_bound = _payload_number(
+                signal, "historical_wilson_lower_bound"
+            )
+            sample_size = _payload_number(
+                signal, "historical_eligible_observations"
+            )
+            if success_rate >= 0.90 and lower_bound >= 0.85 and sample_size >= 100:
+                return DeliveryDecision(
+                    status=DELIVERY_DELIVERED,
+                    reason="validated_bond_convergence",
+                    rule="bond_convergence_historical_gate_v1",
+                    delivered_at=now,
+                )
+            return DeliveryDecision(
+                status=DELIVERY_SUPPRESSED,
+                reason="bond_convergence_evidence_below_gate",
+                rule="bond_convergence_historical_gate_v1",
             )
 
         if st in _COMBO_TYPES:
@@ -475,6 +497,8 @@ def _payload_number(signal: TriggerSignal, key: str) -> float:
 
 
 _REASON_RU: dict[str, str] = {
+    "validated_bond_convergence": "Историческая проверка сигнала схождения облигации к номиналу прошла заданный порог; уведомление отправлено сразу.",
+    "bond_convergence_evidence_below_gate": "Сигнал схождения облигации сохранён, но историческая проверка не прошла заданный порог.",
     "combo_score_ge_6": "Комбо-сигнал набрал проходной score и отправлен в realtime.",
     "status_or_access_change": "Режим торгов или доступ к заявкам изменился; статусные события отправляются в realtime.",
     "price_extreme_quality_and_z": "Сильное движение цены прошло строгий порог качества и |z|.",

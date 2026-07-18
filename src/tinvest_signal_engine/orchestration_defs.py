@@ -26,6 +26,7 @@ from dagster import (
 )
 
 from .logging_utils import configure_logging
+from .services.bond_convergence_emitter import run_once as run_bond_convergence_once
 from .services.threshold_cron import run_recalc_once
 
 
@@ -71,6 +72,22 @@ def unary_kafka_poll_once_op(context) -> None:
     subprocess.run(cmd, check=True, env=env)
 
 
+@op(name="bond_convergence_scan_op", tags={"component": "bond-convergence"})
+def bond_convergence_scan_op(context) -> None:
+    """Find bonds at the fixed pre-maturity session and publish candidates."""
+    from .config import RuntimeSettings
+
+    settings = RuntimeSettings.from_env(service_name="dagster")
+    configure_logging(settings.log_level)
+    receipt = run_bond_convergence_once(settings)
+    context.log.info(
+        "Проверено облигаций: %s; опубликовано сигналов: %s; отклонено: %s",
+        receipt.inspected,
+        receipt.published,
+        receipt.rejected,
+    )
+
+
 @job(name="threshold_recalc_job")
 def threshold_recalc_job() -> None:
     threshold_recalc_op()
@@ -81,8 +98,14 @@ def unary_kafka_poll_once_job() -> None:
     unary_kafka_poll_once_op()
 
 
+@job(name="bond_convergence_scan_job")
+def bond_convergence_scan_job() -> None:
+    bond_convergence_scan_op()
+
+
 _DEFAULT_THRESHOLD_CRON: Final[str] = "0 2 * * *"
 _DEFAULT_UNARY_CRON: Final[str] = "*/15 * * * *"
+_DEFAULT_BOND_CONVERGENCE_CRON: Final[str] = "15 11 * * 1-5"
 
 
 def _threshold_cron_schedule() -> str:
@@ -109,7 +132,26 @@ quarter_hourly_unary_schedule = ScheduleDefinition(
     default_status=DefaultScheduleStatus.RUNNING,
 )
 
+daily_bond_convergence_schedule = ScheduleDefinition(
+    name="daily_bond_convergence_scan",
+    job=bond_convergence_scan_job,
+    cron_schedule=(
+        (os.getenv("DAGSTER_BOND_CONVERGENCE_CRON") or "").strip()
+        or _DEFAULT_BOND_CONVERGENCE_CRON
+    ),
+    execution_timezone="Europe/Moscow",
+    default_status=DefaultScheduleStatus.RUNNING,
+)
+
 defs = Definitions(
-    jobs=[threshold_recalc_job, unary_kafka_poll_once_job],
-    schedules=[daily_threshold_schedule, quarter_hourly_unary_schedule],
+    jobs=[
+        threshold_recalc_job,
+        unary_kafka_poll_once_job,
+        bond_convergence_scan_job,
+    ],
+    schedules=[
+        daily_threshold_schedule,
+        quarter_hourly_unary_schedule,
+        daily_bond_convergence_schedule,
+    ],
 )

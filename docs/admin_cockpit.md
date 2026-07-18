@@ -72,10 +72,22 @@ Rate-limit и instrument cooldown проверяются не только в п
 | Delivery | `#/delivery` | Сводка delivered/suppressed/unknown, причины подавления и per-type delivery rate. |
 | Calibration | `#/calibration` | Матрица `signal_type x quality tier x feedback/delivery` для настройки порогов. |
 | Instruments | `#/instruments` | Полный configured universe из `conf/instruments.yaml` плюс активность по каждому тикеру. |
+| Instrument card | `#/instrument?id=SBER_TQBR` | Объём сегодня против вчера, агрессивный поток, последний стакан и эвристики скрытой ликвидности. |
 | Accuracy | `#/accuracy` | JSON-метрики accuracy, если подготовлен `SIGNAL_ACCURACY_JSON_PATH`. |
 | Settings | `#/settings` | Read-only runtime config без секретов. |
 
 Quick feedback controls are available directly in `Triage` and `Signals`: `Useful`, `Noise`, and `Unsure` save `/admin/api/feedback` without opening the signal drawer. The `Signals` feedback filter supports `unlabeled` for rows that still need review.
+
+## Карточка инструмента
+
+В разделе **Instruments** тикер открывает карточку инструмента. Карточка строится из локальных raw-событий ClickHouse и показывает:
+
+- объём и оценочный оборот сегодня к текущему моменту;
+- те же показатели за предыдущий день на тот же момент времени;
+- число сделок и среднюю цену сделки;
+- агрессивные покупки и продажи из поля `direction` в потоке сделок;
+- последний bid/ask, mid, spread, глубину top-5 и дисбаланс стакана;
+- эвристику возможного айсберга: повторяющиеся принты на одной цене, видимая «стена» и перекос стакана.
 
 <a id="screens"></a>
 
@@ -134,4 +146,5 @@ python scripts/snapshot_admin_ui.py
 | `/admin/api/delivery/reasons` | Причины suppressed/unknown/delivered. |
 | `/admin/api/calibration` | Матрица калибровки по type/quality/feedback. |
 | `/admin/api/instruments` | Configured universe + activity stats. |
+| `/admin/api/instrument-insights/{instrument_id}` | Карточка инструмента: объём сегодня к текущему моменту, сравнение с предыдущим днём на тот же момент, агрессивные покупки/продажи, последний стакан и эвристика скрытой ликвидности. |
 | `/admin/api/settings` | Read-only runtime settings для Cockpit. |

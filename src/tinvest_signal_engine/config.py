@@ -25,6 +25,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
             "TINVEST_TOKEN",
         }
     ),
+    "bond_convergence_emitter": frozenset({"TINVEST_TOKEN"}),
     "dagster": frozenset({"TINVEST_TOKEN"}),
     "detector": frozenset(
         {

@@ -38,10 +38,65 @@ _SIGNAL_TYPE_WEIGHT: dict[str, float] = {
     "price_near_limit_band": 0.74,
     "open_interest_spike": 0.7,
     "candle_range_spike": 0.68,
+    "bond_maturity_convergence": 1.0,
 }
 
 
+def _bond_convergence_quality(signal: TriggerSignal) -> dict[str, Any] | None:
+    """Оценивает проверенный облигационный сценарий по его выборке, а не z-score."""
+    if signal.signal_type != "bond_maturity_convergence":
+        return None
+
+    payload = signal.payload or {}
+    try:
+        success_rate = float(payload["historical_success_rate"])
+        wilson_lower = float(payload["historical_wilson_lower_bound"])
+        observations = int(payload["historical_eligible_observations"])
+        maturities = int(payload["historical_distinct_maturities"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    # Основой служит консервативная нижняя граница доверия. Небольшая добавка
+    # за объём независимых погашений не позволяет единичной удачной серии
+    # получить высокий балл.
+    sample_bonus = min(5.0, max(0.0, (maturities - 30) / 30.0))
+    score = int(max(0, min(100, round(wilson_lower * 100.0 + sample_bonus))))
+    if score >= 85 and observations >= 100 and maturities >= 100:
+        tier = "high"
+        tier_ru = "высокая"
+        hint = (
+            f"Историческая проверка: {success_rate * 100:.1f}% успешных случаев; "
+            f"консервативная нижняя граница {wilson_lower * 100:.1f}%."
+        )
+    elif score >= 65:
+        tier = "medium"
+        tier_ru = "средняя"
+        hint = "Исторический эффект заметен, но выборка ещё требует подтверждения."
+    else:
+        tier = "low"
+        tier_ru = "низкая"
+        hint = "Исторических данных недостаточно для уверенной оценки."
+
+    return {
+        "quality_score": score,
+        "quality_tier": tier,
+        "quality_tier_ru": tier_ru,
+        "quality_hint_ru": hint,
+        "quality_factors": {
+            "method": "historical_wilson_lower_bound_v1",
+            "historical_success_rate": round(success_rate, 6),
+            "historical_wilson_lower_bound": round(wilson_lower, 6),
+            "historical_eligible_observations": observations,
+            "historical_distinct_maturities": maturities,
+        },
+    }
+
+
 def compute_signal_quality(signal: TriggerSignal) -> dict[str, Any]:
+    bond_quality = _bond_convergence_quality(signal)
+    if bond_quality is not None:
+        return bond_quality
+
     z = abs(float(signal.z_score))
     # Нормализация |z|: типичный «сильный» хвост от 3 до ~8
     z_norm = max(0.0, min(1.0, (z - 1.5) / 5.5))

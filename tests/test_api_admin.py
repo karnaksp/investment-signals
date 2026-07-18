@@ -364,6 +364,64 @@ def test_admin_source_health_without_clickhouse_is_safe(
     assert data["items"][0]["signal_availability"]
 
 
+def test_admin_instrument_insights_returns_clickhouse_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("CLICKHOUSE_HTTP_URL", "http://clickhouse:8123")
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_instrument_activity.return_value = {}
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "fetch_instrument_insights",
+        lambda *a, **k: {
+            "status": "ok",
+            "instrument_id": "SBER_TQBR",
+            "volume": {"today": {"turnover_raw": 1000}, "previous_same_time": {"turnover_raw": 800}},
+            "aggressive_flow": {"buy_share": 0.6, "sell_share": 0.4},
+            "orderbook": {"spread_bps": 2.5},
+            "hidden_liquidity": {"possible_iceberg_score": 40},
+            "unavailable": {"real_long_short_positions": {"status": "unavailable"}},
+        },
+    )
+
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        r = client.get(
+            "/admin/api/instrument-insights/SBER_TQBR",
+            headers={"X-Admin-Token": "test-secret-token"},
+        )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "ok"
+    assert data["instrument"]["ticker"] == "SBER"
+    assert data["volume"]["today"]["turnover_raw"] == 1000
+    assert data["unavailable"]["real_long_short_positions"]["status"] == "unavailable"
+
+
+def test_admin_instrument_insights_without_clickhouse_is_safe(client_ok: TestClient) -> None:
+    r = client_ok.get(
+        "/admin/api/instrument-insights/SBER_TQBR",
+        headers={"X-Admin-Token": "test-secret-token"},
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "unavailable"
+    assert data["reason_code"] == "clickhouse_not_configured"
+    assert data["instrument"]["instrument_id"] == "SBER_TQBR"
+
+
 def test_admin_accuracy_missing_returns_empty_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

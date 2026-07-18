@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -77,6 +78,51 @@ def test_clickhouse_store_uses_parameterized_idempotent_insert(monkeypatch) -> N
     assert request.headers["X-clickhouse-key"] == "secret"
 
 
+def test_clickhouse_store_batches_ticks_into_one_insert(monkeypatch) -> None:
+    captured = {}
+
+    def fake_urlopen(request, *, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.clickhouse_reference_ticks.urlopen",
+        fake_urlopen,
+    )
+    store = ClickHouseReferenceTickStore(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="writer",
+        password="secret",
+    )
+    tick = ReferenceTick(
+        instrument_id="SBER_TQBR",
+        event_at=datetime.fromisoformat(NOW_TEXT),
+        received_at=datetime.fromisoformat(NOW_TEXT),
+        event_id=UUID(EVENT_ID),
+        source_kind="trade",
+        trade_price=Decimal("312.123456789"),
+        has_trade=True,
+    )
+
+    store.persist_many((tick,))
+
+    body = captured["request"].data.decode("utf-8")
+    sql, row = body.split("FORMAT JSONEachRow\n", 1)
+    assert "INSERT INTO market_reference_ticks" in sql
+    assert "LEFT ANTI JOIN" not in sql
+    assert EVENT_ID not in sql
+    parsed_row = json.loads(row)
+    assert parsed_row["event_id"] == EVENT_ID
+    assert parsed_row["trade_price"] == "312.123456789"
+    assert parsed_row["event_at"] == "2026-07-10 09:30:00.000000"
+    assert parsed_row["received_at"] == "2026-07-10 09:30:00.000000"
+    query = parse_qs(urlparse(captured["request"].full_url).query)
+    assert query["database"] == ["signal_engine"]
+    assert query["date_time_input_format"] == ["best_effort"]
+
+
 def test_clickhouse_reader_loads_bounded_reference_ticks(monkeypatch) -> None:
     captured = {}
     payload = (
@@ -149,8 +195,15 @@ class _Consumer:
     commits: list[object] = field(default_factory=list)
     closed: bool = False
 
-    def __iter__(self):
-        return iter(self.messages)
+    polled: bool = False
+
+    def poll(self, *, timeout_ms: int, max_records: int):
+        assert timeout_ms == 1_000
+        assert max_records == 500
+        if self.polled:
+            raise KeyboardInterrupt
+        self.polled = True
+        return {"partition": self.messages}
 
     def commit(self, *, offsets) -> None:
         self.commits.append(offsets)
@@ -164,11 +217,11 @@ class _Processor:
     failure: Exception | None = None
     events: list[object] = field(default_factory=list)
 
-    def process(self, event) -> bool:
-        self.events.append(event)
+    def process_many(self, events) -> int:
+        self.events.extend(events)
         if self.failure:
             raise self.failure
-        return True
+        return len(events)
 
 
 def _raw_trade() -> dict[str, object]:

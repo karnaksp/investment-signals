@@ -63,6 +63,26 @@ def test_combo_score_six_is_delivered(monkeypatch) -> None:
     assert out.payload["delivery_explanation_ru"]
 
 
+def test_validated_bond_convergence_is_delivered(monkeypatch) -> None:
+    policy = DeliveryPolicy(_settings(monkeypatch))
+    out = policy.apply(
+        _signal(
+            signal_type="bond_maturity_convergence",
+            source_event_type="bond_convergence_observation",
+            z_score=0.0,
+            payload={
+                "quality_score": 94,
+                "historical_success_rate": 0.9365,
+                "historical_wilson_lower_bound": 0.8923,
+                "historical_eligible_observations": 189,
+            },
+        )
+    )
+
+    assert out.payload["delivery_status"] == "delivered"
+    assert out.payload["delivery_reason"] == "validated_bond_convergence"
+
+
 def test_low_quality_spread_is_suppressed_without_context(monkeypatch) -> None:
     policy = DeliveryPolicy(_settings(monkeypatch))
     sig = _signal(

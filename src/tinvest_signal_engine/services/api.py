@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field, field_validator
 import uvicorn
 
 from ..admin_http_guard import AdminApiRateLimiter, admin_client_ip
-from ..clickhouse_context import fetch_raw_events_window, fetch_source_health
+from ..clickhouse_context import (
+    fetch_instrument_insights,
+    fetch_raw_events_window,
+    fetch_source_health,
+)
 from ..config import RuntimeSettings, load_detector_config, load_instrument_configs
 from ..delivery_policy import DeliveryPolicy
 from ..market_unary import (
@@ -1586,6 +1590,58 @@ def create_app() -> FastAPI:
             minutes=minutes,
             stale_after_minutes=stale_after_minutes,
         )
+
+    @fastapi_app.get(
+        "/admin/api/instrument-insights/{instrument_id}",
+        tags=["admin"],
+        summary="Instrument market statistics and microstructure card",
+        dependencies=[Depends(require_admin)],
+    )
+    def admin_instrument_insights(
+        request: Request,
+        instrument_id: str,
+    ) -> dict[str, Any]:
+        settings = request.app.state.settings
+        catalog = _configured_instrument_catalog(settings)
+        by_id = {
+            str(item.get("instrument_id")): dict(item)
+            for item in catalog.get("items", [])
+        }
+        instrument = by_id.get(instrument_id)
+        if instrument is None:
+            raise HTTPException(status_code=404, detail="Инструмент не найден в конфиге")
+        if not settings.clickhouse_http_url:
+            return {
+                "status": "unavailable",
+                "instrument": instrument,
+                "reason_code": "clickhouse_not_configured",
+                "message_ru": "CLICKHOUSE_HTTP_URL не задан — рыночная статистика инструмента недоступна.",
+            }
+        try:
+            insights = fetch_instrument_insights(
+                settings.clickhouse_http_url,
+                instrument_id=instrument_id,
+                username=settings.clickhouse_http_username,
+                password=settings.clickhouse_http_password,
+            )
+        except httpx.HTTPStatusError as exc:
+            return {
+                "status": "unavailable",
+                "instrument": instrument,
+                "reason_code": "clickhouse_http_error",
+                "message_ru": f"ClickHouse HTTP {exc.response.status_code}: статистика инструмента недоступна.",
+            }
+        except Exception as exc:
+            return {
+                "status": "unavailable",
+                "instrument": instrument,
+                "reason_code": "clickhouse_query_failed",
+                "message_ru": f"{type(exc).__name__}: статистика инструмента недоступна.",
+            }
+        return {
+            **insights,
+            "instrument": instrument,
+        }
 
     @fastapi_app.get(
         "/admin/api/signal/{signal_id}",

@@ -20,6 +20,8 @@ def build_signal_interpretation(signal: TriggerSignal) -> dict[str, Any]:
 
     if st == "price_jump":
         return _price_jump(signal, p)
+    if st == "bond_maturity_convergence":
+        return _bond_maturity_convergence(signal, p)
     if st == "volume_spike":
         return _volume_spike(signal, p)
     if st == "trade_rate_spike":
@@ -109,6 +111,39 @@ def _price_jump(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
         _fact("Δ цены", _signed_price(change), "price_change"),
         _fact("|move|", _bps(signal.metric_value), "abs_price_change_bps"),
         _fact("База", _bps(signal.baseline_value), "baseline_bps"),
+    ]
+    return _pack(signal, headline, facts, direction=direction)
+
+
+def _bond_maturity_convergence(
+    signal: TriggerSignal, p: dict[str, Any]
+) -> dict[str, Any]:
+    direction = str(p.get("price_direction") or "unknown")
+    direction_ru = (
+        "рост к номиналу"
+        if direction == "up"
+        else "снижение к номиналу"
+        if direction == "down"
+        else "направление не определено"
+    )
+    clean_price = _num(p.get("clean_price"))
+    target = _num(p.get("target_clean_price"), 100.0)
+    sessions = int(_num(p.get("sessions_to_maturity"), 0.0) or 0)
+    success_rate = _num(p.get("historical_success_rate"))
+    headline = (
+        f"Ожидается {direction_ru}: чистая цена {_price(clean_price)} → "
+        f"{_price(target)} примерно за {sessions} торговых сессий."
+    )
+    facts = [
+        _fact("Направление", direction_ru, "direction"),
+        _fact("Чистая цена", _price(clean_price), "clean_price"),
+        _fact("Номинал", _price(target), "target_clean_price"),
+        _fact("До погашения", f"{sessions} торговых сессий", "sessions"),
+        _fact(
+            "Подтверждено историей",
+            _pct(success_rate * 100.0 if success_rate is not None else None),
+            "historical_success_rate",
+        ),
     ]
     return _pack(signal, headline, facts, direction=direction)
 

@@ -24,6 +24,8 @@ class NormalizedMarketEvent:
 class ReferenceTickStore(Protocol):
     def persist(self, tick: ReferenceTick) -> None: ...
 
+    def persist_many(self, ticks: tuple[ReferenceTick, ...]) -> None: ...
+
 
 class ReferenceTickProcessor:
     def __init__(self, store: ReferenceTickStore) -> None:
@@ -35,6 +37,16 @@ class ReferenceTickProcessor:
             return False
         self._store.persist(tick)
         return True
+
+    def process_many(self, events: tuple[NormalizedMarketEvent, ...]) -> int:
+        ticks = tuple(
+            tick
+            for event in events
+            if (tick := reference_tick_from_event(event)) is not None
+        )
+        if ticks:
+            self._store.persist_many(ticks)
+        return len(ticks)
 
 
 def reference_tick_from_event(

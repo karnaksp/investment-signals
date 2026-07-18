@@ -45,42 +45,52 @@ class ReferenceTickKafkaRuntime:
 
     def run(self) -> None:
         try:
-            for message in self._consumer:
-                raw = message.value
-                if not isinstance(raw, dict):
-                    logger.warning("Skipping non-object reference event")
-                    self._commit(message)
+            while True:
+                polled = self._consumer.poll(timeout_ms=1_000, max_records=500)
+                messages = tuple(
+                    message
+                    for partition_messages in polled.values()
+                    for message in partition_messages
+                )
+                if not messages:
                     continue
-                issues = validate_normalized_event_dict(raw)
-                if issues:
-                    logger.warning(
-                        "Skipping invalid reference event event_id=%s issues=%s",
-                        raw.get("event_id"),
-                        ",".join(issues),
-                    )
-                    self._commit(message)
-                    continue
-                try:
-                    event = _normalized_market_event(raw)
-                    self._processor.process(event)
-                except (TypeError, ValueError) as error:
-                    logger.warning(
-                        "Skipping unmappable reference event event_id=%s error=%s",
-                        raw.get("event_id"),
-                        error,
-                    )
-                self._commit(message)
+                events: list[NormalizedMarketEvent] = []
+                for message in messages:
+                    raw = message.value
+                    if not isinstance(raw, dict):
+                        logger.warning("Skipping non-object reference event")
+                        continue
+                    issues = validate_normalized_event_dict(raw)
+                    if issues:
+                        logger.warning(
+                            "Skipping invalid reference event event_id=%s issues=%s",
+                            raw.get("event_id"),
+                            ",".join(issues),
+                        )
+                        continue
+                    try:
+                        events.append(_normalized_market_event(raw))
+                    except (TypeError, ValueError) as error:
+                        logger.warning(
+                            "Skipping unmappable reference event event_id=%s error=%s",
+                            raw.get("event_id"),
+                            error,
+                        )
+                self._processor.process_many(tuple(events))
+                self._commit_batch(messages)
         except KeyboardInterrupt:
             logger.info("Reference tick writer stopped by user")
         finally:
             self._consumer.close()
 
-    def _commit(self, message: Any) -> None:
+    def _commit_batch(self, messages: tuple[Any, ...]) -> None:
+        offsets: dict[TopicPartition, int] = {}
+        for message in messages:
+            partition = TopicPartition(message.topic, message.partition)
+            offsets[partition] = max(offsets.get(partition, 0), message.offset + 1)
         position = {
-            TopicPartition(message.topic, message.partition): OffsetAndMetadata(
-                message.offset + 1,
-                "",
-            )
+            partition: OffsetAndMetadata(offset, "")
+            for partition, offset in offsets.items()
         }
         self._consumer.commit(offsets=position)
 

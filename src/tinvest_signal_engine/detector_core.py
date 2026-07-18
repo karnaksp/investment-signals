@@ -6,7 +6,8 @@ import math
 from collections import defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from statistics import fmean
 from typing import Any, Iterable
 from uuid import uuid4
@@ -16,6 +17,13 @@ from .domain.detector_observations import (
     HISTORY_SAMPLING_POLICY_VERSION,
     DetectorObservation,
     deterministic_observation_id,
+)
+from .domain.bond_convergence import (
+    HISTORICAL_EVIDENCE,
+    PAR_PRICE,
+    POLICY_VERSION as BOND_CONVERGENCE_POLICY_VERSION,
+    BondConvergenceSnapshot,
+    evaluate_bond_convergence,
 )
 from .domain.signal_identity import deterministic_signal_id
 from .models import NormalizedEvent, TriggerSignal
@@ -130,6 +138,8 @@ class SignalDetector:
             signals = self._process_candle_event(event, state, cfg)
         elif event.event_type in {"market_values", "tech_analysis"}:
             signals = self._process_unary_snapshot_event(event)
+        elif event.event_type == "bond_convergence_observation":
+            signals = self._process_bond_convergence_event(event)
         else:
             signals = []
         signals = list(signals)
@@ -199,6 +209,97 @@ class SignalDetector:
             "payload": self._truncate_unary_payload(dict(event.payload)),
         }
         return []
+
+    @staticmethod
+    def _process_bond_convergence_event(
+        event: NormalizedEvent,
+    ) -> list[TriggerSignal]:
+        payload = event.payload
+        try:
+            snapshot = BondConvergenceSnapshot(
+                instrument_id=event.instrument_id,
+                ticker=event.ticker,
+                class_code=event.class_code,
+                alias=event.alias,
+                figi=event.figi,
+                uid=event.uid,
+                lot=event.lot,
+                source_time=event.source_time,
+                maturity_date=date.fromisoformat(str(payload["maturity_date"])),
+                clean_price=Decimal(str(payload["clean_price"])),
+                sessions_to_maturity=int(payload["sessions_to_maturity"]),
+                currency=str(payload["currency"]),
+                country_of_risk=str(payload["country_of_risk"]),
+                risk_level=str(payload["risk_level"]),
+                amortization=bool(payload["amortization"]),
+                subordinated=bool(payload["subordinated"]),
+                perpetual=bool(payload["perpetual"]),
+                api_trade_available=bool(payload["api_trade_available"]),
+                buy_available=bool(payload["buy_available"]),
+                sell_available=bool(payload["sell_available"]),
+            )
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            return []
+        decision = evaluate_bond_convergence(snapshot)
+        if not decision.eligible or decision.direction is None:
+            return []
+
+        evidence = HISTORICAL_EVIDENCE
+        direction_ru = "рост" if decision.direction == "up" else "снижение"
+        return [
+            TriggerSignal(
+                signal_id=str(uuid4()),
+                detected_at=utc_now(),
+                instrument_id=event.instrument_id,
+                ticker=event.ticker,
+                class_code=event.class_code,
+                alias=event.alias,
+                source_event_type=event.event_type,
+                signal_type="bond_maturity_convergence",
+                severity=2,
+                metric_value=float(decision.expected_net_distance_bps),
+                baseline_value=float(evidence.mean_net_return_bps),
+                z_score=0.0,
+                window_seconds=0,
+                summary=(
+                    f"Ожидается {direction_ru} чистой цены {event.ticker} "
+                    f"к номиналу {PAR_PRICE}% к погашению."
+                ),
+                payload={
+                    **payload,
+                    "price_direction": decision.direction,
+                    "direction_sign": decision.direction_sign,
+                    "target_clean_price": float(PAR_PRICE),
+                    "gross_distance_bps": float(decision.gross_distance_bps),
+                    "expected_net_distance_bps": float(
+                        decision.expected_net_distance_bps
+                    ),
+                    "bond_convergence_policy_version": (
+                        BOND_CONVERGENCE_POLICY_VERSION
+                    ),
+                    "historical_evidence_version": evidence.version,
+                    "historical_eligible_observations": (
+                        evidence.eligible_observations
+                    ),
+                    "historical_successful_observations": (
+                        evidence.successful_observations
+                    ),
+                    "historical_distinct_maturities": evidence.distinct_maturities,
+                    "historical_success_rate": float(evidence.success_rate),
+                    "historical_wilson_lower_bound": float(
+                        evidence.wilson_lower_bound
+                    ),
+                    "historical_mean_net_return_bps": float(
+                        evidence.mean_net_return_bps
+                    ),
+                    "assumed_round_trip_cost_bps": float(
+                        evidence.assumed_round_trip_cost_bps
+                    ),
+                    "outcome_schedule": "maturity_only",
+                    "quality_score": 94,
+                },
+            )
+        ]
 
     def enrich_signals_with_unary(
         self, signals: list[TriggerSignal]

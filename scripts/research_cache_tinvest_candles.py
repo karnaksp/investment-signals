@@ -125,19 +125,22 @@ def fetch_day_candles(
     instrument_uid: str,
     day: date,
     attempts: int,
+    candle_source_type: str = "CANDLE_SOURCE_EXCHANGE",
 ) -> tuple[ResearchCandle, ...]:
     start = datetime.combine(day, datetime_time(10, 0), tzinfo=MOSCOW).astimezone(UTC)
     end = datetime.combine(day, datetime_time(19, 0), tzinfo=MOSCOW).astimezone(UTC)
+    payload: dict[str, Any] = {
+        "from": start.isoformat().replace("+00:00", "Z"),
+        "to": end.isoformat().replace("+00:00", "Z"),
+        "interval": "CANDLE_INTERVAL_1_MIN",
+        "instrumentId": instrument_uid,
+    }
+    if candle_source_type:
+        payload["candleSourceType"] = candle_source_type
     body = api_post(
         client,
         "MarketDataService/GetCandles",
-        {
-            "from": start.isoformat().replace("+00:00", "Z"),
-            "to": end.isoformat().replace("+00:00", "Z"),
-            "interval": "CANDLE_INTERVAL_1_MIN",
-            "instrumentId": instrument_uid,
-            "candleSourceType": "CANDLE_SOURCE_EXCHANGE",
-        },
+        payload,
         attempts=attempts,
     )
     rows: list[ResearchCandle] = []
@@ -151,6 +154,8 @@ def fetch_day_candles(
                 low=quotation(item.get("low")),
                 close=quotation(item.get("close")),
                 volume=float(item.get("volume", 0) or 0),
+                volume_buy=float(item.get("volumeBuy", 0) or 0),
+                volume_sell=float(item.get("volumeSell", 0) or 0),
                 complete=bool(item.get("isComplete", False)),
             )
         )
@@ -169,6 +174,10 @@ def run_cache(
     request_interval: float,
     max_workers: int,
     ca_cert: Path | None,
+    refresh_days: frozenset[date] = frozenset(),
+    insecure_skip_tls_verify: bool = False,
+    resolved_instruments: Mapping[str, str] | None = None,
+    candle_source_type: str = "CANDLE_SOURCE_EXCHANGE",
 ) -> dict[str, Any]:
     require_duckdb()
     token = load_env_value(env_file, "TINVEST_TOKEN")
@@ -176,6 +185,8 @@ def run_cache(
     if ca_cert is not None:
         verify = ssl.create_default_context()
         verify.load_verify_locations(cafile=ca_cert)
+    if insecure_skip_tls_verify:
+        verify = False
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -188,8 +199,11 @@ def run_cache(
         write=min(request_timeout, 10.0),
         pool=min(request_timeout, 10.0),
     )
-    with httpx.Client(headers=headers, timeout=timeout, verify=verify) as client:
-        instruments = resolve_instruments(client, tickers, attempts=request_attempts)
+    if resolved_instruments is None:
+        with httpx.Client(headers=headers, timeout=timeout, verify=verify) as client:
+            instruments = resolve_instruments(client, tickers, attempts=request_attempts)
+    else:
+        instruments = {ticker: str(resolved_instruments[ticker]) for ticker in tickers}
     row_counts: dict[str, int] = {}
     all_records: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -200,7 +214,7 @@ def run_cache(
         for ticker in tickers:
             target = partition_path(cache_dir, ticker, day)
             key = f"{ticker}/{day.isoformat()}"
-            if valid_partition(target):
+            if valid_partition(target) and day not in refresh_days:
                 skipped += 1
                 rows = read_existing_records(target)
                 row_counts[key] = len(rows)
@@ -234,7 +248,9 @@ def run_cache(
                 request_timeout=request_timeout,
                 request_attempts=request_attempts,
                 ca_cert=ca_cert,
+                insecure_skip_tls_verify=insecure_skip_tls_verify,
                 request_interval=request_interval,
+                candle_source_type=candle_source_type,
             ): (ticker, day)
             for ticker, day in tasks
         }
@@ -280,6 +296,7 @@ def run_cache(
         failures=failures,
     )
     manifest["quality"]["skipped_existing_partitions"] = skipped
+    manifest["quality"]["refreshed_dates"] = [item.isoformat() for item in sorted(refresh_days)]
     write_json(manifest_path(cache_dir), manifest)
     if failures:
         write_json(cache_dir / "failure-summary.json", {"failures": failures})
@@ -296,11 +313,15 @@ def fetch_partition_records(
     request_attempts: int,
     request_interval: float,
     ca_cert: Path | None,
+    insecure_skip_tls_verify: bool = False,
+    candle_source_type: str = "CANDLE_SOURCE_EXCHANGE",
 ) -> list[dict[str, Any]]:
     verify: bool | ssl.SSLContext = True
     if ca_cert is not None:
         verify = ssl.create_default_context()
         verify.load_verify_locations(cafile=ca_cert)
+    if insecure_skip_tls_verify:
+        verify = False
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -320,6 +341,7 @@ def fetch_partition_records(
             instrument_uid=instrument_uid,
             day=day,
             attempts=request_attempts,
+            candle_source_type=candle_source_type,
         )
     time.sleep(request_interval)
     return candle_rows_for_storage(candles)
@@ -337,12 +359,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=Path("var/research/tinvest_candles/v1"))
     parser.add_argument("--tickers", default=",".join(DEFAULT_RESEARCH_TICKERS))
     parser.add_argument("--calendar-days", type=int, default=180)
+    parser.add_argument("--start-day", type=date.fromisoformat)
     parser.add_argument("--end-day", type=date.fromisoformat)
     parser.add_argument("--request-timeout", type=float, default=30.0)
     parser.add_argument("--request-attempts", type=int, default=7)
     parser.add_argument("--request-interval", type=float, default=0.05)
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--ca-cert", type=Path)
+    parser.add_argument(
+        "--refresh-days",
+        default="",
+        help="Comma-separated YYYY-MM-DD dates to re-fetch even when valid partitions already exist.",
+    )
+    parser.add_argument(
+        "--insecure-skip-tls-verify",
+        action="store_true",
+        help="Only for local research behind intercepting proxies; TLS verification stays enabled by default.",
+    )
     return parser.parse_args(argv)
 
 
@@ -351,8 +384,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     tickers = tuple(item.strip().upper() for item in args.tickers.split(",") if item.strip())
     if not tickers or len(tickers) > 25:
         raise SystemExit("--tickers must contain 1..25 symbols")
-    start_day, end_day = study_window(args.calendar_days, args.end_day)
+    if args.start_day and args.end_day:
+        start_day, end_day = args.start_day, args.end_day
+        if start_day > end_day:
+            raise SystemExit("--start-day must not be after --end-day")
+    elif args.start_day or args.end_day:
+        raise SystemExit("--start-day and --end-day must be provided together, or use --calendar-days")
+    else:
+        start_day, end_day = study_window(args.calendar_days, args.end_day)
     try:
+        refresh_days = frozenset(date.fromisoformat(item.strip()) for item in args.refresh_days.split(",") if item.strip())
         manifest = run_cache(
             env_file=args.env_file,
             cache_dir=args.cache_dir,
@@ -364,6 +405,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_interval=args.request_interval,
             max_workers=args.max_workers,
             ca_cert=args.ca_cert,
+            refresh_days=refresh_days,
+            insecure_skip_tls_verify=args.insecure_skip_tls_verify,
         )
     except Exception as exc:
         failure = {

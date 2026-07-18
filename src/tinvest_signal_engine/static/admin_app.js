@@ -64,6 +64,13 @@
     return (num * 100).toFixed(1) + "%";
   }
 
+  function signedPct(value) {
+    const num = finiteNumberOrNull(value);
+    if (num == null) return "-";
+    const sign = num > 0 ? "+" : "";
+    return sign + (num * 100).toFixed(1) + "%";
+  }
+
   function shortTime(value) {
     if (!value) return "-";
     const d = new Date(value);
@@ -680,7 +687,7 @@
         const total = Number(r.total || 0);
         const delivered = Number(r.delivered || 0);
         return `<tr>
-          <td><strong>${esc(r.ticker)}</strong><div class="muted">${esc(r.instrument_id)} / ${esc(r.alias || "")}</div></td>
+          <td><a href="#/instrument?id=${encodeURIComponent(r.instrument_id)}"><strong>${esc(r.ticker)}</strong></a><div class="muted">${esc(r.instrument_id)} / ${esc(r.alias || "")}</div></td>
           <td>${sourceBadges(r.sources)}<div class="muted">book ${esc((r.subscriptions || {}).order_book_depth || "off")}</div></td>
           <td>${sourceHealthBadges(r.source_health)}</td>
           <td class="clip">${esc(unavailableSignalHint(r.signal_availability))}</td>
@@ -1184,6 +1191,148 @@
     `;
   }
 
+  async function pageInstrument(id) {
+    if (!id) {
+      view().innerHTML = `${pageHead("Instrument", "")}<div class="empty">instrument_id missing</div>`;
+      return;
+    }
+    const data = await api("/admin/api/instrument-insights/" + encodeURIComponent(id));
+    const inst = data.instrument || {};
+    view().innerHTML = instrumentInsightHtml(data, inst);
+  }
+
+  function instrumentInsightHtml(data, inst) {
+    if (data.status !== "ok") {
+      return `
+        ${pageHead(inst.ticker || "Instrument", inst.instrument_id || "", `<a href="#/instruments">Back to instruments</a>`)}
+        <div class="empty">${esc(data.message_ru || data.reason_code || "Статистика инструмента недоступна")}</div>
+      `;
+    }
+    const volume = data.volume || {};
+    const today = volume.today || {};
+    const previous = volume.previous_same_time || {};
+    const flow = data.aggressive_flow || {};
+    const book = data.orderbook || {};
+    const hidden = data.hidden_liquidity || {};
+    const turnoverDelta = ratioDelta(volume.turnover_ratio_today_to_previous);
+    const quantityDelta = ratioDelta(volume.quantity_ratio_today_to_previous);
+    return `
+      ${pageHead(
+        (inst.ticker || data.instrument_id) + " / Market card",
+        "Объёмы, поток сделок, стакан и эвристики скрытой ликвидности",
+        `<a href="#/instruments">Back to instruments</a>`
+      )}
+      ${metrics([
+        { label: "Turnover today", value: n(today.turnover_raw, 0), hint: `vs yesterday ${signedPct(turnoverDelta)}` },
+        { label: "Lots today", value: n(today.quantity_lots, 0), hint: `vs yesterday ${signedPct(quantityDelta)}` },
+        { label: "Trades", value: n(today.trade_count, 0), hint: `yesterday ${n(previous.trade_count, 0)}` },
+        { label: "Spread", value: book.spread_bps == null ? "-" : n(book.spread_bps, 2) + " bps", hint: shortTime(book.last_orderbook_at) },
+      ])}
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Сегодня к текущему моменту</h2><span class="muted">${esc(data.windows && data.windows.today_start_moscow || "")}</span></div>
+          ${instrumentVolumeTable(today, previous, volume)}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Агрессивный поток</h2></div>
+          <div class="panel-body stack">
+            ${sideShare("Покупки", flow.buy_share, "b-high")}
+            ${sideShare("Продажи", flow.sell_share, "b-low")}
+            <div class="grid-3">
+              ${miniMetric("Buy lots", n(flow.buy_lots, 0))}
+              ${miniMetric("Sell lots", n(flow.sell_lots, 0))}
+              ${miniMetric("Net lots", n(flow.net_lots, 0))}
+            </div>
+          </div>
+        </section>
+      </div>
+      <div class="grid-2">
+        <section class="panel">
+          <div class="panel-head"><h2>Стакан</h2><span class="muted">последний снимок</span></div>
+          <div class="panel-body stack">
+            <div class="grid-3">
+              ${miniMetric("Best bid", n(book.best_bid, 4))}
+              ${miniMetric("Best ask", n(book.best_ask, 4))}
+              ${miniMetric("Mid", n(book.mid_price, 4))}
+              ${miniMetric("Bid top-5", n(book.bid_qty_top5, 0))}
+              ${miniMetric("Ask top-5", n(book.ask_qty_top5, 0))}
+              ${miniMetric("Depth top-5", n(book.visible_depth_top5, 0))}
+            </div>
+            ${sideShare("Дисбаланс bid/ask", imbalanceToShare(book.imbalance_ratio), "b-medium")}
+            <div class="muted">Дисбаланс: ${n(book.imbalance_ratio, 3)}; wall ratio: ${n(book.wall_ratio, 2)}</div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Скрытая ликвидность</h2><span class="muted">эвристика</span></div>
+          <div class="panel-body stack">
+            ${miniMetric("Iceberg score", n(hidden.possible_iceberg_score, 0) + " / 100")}
+            <div class="grid-3">
+              ${miniMetric("Repeated prices", n(hidden.repeated_price_levels, 0))}
+              ${miniMetric("Max prints", n(hidden.max_same_price_prints, 0))}
+              ${miniMetric("Max lots", n(hidden.max_same_price_lots, 0))}
+            </div>
+            ${reasonList(hidden.reasons || [])}
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  function ratioDelta(ratio) {
+    const num = finiteNumberOrNull(ratio);
+    return num == null ? null : num - 1;
+  }
+
+  function instrumentVolumeTable(today, previous, volume) {
+    return table(
+      [
+        { label: "Metric" },
+        { label: "Today", cls: "num" },
+        { label: "Yesterday same time", cls: "num" },
+        { label: "Ratio", cls: "num" },
+      ],
+      [
+        ["Turnover", today.turnover_raw, previous.turnover_raw, volume.turnover_ratio_today_to_previous],
+        ["Lots", today.quantity_lots, previous.quantity_lots, volume.quantity_ratio_today_to_previous],
+        ["Trades", today.trade_count, previous.trade_count, ratio(today.trade_count, previous.trade_count)],
+        ["Avg price", today.avg_trade_price, previous.avg_trade_price, ratio(today.avg_trade_price, previous.avg_trade_price)],
+      ].map((row) => `<tr>
+        <td>${esc(row[0])}</td>
+        <td class="num">${n(row[1], row[0] === "Avg price" ? 4 : 0)}</td>
+        <td class="num">${n(row[2], row[0] === "Avg price" ? 4 : 0)}</td>
+        <td class="num">${row[3] == null ? "-" : n(row[3], 2) + "x"}</td>
+      </tr>`),
+      "Нет сделок за выбранное окно"
+    );
+  }
+
+  function ratio(a, b) {
+    const x = finiteNumberOrNull(a);
+    const y = finiteNumberOrNull(b);
+    return x == null || y == null || y === 0 ? null : x / y;
+  }
+
+  function sideShare(label, share, cls) {
+    const value = finiteNumber(share, 0);
+    const width = Math.max(0, Math.min(100, value * 100));
+    return `<div class="bar-row">
+      <span>${esc(label)}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
+      <span class="num">${pct(value)}</span>
+    </div>`;
+  }
+
+  function imbalanceToShare(value) {
+    const num = finiteNumberOrNull(value);
+    return num == null ? null : (num + 1) / 2;
+  }
+
+  function reasonList(rows) {
+    const items = Array.isArray(rows) ? rows : [];
+    if (!items.length) return `<div class="empty">Признаков скрытой ликвидности по текущему окну не найдено.</div>`;
+    return `<ul class="compact-list">${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`;
+  }
+
   async function pageAccuracy() {
     try {
       const data = await api("/admin/api/accuracy");
@@ -1386,7 +1535,7 @@
 
   async function loadCurrent() {
     const r = route();
-    const active = r.name === "signal" ? "signals" : (
+    const active = r.name === "signal" ? "signals" : r.name === "instrument" ? "instruments" : (
       nav.some((x) => x[0] === r.name) ? r.name : "triage"
     );
     renderShell(active);
@@ -1404,6 +1553,7 @@
       else if (r.name === "accuracy") await pageAccuracy();
       else if (r.name === "settings") await pageSettings();
       else if (r.name === "signal") await pageSignal(r.params.get("id"));
+      else if (r.name === "instrument") await pageInstrument(r.params.get("id"));
       else await pageTriage();
     } catch (err) {
       showError(err);

@@ -33,6 +33,7 @@ _SIGNAL_TYPE_RU: dict[str, str] = {
     "price_near_limit_band": "Близко к лимиту цены дня",
     "open_interest_spike": "Всплеск открытого интереса",
     "candle_range_spike": "Широкий диапазон свечи",
+    "bond_maturity_convergence": "Схождение облигации к номиналу",
 }
 
 

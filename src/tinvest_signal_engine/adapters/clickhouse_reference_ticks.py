@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Mapping
 from uuid import UUID
@@ -45,9 +45,20 @@ WHERE NOT EXISTS
 )
 """.strip()
 
+BATCH_INSERT_REFERENCE_TICKS_SQL = """
+INSERT INTO market_reference_ticks
+(
+    instrument_id, event_at, received_at, event_id, source_kind,
+    bid_price, ask_price, last_price, trade_price,
+    bid_quantity, ask_quantity,
+    has_valid_book, has_last_price, has_trade
+)
+FORMAT JSONEachRow
+""".strip()
+
 
 SELECT_REFERENCE_TICKS_SQL = """
-SELECT
+SELECT DISTINCT
     instrument_id,
     formatDateTime(event_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS event_at,
     formatDateTime(received_at, '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS received_at,
@@ -123,6 +134,37 @@ class ClickHouseReferenceTickStore:
                 "ClickHouse reference tick insert connection failed"
             ) from error
 
+    def persist_many(self, ticks: tuple[ReferenceTick, ...]) -> None:
+        if not ticks:
+            return
+        rows = "\n".join(
+            json.dumps(_json_row(tick), ensure_ascii=True, separators=(",", ":"))
+            for tick in ticks
+        )
+        request = Request(
+            f"{self._base_url}/?{urlencode({'database': self._database, 'date_time_input_format': 'best_effort'})}",
+            data=(BATCH_INSERT_REFERENCE_TICKS_SQL + "\n" + rows + "\n").encode(
+                "utf-8"
+            ),
+            headers={
+                "Content-Type": "text/plain; charset=utf-8",
+                "X-ClickHouse-User": self._username,
+                "X-ClickHouse-Key": self._password,
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                response.read()
+        except HTTPError as error:
+            raise RuntimeError(
+                f"ClickHouse reference tick batch insert failed with status {error.code}"
+            ) from error
+        except URLError as error:
+            raise RuntimeError(
+                "ClickHouse reference tick batch insert connection failed"
+            ) from error
+
 
 def _parameters(tick: ReferenceTick) -> Mapping[str, str]:
     return {
@@ -141,6 +183,31 @@ def _parameters(tick: ReferenceTick) -> Mapping[str, str]:
         "has_last_price": "1" if tick.has_last_price else "0",
         "has_trade": "1" if tick.has_trade else "0",
     }
+
+
+def _json_row(tick: ReferenceTick) -> Mapping[str, object]:
+    parameters = _parameters(tick)
+    return {
+        "instrument_id": parameters["instrument_id"],
+        "event_at": _clickhouse_datetime(tick.event_at),
+        "received_at": _clickhouse_datetime(tick.received_at),
+        "event_id": parameters["event_id"],
+        "source_kind": parameters["source_kind"],
+        "bid_price": parameters["bid_price"],
+        "ask_price": parameters["ask_price"],
+        "last_price": parameters["last_price"],
+        "trade_price": parameters["trade_price"],
+        "bid_quantity": int(parameters["bid_quantity"]),
+        "ask_quantity": int(parameters["ask_quantity"]),
+        "has_valid_book": int(parameters["has_valid_book"]),
+        "has_last_price": int(parameters["has_last_price"]),
+        "has_trade": int(parameters["has_trade"]),
+    }
+
+
+def _clickhouse_datetime(value: datetime) -> str:
+    """Serialize an aware instant in ClickHouse's unambiguous UTC text form."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 class ClickHouseReferenceTickReader:
