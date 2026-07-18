@@ -9,3 +9,4 @@ __pycache__
 .tmp_pip
 .tmp_invest_python
 data
+var
