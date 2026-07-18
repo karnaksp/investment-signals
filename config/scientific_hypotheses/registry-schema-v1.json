@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://investment-signals.local/schemas/scientific-hypothesis-registry-v1.json",
+  "title": "Scientific hypothesis registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sources", "hypotheses", "replication_evidence", "applied_catalog"],
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+    "hypotheses": {"type": "array", "items": {"$ref": "#/$defs/hypothesis"}},
+    "replication_evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+    "applied_catalog": {"type": "array", "items": {"$ref": "#/$defs/applied"}}
+  },
+  "$defs": {
+    "nonEmpty": {"type": "string", "minLength": 1},
+    "stringList": {"type": "array", "items": {"$ref": "#/$defs/nonEmpty"}},
+    "nonEmptyStringList": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/nonEmpty"}},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "title", "authors", "publication_year", "identifier", "url", "primary_publication", "market", "sample_period", "sample_description", "data_frequency", "economic_mechanism", "limitations", "original_result"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/nonEmpty"}, "title": {"$ref": "#/$defs/nonEmpty"},
+        "authors": {"$ref": "#/$defs/nonEmptyStringList"}, "publication_year": {"type": "integer", "minimum": 1900},
+        "identifier": {"$ref": "#/$defs/nonEmpty"}, "url": {"type": "string", "format": "uri"},
+        "primary_publication": {"type": "boolean"}, "market": {"$ref": "#/$defs/nonEmpty"},
+        "sample_period": {"$ref": "#/$defs/nonEmpty"}, "sample_description": {"$ref": "#/$defs/nonEmpty"},
+        "data_frequency": {"$ref": "#/$defs/nonEmpty"}, "economic_mechanism": {"$ref": "#/$defs/nonEmpty"},
+        "limitations": {"$ref": "#/$defs/nonEmptyStringList"}, "original_result": {"$ref": "#/$defs/nonEmpty"}
+      }
+    },
+    "preregistration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registration_id", "hypothesis_id", "hypothesis_version", "sealed_at", "expected_direction", "feature_definitions", "thresholds", "market_phase", "horizon_seconds", "success_criterion", "abstention_conditions", "cost_model_version", "data_split_policy", "multiple_testing_policy"],
+      "properties": {
+        "registration_id": {"$ref": "#/$defs/nonEmpty"}, "hypothesis_id": {"$ref": "#/$defs/nonEmpty"},
+        "hypothesis_version": {"$ref": "#/$defs/nonEmpty"}, "sealed_at": {"type": ["string", "null"], "format": "date-time"},
+        "expected_direction": {"$ref": "#/$defs/nonEmpty"}, "feature_definitions": {"$ref": "#/$defs/stringList"},
+        "thresholds": {"type": "object", "minProperties": 1}, "market_phase": {"$ref": "#/$defs/nonEmpty"},
+        "horizon_seconds": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "success_criterion": {"$ref": "#/$defs/nonEmpty"}, "abstention_conditions": {"$ref": "#/$defs/stringList"},
+        "cost_model_version": {"$ref": "#/$defs/nonEmpty"}, "data_split_policy": {"$ref": "#/$defs/nonEmpty"},
+        "multiple_testing_policy": {"$ref": "#/$defs/nonEmpty"}
+      }
+    },
+    "hypothesis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hypothesis_id", "version", "title", "origin", "source_ids", "testable_statement", "economic_mechanism", "market_phase", "trigger_conditions", "expected_direction", "horizon_seconds", "abstention_conditions", "falsification_criterion", "original_market_result", "evidence_level", "lifecycle", "scientific_claim", "preregistration"],
+      "properties": {
+        "hypothesis_id": {"$ref": "#/$defs/nonEmpty"}, "version": {"$ref": "#/$defs/nonEmpty"}, "title": {"$ref": "#/$defs/nonEmpty"},
+        "origin": {"enum": ["research_derived", "research_extension", "author_proposed", "data_discovered"]},
+        "source_ids": {"$ref": "#/$defs/stringList"}, "testable_statement": {"type": "string"},
+        "economic_mechanism": {"$ref": "#/$defs/nonEmpty"}, "market_phase": {"$ref": "#/$defs/nonEmpty"},
+        "trigger_conditions": {"$ref": "#/$defs/stringList"}, "expected_direction": {"$ref": "#/$defs/nonEmpty"},
+        "horizon_seconds": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "abstention_conditions": {"$ref": "#/$defs/stringList"}, "falsification_criterion": {"type": "string"},
+        "original_market_result": {"$ref": "#/$defs/nonEmpty"},
+        "evidence_level": {"enum": ["researching", "promising", "validated", "strict_90", "rejected"]},
+        "lifecycle": {"enum": ["draft", "evaluated", "applied", "rejected"]},
+        "scientific_claim": {"type": "boolean"}, "preregistration": {"anyOf": [{"$ref": "#/$defs/preregistration"}, {"type": "null"}]}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence_id", "hypothesis_id", "hypothesis_version", "market", "observed_at", "result", "independent_validation", "trading_days", "eligible_events", "cost_adjusted", "matched_controls_applied", "multiple_testing_applied", "stability_checked", "mean_net_bps", "result_summary", "artifact_uri"],
+      "properties": {
+        "evidence_id": {"$ref": "#/$defs/nonEmpty"}, "hypothesis_id": {"$ref": "#/$defs/nonEmpty"},
+        "hypothesis_version": {"$ref": "#/$defs/nonEmpty"}, "market": {"$ref": "#/$defs/nonEmpty"},
+        "observed_at": {"type": "string", "format": "date-time"}, "result": {"enum": ["confirmed", "rejected", "inconclusive"]},
+        "independent_validation": {"type": "boolean"}, "trading_days": {"type": "integer", "minimum": 0},
+        "eligible_events": {"type": "integer", "minimum": 0}, "cost_adjusted": {"type": "boolean"},
+        "matched_controls_applied": {"type": "boolean"}, "multiple_testing_applied": {"type": "boolean"},
+        "stability_checked": {"type": "boolean"}, "mean_net_bps": {"type": ["number", "null"]},
+        "result_summary": {"$ref": "#/$defs/nonEmpty"}, "artifact_uri": {"type": "string"}
+      }
+    },
+    "applied": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hypothesis_id", "version", "evidence_id"],
+      "properties": {"hypothesis_id": {"$ref": "#/$defs/nonEmpty"}, "version": {"$ref": "#/$defs/nonEmpty"}, "evidence_id": {"$ref": "#/$defs/nonEmpty"}}
+    }
+  }
+}

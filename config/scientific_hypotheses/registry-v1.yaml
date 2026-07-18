@@ -1,0 +1,94 @@
+schema_version: "1.0.0"
+
+# This registry records research leads. A publication is never, by itself,
+# evidence that the effect works on MOEX. Applied hypotheses additionally need
+# a sealed preregistration and independent, cost-adjusted MOEX evidence.
+sources:
+  - source_id: heston-korajczyk-sadka-2010
+    title: Intraday Patterns in the Cross-section of Stock Returns
+    authors: [Steven L. Heston, Robert A. Korajczyk, Ronnie Sadka]
+    publication_year: 2010
+    identifier: doi:10.1111/j.1540-6261.2010.01573.x
+    url: https://arxiv.org/abs/1005.3535
+    primary_publication: true
+    market: United States, NYSE
+    sample_period: 2001-01 through 2005-12 for the intraday TAQ sample
+    sample_description: NYSE-listed common stocks matched to TAQ; half-hour intervals
+    data_frequency: intraday trades and quotes aggregated to 30 minutes
+    economic_mechanism: Periodic institutional trading and temporary liquidity imbalances can create continuation at daily multiples and reversal within an hour.
+    limitations:
+      - The source market, trading hours, and participant composition differ from MOEX.
+      - The documented daily-multiple continuation is not evidence for a 1-30 minute MOEX forecast.
+    original_result: Return continuation recurs at the same half-hour on subsequent days; sub-hour reversal is associated with temporary liquidity imbalance and bid-ask bounce.
+
+  - source_id: jegadeesh-titman-1995
+    title: Short-Horizon Return Reversals and the Bid-Ask Spread
+    authors: [Narasimhan Jegadeesh, Sheridan Titman]
+    publication_year: 1995
+    identifier: doi:10.1006/jfin.1995.1006
+    url: https://doi.org/10.1006/jfin.1995.1006
+    primary_publication: true
+    market: United States dealer market
+    sample_period: Historical U.S. stock sample documented in the licensed publication
+    sample_description: Individual stock returns measured at multiple short horizons
+    data_frequency: short-horizon returns and quoted bid-ask spreads
+    economic_mechanism: Dealer inventory pressure and bid-ask bounce introduce transitory price components and negative serial covariance.
+    limitations:
+      - MOEX is an electronic limit-order market rather than the dealer setting studied by the paper.
+      - Bid-ask bounce must be separated from an economically tradable reversal after costs.
+    original_result: A substantial part of measured short-horizon reversal is consistent with inventory-based microstructure effects.
+
+  - source_id: butt-hogholm-sadaqat-2021
+    title: "Reversal returns and expected returns from liquidity provision: Evidence from emerging markets"
+    authors: [Hilal Anwar Butt, Kenneth Högholm, Mohsin Sadaqat]
+    publication_year: 2021
+    identifier: doi:10.1016/j.mulfin.2020.100664
+    url: https://doi.org/10.1016/j.mulfin.2020.100664
+    primary_publication: true
+    market: 21 emerging equity markets
+    sample_period: 1990-01 through 2017-06
+    sample_description: Emerging-market stocks grouped by size, liquidity, volatility, and investor exits
+    data_frequency: periodic stock returns and firm/market characteristics
+    economic_mechanism: Liquidity suppliers are compensated for absorbing price pressure, especially during volatile markets and active investor exits.
+    limitations:
+      - Cross-market portfolio evidence does not identify a MOEX intraday entry rule.
+      - Country, currency, survivorship, and transaction-cost differences require local reproduction.
+    original_result: Short-term reversal returns are stronger for small, illiquid, volatile stocks and during high market volatility or investor exits.
+
+  - source_id: chiang-kirby-nie-2021
+    title: Short-term reversals, short-term momentum, and news-driven trading activity
+    authors: [I-Hsuan Ethan Chiang, Chris Kirby, Ziye Zoe Nie]
+    publication_year: 2021
+    identifier: doi:10.1016/j.jbankfin.2021.106068
+    url: https://doi.org/10.1016/j.jbankfin.2021.106068
+    primary_publication: true
+    market: United States equities
+    sample_period: 1963-07 through 2018-12
+    sample_description: CRSP common stocks sorted by prior return and monthly turnover, with news-related analyses
+    data_frequency: monthly returns, turnover, liquidity, and announcement windows
+    economic_mechanism: Liquidity-demand shocks tend to reverse, while information-driven high-turnover moves tend to continue.
+    limitations:
+      - Monthly turnover is only a research lead for an intraday relative-volume condition.
+      - News and liquidity demand cannot be distinguished from candles alone without proxy validation.
+    original_result: Reversal weakens as turnover rises; the highest-turnover stocks exhibit short-term momentum associated with news-driven activity.
+
+  - source_id: graczyk-queiros-2018
+    title: "Intraday Seasonalities and Nonstationarity of Trading Volume in Financial Markets: Individual and Cross-Sectional Features"
+    authors: [Michelle B. Graczyk, Silvio M. D. Queirós]
+    publication_year: 2018
+    identifier: arxiv:1810.12099
+    url: https://arxiv.org/abs/1810.12099
+    primary_publication: true
+    market: United States, Dow Jones Industrial Average constituents
+    sample_period: 2003 through 2014
+    sample_description: Blue-chip equities in the Dow Jones Industrial Average, evaluated in semester blocks
+    data_frequency: intraday trading-volume moments and price-fluctuation volatility
+    economic_mechanism: Information arrival and participant behaviour produce phase-specific volume distributions that change across market regimes.
+    limitations:
+      - Intraday seasonality is nonstationary and must be estimated without future observations.
+      - U.S. blue-chip volume profiles cannot be copied directly to MOEX morning or evening sessions.
+    original_result: The average U-shaped volume profile and higher moments changed materially over time; morning and afternoon exhibit different statistical dynamics.
+
+hypotheses: []
+replication_evidence: []
+applied_catalog: []
