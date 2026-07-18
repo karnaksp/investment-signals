@@ -95,7 +95,7 @@ def test_h1_matches_morning_reversal_and_is_deterministic() -> None:
         previous_close=100.0,
         event_price=102.0,
         morning_deviation_z=2.5,
-        cumulative_relative_volume=0.7,
+        cumulative_relative_volume=0.5,
     )
     evaluator = EvaluateHypothesisObservation()
 
@@ -131,7 +131,7 @@ def test_any_feature_from_the_future_forces_abstention() -> None:
     )
     future = ObservedFeature(
         name=FeatureName.CUMULATIVE_RELATIVE_VOLUME,
-        value=0.7,
+        value=0.5,
         observed_at=at + timedelta(seconds=1),
         window_start=at - timedelta(minutes=10),
         window_end=at + timedelta(seconds=1),
@@ -181,7 +181,7 @@ def test_missing_feature_and_trading_gap_are_explicit_abstentions() -> None:
     [
         (HypothesisId.H1, _at_moscow(8, 0), {
             "previous_close": 100, "event_price": 102, "morning_deviation_z": 2.1,
-            "cumulative_relative_volume": 0.8,
+            "cumulative_relative_volume": 0.5,
         }, ExpectedEffect.REVERSAL, -1),
         (HypothesisId.H2, _at_moscow(8, 0), {
             "previous_close": 100, "event_price": 102, "morning_deviation_z": 2.1,

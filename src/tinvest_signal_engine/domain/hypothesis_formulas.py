@@ -271,7 +271,7 @@ def _evaluate_conditions(
         deviation_z = abs(_value(features, FeatureName.MORNING_DEVIATION_Z))
         relative_volume = _value(features, FeatureName.CUMULATIVE_RELATIVE_VOLUME)
         if hypothesis_id is HypothesisId.H1:
-            matched = deviation_z >= 2.0 and relative_volume <= 0.8
+            matched = deviation_z >= 2.0 and relative_volume <= 0.50
             expected = -direction
         else:
             matched = (
