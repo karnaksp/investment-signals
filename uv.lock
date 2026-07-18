@@ -2485,6 +2485,9 @@ orchestration = [
 proto = [
     { name = "grpcio-tools" },
 ]
+replay = [
+    { name = "duckdb" },
+]
 research = [
     { name = "duckdb" },
     { name = "lightgbm" },
@@ -2501,6 +2504,7 @@ requires-dist = [
     { name = "dagster-webserver", marker = "extra == 'orchestration'", specifier = ">=1.8.0,<2" },
     { name = "deprecation" },
     { name = "duckdb", marker = "extra == 'backtest'", specifier = ">=1.0.0" },
+    { name = "duckdb", marker = "extra == 'replay'", specifier = "==1.5.4" },
     { name = "duckdb", marker = "extra == 'research'", specifier = ">=1.0.0" },
     { name = "fastapi" },
     { name = "grpcio", specifier = ">=1.59.3" },
@@ -2524,7 +2528,7 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'research'", specifier = ">=1.4" },
     { name = "uvicorn", extras = ["standard"] },
 ]
-provides-extras = ["orchestration", "dev", "docs", "backtest", "research", "proto"]
+provides-extras = ["orchestration", "replay", "dev", "docs", "backtest", "research", "proto"]
 
 [[package]]
 name = "tomli"
