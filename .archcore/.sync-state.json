@@ -31,6 +31,26 @@
       "source": "conventions/scientific-hypothesis-gate.rule.md",
       "target": "conventions/clean-architecture.rule.md",
       "type": "related"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-ga.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-literature-gate.rnd.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-ga.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-provenance.prd.md",
+      "type": "implements"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-ga.plan.md",
+      "target": "architecture/clean-architecture.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-ga.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-provenance.plan.md",
+      "type": "extends"
     }
   ]
 }
