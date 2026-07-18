@@ -46,6 +46,15 @@ class AdmissionFailure(str, Enum):
     REPLICATION_MULTIPLE_TESTING_REQUIRED = "replication_multiple_testing_required"
     REPLICATION_STABILITY_REQUIRED = "replication_stability_required"
     REPLICATION_ARTIFACT_REQUIRED = "replication_artifact_required"
+    REPLICATION_SAMPLE_TOO_SMALL = "replication_sample_too_small"
+    REPLICATION_CONTROLS_INSUFFICIENT = "replication_controls_insufficient"
+    REPLICATION_CONFIDENCE_INTERVAL_FAILED = "replication_confidence_interval_failed"
+    REPLICATION_ADJUSTED_SIGNIFICANCE_FAILED = "replication_adjusted_significance_failed"
+    REPLICATION_BLOCK_STABILITY_FAILED = "replication_block_stability_failed"
+    REPLICATION_CONCENTRATION_FAILED = "replication_concentration_failed"
+    REPLICATION_FINGERPRINT_REQUIRED = "replication_fingerprint_required"
+    REPLICATION_COST_MODEL_MISMATCH = "replication_cost_model_mismatch"
+    STRICT_90_EVIDENCE_FAILED = "strict_90_evidence_failed"
     VALIDATION_PRECEDES_PREREGISTRATION = "validation_precedes_preregistration"
 
 
@@ -209,7 +218,10 @@ class AssessScientificHypothesisAdmission:
             self._add(issues, AdmissionFailure.REPLICATION_IDENTITY_MISMATCH)
         if evidence.market.upper() != "MOEX" or not evidence.independent_validation:
             self._add(issues, AdmissionFailure.INDEPENDENT_MOEX_VALIDATION_REQUIRED)
-        if evidence.result is not ReplicationResult.CONFIRMED:
+        if evidence.result not in {
+            ReplicationResult.PASSED,
+            ReplicationResult.CONFIRMED,
+        }:
             self._add(issues, AdmissionFailure.REPLICATION_NOT_CONFIRMED)
         if not evidence.matched_controls_applied:
             self._add(issues, AdmissionFailure.REPLICATION_CONTROLS_REQUIRED)
@@ -221,6 +233,74 @@ class AssessScientificHypothesisAdmission:
             self._add(issues, AdmissionFailure.REPLICATION_STABILITY_REQUIRED)
         if not evidence.artifact_uri.strip():
             self._add(issues, AdmissionFailure.REPLICATION_ARTIFACT_REQUIRED)
+        if evidence.trading_days < 30 or evidence.eligible_events < 300:
+            self._add(
+                issues,
+                AdmissionFailure.REPLICATION_SAMPLE_TOO_SMALL,
+                f"days={evidence.trading_days}, events={evidence.eligible_events}",
+            )
+        if evidence.controls_per_event < 5:
+            self._add(
+                issues,
+                AdmissionFailure.REPLICATION_CONTROLS_INSUFFICIENT,
+                str(evidence.controls_per_event),
+            )
+        if evidence.lift_ci_lower is None or evidence.lift_ci_lower <= 0:
+            self._add(
+                issues,
+                AdmissionFailure.REPLICATION_CONFIDENCE_INTERVAL_FAILED,
+                str(evidence.lift_ci_lower),
+            )
+        if evidence.adjusted_p_value is None or evidence.adjusted_p_value > 0.05:
+            self._add(
+                issues,
+                AdmissionFailure.REPLICATION_ADJUSTED_SIGNIFICANCE_FAILED,
+                str(evidence.adjusted_p_value),
+            )
+        if evidence.total_blocks < 5 or evidence.stable_blocks < 4:
+            self._add(
+                issues,
+                AdmissionFailure.REPLICATION_BLOCK_STABILITY_FAILED,
+                f"{evidence.stable_blocks}/{evidence.total_blocks}",
+            )
+        if (
+            evidence.max_ticker_share is None
+            or evidence.max_ticker_share > 0.5
+            or evidence.max_period_share is None
+            or evidence.max_period_share > 0.5
+        ):
+            self._add(
+                issues,
+                AdmissionFailure.REPLICATION_CONCENTRATION_FAILED,
+                (
+                    f"ticker={evidence.max_ticker_share}, "
+                    f"period={evidence.max_period_share}"
+                ),
+            )
+        if (
+            not evidence.dataset_fingerprint.strip()
+            or not evidence.formula_fingerprint.strip()
+        ):
+            self._add(issues, AdmissionFailure.REPLICATION_FINGERPRINT_REQUIRED)
+        if (
+            hypothesis.preregistration is not None
+            and evidence.cost_model_version
+            != hypothesis.preregistration.cost_model_version
+        ):
+            self._add(
+                issues,
+                AdmissionFailure.REPLICATION_COST_MODEL_MISMATCH,
+                evidence.cost_model_version,
+            )
+        if hypothesis.evidence_level.value == "strict_90" and (
+            evidence.success_wilson_lower is None
+            or evidence.success_wilson_lower < 0.9
+        ):
+            self._add(
+                issues,
+                AdmissionFailure.STRICT_90_EVIDENCE_FAILED,
+                str(evidence.success_wilson_lower),
+            )
         if (
             hypothesis.preregistration is not None
             and hypothesis.preregistration.sealed_at is not None

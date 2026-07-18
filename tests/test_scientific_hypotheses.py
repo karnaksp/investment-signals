@@ -147,6 +147,21 @@ def _evidence(
         mean_net_bps=7.5,
         result_summary="Positive on independent validation days.",
         artifact_uri="var/research/runs/run-1/model-results.json",
+        primary_metric="matched_control_lift_net_bps",
+        controls_per_event=5,
+        lift_ci_lower=1.1,
+        lift_ci_upper=12.4,
+        adjusted_p_value=0.02,
+        stable_blocks=4,
+        total_blocks=5,
+        max_ticker_share=0.2,
+        max_period_share=0.3,
+        dataset_fingerprint="sha256:dataset",
+        formula_fingerprint="sha256:formula",
+        cost_model_version="1.0.0",
+        abstention_rate=0.35,
+        success_rate=0.62,
+        success_wilson_lower=0.56,
     )
 
 
@@ -227,6 +242,43 @@ def test_independent_cost_adjusted_validation_is_mandatory() -> None:
     } <= _codes(decision)
 
 
+def test_quantitative_evidence_gate_rejects_small_or_fragile_effect() -> None:
+    evidence = replace(
+        _evidence(),
+        trading_days=29,
+        eligible_events=299,
+        controls_per_event=4,
+        lift_ci_lower=0.0,
+        adjusted_p_value=0.051,
+        stable_blocks=3,
+        max_ticker_share=0.51,
+    )
+
+    decision = _gate().execute(_hypothesis(), evidence)
+
+    assert {
+        AdmissionFailure.REPLICATION_SAMPLE_TOO_SMALL,
+        AdmissionFailure.REPLICATION_CONTROLS_INSUFFICIENT,
+        AdmissionFailure.REPLICATION_CONFIDENCE_INTERVAL_FAILED,
+        AdmissionFailure.REPLICATION_ADJUSTED_SIGNIFICANCE_FAILED,
+        AdmissionFailure.REPLICATION_BLOCK_STABILITY_FAILED,
+        AdmissionFailure.REPLICATION_CONCENTRATION_FAILED,
+    } <= _codes(decision)
+
+
+def test_strict_90_label_requires_wilson_lower_bound_of_ninety_percent() -> None:
+    hypothesis = replace(_hypothesis(), evidence_level=EvidenceLevel.STRICT_90)
+
+    rejected = _gate().execute(hypothesis, _evidence())
+    assert AdmissionFailure.STRICT_90_EVIDENCE_FAILED in _codes(rejected)
+
+    accepted = _gate().execute(
+        hypothesis,
+        replace(_evidence(), success_rate=0.96, success_wilson_lower=0.91),
+    )
+    assert accepted.admitted is True
+
+
 def test_validation_must_happen_after_preregistration_is_sealed() -> None:
     evidence = replace(_evidence(), observed_at=SEALED_AT)
 
@@ -263,13 +315,22 @@ def test_top_level_analytical_change_is_also_versioned() -> None:
     assert AdmissionFailure.SEALED_PARAMETERS_CHANGED_IN_PLACE in _codes(decision)
 
 
-def test_registry_loads_five_primary_sources_and_no_fabricated_evidence() -> None:
+def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> None:
     registry = VersionedScientificRegistry.from_file(REGISTRY)
 
     assert registry.schema_version == "1.0.0"
-    assert len(registry.sources) == 5
+    assert len(registry.sources) == 7
     assert all(source.primary_publication for source in registry.sources)
-    assert registry.hypotheses == ()
+    assert len(registry.hypotheses) == 9
+    assert sum(
+        item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
+        for item in registry.hypotheses
+    ) == 7
+    assert sum(
+        item.lifecycle is HypothesisLifecycle.SHADOW
+        for item in registry.hypotheses
+    ) == 2
+    assert all(item.preregistration and item.preregistration.sealed for item in registry.hypotheses)
     assert registry.replication_evidence == ()
     assert registry.applied_catalog == ()
 
@@ -337,7 +398,8 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
-    assert payload["sources"] == 5
+    assert payload["sources"] == 7
+    assert payload["hypotheses"] == 9
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

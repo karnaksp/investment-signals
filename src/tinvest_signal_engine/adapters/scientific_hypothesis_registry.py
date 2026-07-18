@@ -209,6 +209,26 @@ def _required_int(record: Mapping[str, Any], field: str, location: str) -> int:
     return value
 
 
+def _required_number(record: Mapping[str, Any], field: str, location: str) -> float:
+    value = record.get(field)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ScientificRegistryFormatError(f"{location}.{field} must be numeric")
+    return float(value)
+
+
+def _optional_number(
+    record: Mapping[str, Any], field: str, location: str
+) -> float | None:
+    value = record.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ScientificRegistryFormatError(
+            f"{location}.{field} must be numeric or null"
+        )
+    return float(value)
+
+
 def _timestamp(value: object, location: str, *, optional: bool = False) -> datetime | None:
     if value is None and optional:
         return None
@@ -363,6 +383,23 @@ def _replication(record: Mapping[str, Any], index: int) -> ReplicationEvidence:
         mean_net_bps=float(mean_net_bps) if mean_net_bps is not None else None,
         result_summary=_required_text(record, "result_summary", location),
         artifact_uri=_optional_text(record, "artifact_uri"),
+        primary_metric=_required_text(record, "primary_metric", location),
+        controls_per_event=_required_int(record, "controls_per_event", location),
+        lift_ci_lower=_optional_number(record, "lift_ci_lower", location),
+        lift_ci_upper=_optional_number(record, "lift_ci_upper", location),
+        adjusted_p_value=_optional_number(record, "adjusted_p_value", location),
+        stable_blocks=_required_int(record, "stable_blocks", location),
+        total_blocks=_required_int(record, "total_blocks", location),
+        max_ticker_share=_optional_number(record, "max_ticker_share", location),
+        max_period_share=_optional_number(record, "max_period_share", location),
+        dataset_fingerprint=_required_text(record, "dataset_fingerprint", location),
+        formula_fingerprint=_required_text(record, "formula_fingerprint", location),
+        cost_model_version=_required_text(record, "cost_model_version", location),
+        abstention_rate=_optional_number(record, "abstention_rate", location),
+        success_rate=_optional_number(record, "success_rate", location),
+        success_wilson_lower=_optional_number(
+            record, "success_wilson_lower", location
+        ),
     )
 
 

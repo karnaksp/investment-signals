@@ -89,6 +89,336 @@ sources:
       - U.S. blue-chip volume profiles cannot be copied directly to MOEX morning or evening sessions.
     original_result: The average U-shaped volume profile and higher moments changed materially over time; morning and afternoon exhibit different statistical dynamics.
 
-hypotheses: []
+  - source_id: gould-bonart-2015
+    title: Queue Imbalance as a One-Tick-Ahead Price Predictor in a Limit Order Book
+    authors: [Martin D. Gould, Julius Bonart]
+    publication_year: 2015
+    identifier: arxiv:1512.03492
+    url: https://arxiv.org/abs/1512.03492
+    primary_publication: true
+    market: United States, Nasdaq
+    sample_period: Historical sample documented in the publication
+    sample_description: Ten liquid Nasdaq stocks separated into large-tick and small-tick groups
+    data_frequency: event-level best bid and ask queues and subsequent mid-price moves
+    economic_mechanism: A persistent imbalance between best bid and ask queues represents asymmetric near-term liquidity pressure.
+    limitations:
+      - The relation was stronger for large-tick stocks and cannot be copied to MOEX without local validation.
+      - Queue imbalance predicts the next mid-price move, not an executable profit after latency and costs.
+    original_result: Logistic and local-logistic models improved prediction of the next mid-price direction relative to an unconditional null model.
+
+  - source_id: cont-kukanov-stoikov-2014
+    title: The Price Impact of Order Book Events
+    authors: [Rama Cont, Arseniy Kukanov, Sasha Stoikov]
+    publication_year: 2014
+    identifier: doi:10.1093/jjfinec/nbt003
+    url: https://arxiv.org/abs/1011.6402
+    primary_publication: true
+    market: United States, NYSE
+    sample_period: Historical NYSE TAQ sample documented in the publication
+    sample_description: Fifty U.S. stocks with limit orders, market orders, cancellations, quotes, and trades
+    data_frequency: event-level order-book events aggregated over short intervals
+    economic_mechanism: Net supply and demand changes at the best quotes move prices, with impact inversely related to available depth.
+    limitations:
+      - Event ordering, latency, lot sizes, and session structure differ on MOEX.
+      - Trade volume alone is a noisier proxy than synchronized order-flow imbalance.
+    original_result: Short-interval price changes had a robust approximately linear relation with order-flow imbalance and an inverse relation with market depth.
+
+hypotheses:
+  - hypothesis_id: h1-morning-low-volume-reversion
+    version: "1.0.0"
+    title: Возврат утреннего отклонения при слабом объёме
+    origin: research_extension
+    source_ids: [heston-korajczyk-sadka-2010, jegadeesh-titman-1995, butt-hogholm-sadaqat-2021, graczyk-queiros-2018]
+    testable_statement: Если в 07:00–09:49 цена сильно отклонилась от предыдущего закрытия без подтверждения накопленным относительным объёмом, после 10:00 она частично возвращается к закрытию чаще сопоставимых контрольных событий.
+    economic_mechanism: В малоликвидной фазе временный дисбаланс ликвидности может смещать цену; приход основной ликвидности поглощает давление.
+    market_phase: morning_0700_0949
+    trigger_conditions: [absolute_open_gap_z >= 2.0, cumulative_relative_volume <= 0.50]
+    expected_direction: reversion_to_previous_close
+    horizon_seconds: [1800, 3600]
+    abstention_conditions: [missing_previous_close, trading_gap, cumulative_relative_volume_unavailable, market_wide_move_same_direction]
+    falsification_criterion: Нижняя граница 95%-интервала прироста результата после издержек к контролю не выше нуля на независимых 20% торговых дней.
+    original_market_result: На исходных рынках краткосрочный разворот связывается с временным давлением ликвидности; точная утренняя формула является локальным развитием.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h1-v1
+      hypothesis_id: h1-morning-low-volume-reversion
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: reversion_to_previous_close
+      feature_definitions: [absolute_open_gap_z uses only same-minute history from prior trading days, cumulative_relative_volume uses only volume observed by event time]
+      thresholds: {absolute_open_gap_z_min: 2.0, cumulative_relative_volume_max: 0.50, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: morning_0700_0949
+      horizon_seconds: [1800, 3600]
+      success_criterion: Cost-adjusted matched-control lift has 95% lower bound above zero, adjusted p<=0.05, and the sign is stable in at least 4 of 5 chronological blocks.
+      abstention_conditions: [missing_previous_close, trading_gap, cumulative_relative_volume_unavailable, market_wide_move_same_direction]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days
+      multiple_testing_policy: Benjamini-Hochberg within morning-regime family at q<=0.05
+
+  - hypothesis_id: h2-morning-high-volume-continuation
+    version: "1.0.0"
+    title: Продолжение утреннего отклонения при подтверждающем объёме
+    origin: research_extension
+    source_ids: [chiang-kirby-nie-2021, graczyk-queiros-2018]
+    testable_statement: Сильное утреннее отклонение, подтверждённое высоким относительным объёмом и широким диапазоном, чаще продолжается после 10:00, чем сопоставимые контрольные события.
+    economic_mechanism: Высокая торговая активность повышает вероятность информационного, а не временного ликвидностного движения.
+    market_phase: morning_0700_0949
+    trigger_conditions: [absolute_open_gap_z >= 2.0, cumulative_relative_volume >= 1.50, range_percentile >= 0.90]
+    expected_direction: continuation
+    horizon_seconds: [900, 1800, 3600]
+    abstention_conditions: [missing_previous_close, trading_gap, relative_volume_unavailable, range_norm_unavailable]
+    falsification_criterion: Независимый эффект после издержек и контроля не положителен либо знак не сохраняется в четырёх из пяти блоков.
+    original_market_result: В исходной работе высокая активность ослабляла разворот и была связана с продолжением; внутридневная формула является заранее заданным развитием.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h2-v1
+      hypothesis_id: h2-morning-high-volume-continuation
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: continuation
+      feature_definitions: [open_gap_z uses only prior-day same-minute norms, relative volume and range use observations no later than event time]
+      thresholds: {absolute_open_gap_z_min: 2.0, cumulative_relative_volume_min: 1.50, range_percentile_min: 0.90, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: morning_0700_0949
+      horizon_seconds: [900, 1800, 3600]
+      success_criterion: Cost-adjusted matched-control lift has 95% lower bound above zero, adjusted p<=0.05, and the sign is stable in at least 4 of 5 chronological blocks.
+      abstention_conditions: [missing_previous_close, trading_gap, relative_volume_unavailable, range_norm_unavailable]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days
+      multiple_testing_policy: Benjamini-Hochberg within morning-regime family at q<=0.05
+
+  - hypothesis_id: h3-jump-low-activity-reversal
+    version: "1.0.0"
+    title: Разворот резкого движения при слабой активности
+    origin: research_extension
+    source_ids: [jegadeesh-titman-1995, butt-hogholm-sadaqat-2021, chiang-kirby-nie-2021]
+    testable_statement: Пятиминутное движение выше собственного 99-го процентиля при относительном объёме ниже медианы и повышенной неликвидности чаще разворачивается, чем сопоставимые контрольные события.
+    economic_mechanism: Слабая активность и высокая неликвидность соответствуют временному ценовому давлению, которое поглощают поставщики ликвидности.
+    market_phase: main_session
+    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume <= 1.0, illiquidity_percentile >= 0.75]
+    expected_direction: reversal
+    horizon_seconds: [300, 900, 1800]
+    abstention_conditions: [market_wide_move_same_direction, relative_volume_above_median, trading_gap, missing_liquidity_proxy]
+    falsification_criterion: Результат разворота после издержек не превосходит контроль на независимой части либо устойчивое продолжение сильнее разворота.
+    original_market_result: Исследования связывают часть краткосрочного разворота с временным давлением ликвидности и инвентарным риском.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h3-v1
+      hypothesis_id: h3-jump-low-activity-reversal
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: reversal
+      feature_definitions: [rolling percentiles use prior trading days only, illiquidity is absolute return divided by contemporaneous turnover]
+      thresholds: {return_5m_percentile_min: 0.99, relative_volume_max: 1.0, illiquidity_percentile_min: 0.75, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: main_session
+      horizon_seconds: [300, 900, 1800]
+      success_criterion: Cost-adjusted reversal lift to matched controls has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
+      abstention_conditions: [market_wide_move_same_direction, relative_volume_above_median, trading_gap, missing_liquidity_proxy]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days
+      multiple_testing_policy: Benjamini-Hochberg within jump-regime family at q<=0.05
+
+  - hypothesis_id: h4-jump-high-activity-continuation
+    version: "1.0.0"
+    title: Продолжение резкого движения при высокой активности
+    origin: research_extension
+    source_ids: [chiang-kirby-nie-2021]
+    testable_statement: Пятиминутное движение выше собственного 99-го процентиля при относительном объёме и диапазоне выше 90-го процентиля чаще продолжается, чем сопоставимые контрольные события.
+    economic_mechanism: Согласованные цена, объём и диапазон чаще отражают поступление информации, а не кратковременный недостаток ликвидности.
+    market_phase: main_session
+    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume_percentile >= 0.90, range_percentile >= 0.90]
+    expected_direction: continuation
+    horizon_seconds: [300, 900, 1800]
+    abstention_conditions: [trading_gap, relative_volume_unavailable, range_norm_unavailable]
+    falsification_criterion: Продолжение после издержек не превосходит контроль либо разворот устойчиво сильнее на независимой части.
+    original_market_result: Высокая торговая активность в исходном исследовании разделяла режим продолжения от режима краткосрочного разворота.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h4-v1
+      hypothesis_id: h4-jump-high-activity-continuation
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: continuation
+      feature_definitions: [rolling percentiles use prior trading days only, range and relative volume stop at event time]
+      thresholds: {return_5m_percentile_min: 0.99, relative_volume_percentile_min: 0.90, range_percentile_min: 0.90, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: main_session
+      horizon_seconds: [300, 900, 1800]
+      success_criterion: Cost-adjusted continuation lift to matched controls has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
+      abstention_conditions: [trading_gap, relative_volume_unavailable, range_norm_unavailable]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days
+      multiple_testing_policy: Benjamini-Hochberg within jump-regime family at q<=0.05
+
+  - hypothesis_id: h5-same-phase-return-recurrence
+    version: "1.0.0"
+    title: Повторяемость доходности в одной фазе дня
+    origin: research_derived
+    source_ids: [heston-korajczyk-sadka-2010]
+    testable_statement: Направление средней доходности того же получасового интервала за 20 предыдущих торговых дней повторяется в текущем интервале чаще контрольной частоты.
+    economic_mechanism: Периодическое исполнение институциональных заявок создаёт повторяющийся спрос на ликвидность в одной фазе торгового дня.
+    market_phase: half_hour_bucket
+    trigger_conditions: [same_bucket_20d_mean_absolute_bps >= 5.0]
+    expected_direction: same_as_prior_20d_bucket_mean
+    horizon_seconds: [1800]
+    abstention_conditions: [fewer_than_20_prior_trading_days, trading_gap, insufficient_bucket_coverage]
+    falsification_criterion: Совпадение направления и результат после издержек не превосходят контроль на независимой части.
+    original_market_result: На исходном рынке доходность повторялась в том же получасовом интервале в следующие торговые дни.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h5-v1
+      hypothesis_id: h5-same-phase-return-recurrence
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: same_as_prior_20d_bucket_mean
+      feature_definitions: [same-bucket mean uses exactly 20 completed prior trading days and never the current interval]
+      thresholds: {lookback_trading_days: 20, mean_absolute_bps_min: 5.0, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: half_hour_bucket
+      horizon_seconds: [1800]
+      success_criterion: Cost-adjusted matched-control lift has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
+      abstention_conditions: [fewer_than_20_prior_trading_days, trading_gap, insufficient_bucket_coverage]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days
+      multiple_testing_policy: Benjamini-Hochberg within intraday-recurrence family at q<=0.05
+
+  - hypothesis_id: h6-open-close-market-continuation
+    version: "1.0.0"
+    title: Движение рынка в начале и перед закрытием основной сессии
+    origin: research_extension
+    source_ids: [heston-korajczyk-sadka-2010]
+    testable_statement: Направление равновзвешенной корзины ликвидных TQBR-акций за первые 30 минут основной сессии повторяется в последние 30 минут чаще контрольной частоты.
+    economic_mechanism: Длительное исполнение институционального потока может связывать спрос на ликвидность в начале и конце торгового дня.
+    market_phase: main_open_to_preclose
+    trigger_conditions: [basket_open_30m_absolute_bps >= 5.0, basket_coverage >= 0.80]
+    expected_direction: same_as_opening_basket
+    horizon_seconds: [28200]
+    abstention_conditions: [basket_coverage_below_80_percent, shortened_session, exchange_schedule_unknown]
+    falsification_criterion: Направление последних 30 минут и результат после издержек не превосходят контроль на независимой части.
+    original_market_result: Исходная работа обнаружила дневную повторяемость доходности в одинаковых внутридневных интервалах; связь открытия и закрытия является локальной адаптацией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h6-v1
+      hypothesis_id: h6-open-close-market-continuation
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: same_as_opening_basket
+      feature_definitions: [opening basket uses first 30 completed minutes of the main session and a fixed eligible universe]
+      thresholds: {opening_basket_absolute_bps_min: 5.0, basket_coverage_min: 0.80, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: main_open_to_preclose
+      horizon_seconds: [28200]
+      success_criterion: Cost-adjusted matched-day lift has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
+      abstention_conditions: [basket_coverage_below_80_percent, shortened_session, exchange_schedule_unknown]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days
+      multiple_testing_policy: Benjamini-Hochberg within intraday-recurrence family at q<=0.05
+
+  - hypothesis_id: h7-relative-volume-future-activity
+    version: "1.0.0"
+    title: Аномальный относительный объём и будущая активность
+    origin: research_extension
+    source_ids: [graczyk-queiros-2018]
+    testable_statement: Объём 15-минутного окна выше 90-го процентиля нормы той же фазы предшествует повышенной изменчивости и числу сделок относительно контроля.
+    economic_mechanism: Кластеризация поступления информации и участия трейдеров сохраняет повышенную рыночную активность после объёмной аномалии.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [relative_volume_15m_percentile >= 0.90]
+    expected_direction: activity_increase
+    horizon_seconds: [900, 1800, 3600]
+    abstention_conditions: [fewer_than_20_prior_phase_observations, trading_gap, volume_unavailable]
+    falsification_criterion: Изменчивость и число сделок после события не превосходят контроль с положительной нижней границей интервала.
+    original_market_result: Исходное исследование показало устойчивую, но меняющуюся со временем внутридневную сезонность объёма.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h7-v1
+      hypothesis_id: h7-relative-volume-future-activity
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: activity_increase
+      feature_definitions: [relative volume compares the completed 15-minute window with prior trading days in the same phase only]
+      thresholds: {relative_volume_percentile_min: 0.90, prior_phase_observations_min: 20, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [900, 1800, 3600]
+      success_criterion: Matched-control lift of realized volatility and trade count has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
+      abstention_conditions: [fewer_than_20_prior_phase_observations, trading_gap, volume_unavailable]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days
+      multiple_testing_policy: Benjamini-Hochberg within activity family at q<=0.05
+
+  - hypothesis_id: h8-best-queue-imbalance
+    version: "1.0.0"
+    title: Дисбаланс лучших очередей стакана
+    origin: research_derived
+    source_ids: [gould-bonart-2015]
+    testable_statement: Знак разности объёма лучшей покупки и продажи, делённой на их сумму, предсказывает направление следующего сдвига средней цены лучше нулевой модели.
+    economic_mechanism: Асимметрия доступной ликвидности на лучших ценах отражает ближайшее давление спроса и предложения.
+    market_phase: live_orderbook_only
+    trigger_conditions: [absolute_best_queue_imbalance >= 0.50]
+    expected_direction: same_as_queue_imbalance
+    horizon_seconds: [1, 5]
+    abstention_conditions: [stale_book, crossed_book, missing_side, sequence_gap, timestamp_desynchronization]
+    falsification_criterion: Калиброванная точность и ошибка Брайера не превосходят нулевую модель на независимом потоке либо эффект исчезает после задержки и издержек.
+    original_market_result: На Nasdaq дисбаланс очередей статистически предсказывал следующий сдвиг средней цены, особенно для акций с крупным шагом цены.
+    evidence_level: not_tested
+    lifecycle: shadow
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h8-v1
+      hypothesis_id: h8-best-queue-imbalance
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: same_as_queue_imbalance
+      feature_definitions: [queue imbalance equals bid_size_minus_ask_size divided by bid_size_plus_ask_size at one synchronized best-book snapshot]
+      thresholds: {absolute_queue_imbalance_min: 0.50, minimum_trading_days: 30, minimum_events: 300}
+      market_phase: live_orderbook_only
+      horizon_seconds: [1, 5]
+      success_criterion: Independent live holdout improves calibrated direction prediction over the null model with adjusted p<=0.05 and 4/5 block stability.
+      abstention_conditions: [stale_book, crossed_book, missing_side, sequence_gap, timestamp_desynchronization]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days after enough live data exist
+      multiple_testing_policy: Benjamini-Hochberg within orderbook family at q<=0.05
+
+  - hypothesis_id: h9-order-flow-price-jump-coherence
+    version: "1.0.0"
+    title: Согласованность дисбаланса потока стакана и скачка цены
+    origin: research_extension
+    source_ids: [cont-kukanov-stoikov-2014, gould-bonart-2015]
+    testable_statement: Согласованный со скачком цены дисбаланс потока заявок при высоком объёме поддерживает продолжение, противоположный поток поддерживает разворот, а слабый поток требует отказа от вывода.
+    economic_mechanism: Изменения спроса и предложения на лучших ценах отделяют информационное движение от временного ценового давления.
+    market_phase: live_orderbook_only
+    trigger_conditions: [price_jump_present, synchronized_order_flow_window_present]
+    expected_direction: conditional_continuation_or_reversal
+    horizon_seconds: [1, 5, 60, 300, 900]
+    abstention_conditions: [weak_order_flow, stale_book, sequence_gap, timestamp_desynchronization, missing_trade_confirmation]
+    falsification_criterion: Условная политика не превосходит одиночный скачок цены и контроль после задержки и издержек на независимом живом периоде.
+    original_market_result: Исходная работа показала более устойчивую связь цены с дисбалансом потока заявок, чем с одним торговым объёмом; сочетание со скачком является развитием.
+    evidence_level: not_tested
+    lifecycle: shadow
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h9-v1
+      hypothesis_id: h9-order-flow-price-jump-coherence
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T00:00:00+03:00"
+      expected_direction: conditional_continuation_or_reversal
+      feature_definitions: [order-flow imbalance uses synchronized best-quote size changes and executed trades no later than observation time]
+      thresholds: {strong_flow_z_min: 2.0, weak_flow_z_max: 0.5, high_volume_percentile_min: 0.90, minimum_trading_days: 30, minimum_events: 300}
+      market_phase: live_orderbook_only
+      horizon_seconds: [1, 5, 60, 300, 900]
+      success_criterion: Conditional policy improves cost-adjusted outcome over price_jump alone and matched controls with positive 95% lower bound, adjusted p<=0.05, and 4/5 block stability.
+      abstention_conditions: [weak_order_flow, stale_book, sequence_gap, timestamp_desynchronization, missing_trade_confirmation]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days after enough live data exist
+      multiple_testing_policy: Benjamini-Hochberg within orderbook family at q<=0.05
 replication_evidence: []
 applied_catalog: []

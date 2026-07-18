@@ -28,6 +28,7 @@ class HypothesisOrigin(str, Enum):
 
 
 class EvidenceLevel(str, Enum):
+    NOT_TESTED = "not_tested"
     RESEARCHING = "researching"
     PROMISING = "promising"
     VALIDATED = "validated"
@@ -37,15 +38,23 @@ class EvidenceLevel(str, Enum):
 
 class HypothesisLifecycle(str, Enum):
     DRAFT = "draft"
+    PRE_REGISTERED = "pre_registered"
     EVALUATED = "evaluated"
+    SHADOW = "shadow"
+    APPROVED = "approved"
     APPLIED = "applied"
+    SUSPENDED = "suspended"
+    ROLLED_BACK = "rolled_back"
+    RETIRED = "retired"
     REJECTED = "rejected"
 
 
 class ReplicationResult(str, Enum):
+    PASSED = "passed"
     CONFIRMED = "confirmed"
     REJECTED = "rejected"
     INCONCLUSIVE = "inconclusive"
+    BLOCKED_BY_DATA = "blocked_by_data"
 
 
 @dataclass(frozen=True)
@@ -199,6 +208,21 @@ class ReplicationEvidence:
     mean_net_bps: float | None
     result_summary: str
     artifact_uri: str
+    primary_metric: str = ""
+    controls_per_event: int = 0
+    lift_ci_lower: float | None = None
+    lift_ci_upper: float | None = None
+    adjusted_p_value: float | None = None
+    stable_blocks: int = 0
+    total_blocks: int = 0
+    max_ticker_share: float | None = None
+    max_period_share: float | None = None
+    dataset_fingerprint: str = ""
+    formula_fingerprint: str = ""
+    cost_model_version: str = ""
+    abstention_rate: float | None = None
+    success_rate: float | None = None
+    success_wilson_lower: float | None = None
 
 
 def semantic_version_key(version: str) -> tuple[int, int, int] | None:
