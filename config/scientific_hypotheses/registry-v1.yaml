@@ -198,7 +198,7 @@ hypotheses:
     testable_statement: Пятиминутное движение выше собственного 99-го процентиля при относительном объёме ниже медианы и повышенной неликвидности чаще разворачивается, чем сопоставимые контрольные события.
     economic_mechanism: Слабая активность и высокая неликвидность соответствуют временному ценовому давлению, которое поглощают поставщики ликвидности.
     market_phase: main_session
-    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume <= 1.0, illiquidity_percentile >= 0.75]
+    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume_percentile < 0.50, illiquidity_percentile >= 0.75]
     expected_direction: reversal
     horizon_seconds: [300, 900, 1800]
     abstention_conditions: [market_wide_move_same_direction, relative_volume_above_median, trading_gap, missing_liquidity_proxy]
@@ -214,7 +214,7 @@ hypotheses:
       sealed_at: "2026-07-19T00:00:00+03:00"
       expected_direction: reversal
       feature_definitions: [rolling percentiles use prior trading days only, illiquidity is absolute return divided by contemporaneous turnover]
-      thresholds: {return_5m_percentile_min: 0.99, relative_volume_max: 1.0, illiquidity_percentile_min: 0.75, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      thresholds: {return_5m_percentile_min: 0.99, relative_volume_percentile_max_exclusive: 0.50, illiquidity_percentile_min: 0.75, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
       market_phase: main_session
       horizon_seconds: [300, 900, 1800]
       success_criterion: Cost-adjusted reversal lift to matched controls has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
@@ -264,7 +264,7 @@ hypotheses:
     testable_statement: Направление средней доходности того же получасового интервала за 20 предыдущих торговых дней повторяется в текущем интервале чаще контрольной частоты.
     economic_mechanism: Периодическое исполнение институциональных заявок создаёт повторяющийся спрос на ликвидность в одной фазе торгового дня.
     market_phase: half_hour_bucket
-    trigger_conditions: [same_bucket_20d_mean_absolute_bps >= 5.0]
+    trigger_conditions: [same_bucket_20d_mean_return_bps != 0.0]
     expected_direction: same_as_prior_20d_bucket_mean
     horizon_seconds: [1800]
     abstention_conditions: [fewer_than_20_prior_trading_days, trading_gap, insufficient_bucket_coverage]
@@ -280,7 +280,7 @@ hypotheses:
       sealed_at: "2026-07-19T00:00:00+03:00"
       expected_direction: same_as_prior_20d_bucket_mean
       feature_definitions: [same-bucket mean uses exactly 20 completed prior trading days and never the current interval]
-      thresholds: {lookback_trading_days: 20, mean_absolute_bps_min: 5.0, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      thresholds: {lookback_trading_days: 20, mean_absolute_bps_min_exclusive: 0.0, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
       market_phase: half_hour_bucket
       horizon_seconds: [1800]
       success_criterion: Cost-adjusted matched-control lift has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
@@ -299,7 +299,7 @@ hypotheses:
     market_phase: main_open_to_preclose
     trigger_conditions: [basket_open_30m_absolute_bps >= 5.0, basket_coverage >= 0.80]
     expected_direction: same_as_opening_basket
-    horizon_seconds: [28200]
+    horizon_seconds: [1800]
     abstention_conditions: [basket_coverage_below_80_percent, shortened_session, exchange_schedule_unknown]
     falsification_criterion: Направление последних 30 минут и результат после издержек не превосходят контроль на независимой части.
     original_market_result: Исходная работа обнаружила дневную повторяемость доходности в одинаковых внутридневных интервалах; связь открытия и закрытия является локальной адаптацией.
@@ -315,7 +315,7 @@ hypotheses:
       feature_definitions: [opening basket uses first 30 completed minutes of the main session and a fixed eligible universe]
       thresholds: {opening_basket_absolute_bps_min: 5.0, basket_coverage_min: 0.80, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
       market_phase: main_open_to_preclose
-      horizon_seconds: [28200]
+      horizon_seconds: [1800]
       success_criterion: Cost-adjusted matched-day lift has 95% lower bound above zero and adjusted p<=0.05 with 4/5 block stability.
       abstention_conditions: [basket_coverage_below_80_percent, shortened_session, exchange_schedule_unknown]
       cost_model_version: "1.0.0"
