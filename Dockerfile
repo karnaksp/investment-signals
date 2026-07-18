@@ -22,6 +22,7 @@ COPY pyproject.toml README.md ./
 COPY proto ./proto
 COPY src ./src
 COPY conf ./conf
+COPY config/scientific_hypotheses ./config/scientific_hypotheses
 COPY sql ./sql
 
 ARG INVEST_PYTHON_REF=0.2.0-beta117
