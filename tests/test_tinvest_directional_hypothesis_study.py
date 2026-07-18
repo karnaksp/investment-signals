@@ -24,6 +24,21 @@ sys.modules[SPEC.name] = study
 SPEC.loader.exec_module(study)
 
 
+def test_prepare_candles_keeps_morning_phase_and_excludes_transition() -> None:
+    morning = datetime(2026, 7, 15, 4, 30, tzinfo=timezone.utc)  # 07:30 Moscow
+    transition = datetime(2026, 7, 15, 6, 55, tzinfo=timezone.utc)  # 09:55 Moscow
+    grouped, quality = study.prepare_candles(
+        [
+            study.Candle("SBER", morning, 100.0, 101.0, True),
+            study.Candle("SBER", transition, 101.0, 102.0, True),
+        ]
+    )
+
+    assert grouped[("SBER", morning.date())][0].at == morning
+    assert quality["complete_regular_candles"] == 1
+    assert quality["outside_regular_session_candles"] == 1
+
+
 def test_cost_is_subtracted_symmetrically_outside_materiality() -> None:
     policy = study.StudyPolicy(
         outcome_min_move_bps=10.0,

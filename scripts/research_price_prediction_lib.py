@@ -24,6 +24,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from tinvest_signal_engine.domain.trading_phases import (
+    MOEX_EQUITY_PHASE_SCHEDULE_V1,
+)
+
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
@@ -394,8 +398,14 @@ def quotation(value: Mapping[str, Any] | None) -> float:
 
 
 def is_regular_session(at: datetime) -> bool:
-    local = at.astimezone(MOSCOW)
-    return REGULAR_SESSION_START <= local.time().replace(tzinfo=None) <= REGULAR_SESSION_END
+    """Return whether the versioned research schedule admits this candle.
+
+    The public name is kept for compatibility with existing research commands.
+    Unlike the legacy 10:05 cutoff, the schedule includes the 07:00-09:49
+    morning phase and explicitly excludes the 09:50-09:59 transition.
+    """
+
+    return MOEX_EQUITY_PHASE_SCHEDULE_V1.is_signal_eligible(at)
 
 
 def trading_day(at: datetime) -> date:
@@ -403,10 +413,7 @@ def trading_day(at: datetime) -> date:
 
 
 def session_bucket(at: datetime) -> int:
-    local = at.astimezone(MOSCOW)
-    minutes = local.hour * 60 + local.minute
-    start = REGULAR_SESSION_START.hour * 60 + REGULAR_SESSION_START.minute
-    return max(0, min(4, (minutes - start) // 104))
+    return MOEX_EQUITY_PHASE_SCHEDULE_V1.research_bucket(at)
 
 
 def study_window(calendar_days: int, end_day: date | None = None) -> tuple[date, date]:

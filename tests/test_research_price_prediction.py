@@ -75,6 +75,50 @@ def _event(at: datetime) -> object:
     )
 
 
+def test_replay_includes_events_from_the_morning_phase() -> None:
+    start = datetime(2026, 7, 15, 4, 0, tzinfo=timezone.utc)  # 07:00 Moscow
+    candles = [
+        lib.ResearchCandle(
+            ticker="SBER",
+            at=start + timedelta(minutes=index),
+            open=100.0,
+            high=100.01,
+            low=99.99,
+            close=100.0,
+            volume=100.0,
+        )
+        for index in range(8)
+    ]
+    candles.append(
+        lib.ResearchCandle(
+            ticker="SBER",
+            at=start + timedelta(minutes=8),
+            open=100.0,
+            high=102.0,
+            low=99.9,
+            close=101.0,
+            volume=100.0,
+        )
+    )
+
+    signals = lib.replay_signals(
+        candles,
+        lib.ReplayPolicy(
+            detector_window_minutes=1,
+            detector_baseline_points=10,
+            detector_min_baseline_points=3,
+            detector_z_score=1.0,
+            min_relative_metric_excursion=0.1,
+            volatility_lookback_points=5,
+            volatility_min_points=3,
+            volatility_floor_bps=0.1,
+        ),
+    )
+
+    assert any(signal.source_event_at == start + timedelta(minutes=8) for signal in signals)
+    assert all(signal.session_bucket == 0 for signal in signals)
+
+
 def test_replay_signals_adds_event_shape_reversal_features() -> None:
     start = datetime(2026, 7, 15, 7, 5, tzinfo=timezone.utc)
     candles = [

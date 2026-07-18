@@ -37,6 +37,9 @@ from tinvest_signal_engine.domain.signal_outcomes import (
     DirectionalOutcomePolicy,
     classify_directional_outcome,
 )
+from tinvest_signal_engine.domain.trading_phases import (
+    MOEX_EQUITY_PHASE_SCHEDULE_V1,
+)
 
 
 API_ROOT = "https://invest-public-api.tbank.ru/rest/"
@@ -457,15 +460,13 @@ def fetch_candles(
 
 
 def is_regular_session(candle: Candle) -> bool:
-    local = candle.at.astimezone(MOSCOW)
-    return REGULAR_SESSION_START <= local.time().replace(tzinfo=None) <= REGULAR_SESSION_END
+    """Compatibility facade over the versioned research phase schedule."""
+
+    return MOEX_EQUITY_PHASE_SCHEDULE_V1.is_signal_eligible(candle.at)
 
 
 def bucket_for(at: datetime) -> int:
-    local = at.astimezone(MOSCOW)
-    minute = local.hour * 60 + local.minute
-    start = REGULAR_SESSION_START.hour * 60 + REGULAR_SESSION_START.minute
-    return (minute - start) // 60
+    return MOEX_EQUITY_PHASE_SCHEDULE_V1.research_bucket(at)
 
 
 def _mean_and_z_score(history: Iterable[float], value: float) -> tuple[float, float]:
@@ -1323,6 +1324,7 @@ def main() -> int:
             REGULAR_SESSION_START.isoformat(),
             REGULAR_SESSION_END.isoformat(),
         ],
+        "research_phase_schedule_version": MOEX_EQUITY_PHASE_SCHEDULE_V1.version,
     }
     method_fingerprint = hashlib.sha256(
         json.dumps(method, sort_keys=True).encode("utf-8")
