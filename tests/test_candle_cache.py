@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import json
 from pathlib import Path
+import ssl
 
 import httpx
 import pytest
 
+import tinvest_signal_engine.adapters.candle_cache as candle_cache_adapter
 from tinvest_signal_engine.adapters.candle_cache import (
     JsonCandleCacheManifest,
     ParquetCandlePartitionRepository,
@@ -249,3 +251,75 @@ def test_rest_source_keeps_uid_out_of_returned_candles_and_requests_full_session
     assert candle_request["instrumentId"] == uid
     assert candle_request["from"] == "2026-07-15T03:50:00Z"
     assert candle_request["to"] == "2026-07-15T21:00:00Z"
+
+
+def test_rest_source_builds_ssl_context_from_trusted_ca_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "trusted-ca.pem"
+    bundle.write_text("test certificate bundle", encoding="utf-8")
+    expected_context = ssl.create_default_context()
+    created_for: list[str | None] = []
+    client_options: list[dict[str, object]] = []
+
+    def create_default_context(*, cafile: str | None = None) -> ssl.SSLContext:
+        created_for.append(cafile)
+        return expected_context
+
+    class Client:
+        def __init__(self, **options: object) -> None:
+            client_options.append(options)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        candle_cache_adapter.ssl,
+        "create_default_context",
+        create_default_context,
+    )
+    monkeypatch.setattr(candle_cache_adapter.httpx, "Client", Client)
+
+    source = TInvestRestCandleHistorySource(
+        token="token-value",
+        ca_bundle_path=bundle,
+    )
+    source.close()
+
+    assert created_for == [str(bundle)]
+    assert client_options[0]["verify"] is expected_context
+
+
+def test_rest_source_accepts_prebuilt_ssl_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_context = ssl.create_default_context()
+    client_options: list[dict[str, object]] = []
+
+    class Client:
+        def __init__(self, **options: object) -> None:
+            client_options.append(options)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(candle_cache_adapter.httpx, "Client", Client)
+
+    source = TInvestRestCandleHistorySource(
+        token="token-value",
+        ssl_context=expected_context,
+    )
+    source.close()
+
+    assert client_options[0]["verify"] is expected_context
+
+
+def test_rest_source_rejects_missing_trusted_ca_bundle(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-ca.pem"
+
+    with pytest.raises(FileNotFoundError, match="Trusted CA bundle does not exist"):
+        TInvestRestCandleHistorySource(
+            token="token-value",
+            ca_bundle_path=missing,
+        )

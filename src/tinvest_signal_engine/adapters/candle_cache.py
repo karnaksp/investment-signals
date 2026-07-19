@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import ssl
 import time as clock
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -41,6 +42,18 @@ _FIELDS = (
 )
 
 
+def _trusted_ssl_context(ca_bundle_path: str | Path | None) -> ssl.SSLContext:
+    if ca_bundle_path is None:
+        return ssl.create_default_context()
+    path = Path(ca_bundle_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"Trusted CA bundle does not exist: {path}")
+    try:
+        return ssl.create_default_context(cafile=str(path))
+    except (OSError, ssl.SSLError) as error:
+        raise ValueError(f"Trusted CA bundle could not be loaded: {path}") from error
+
+
 class TInvestRestCandleHistorySource:
     """Read exchange candles without exposing broker identifiers to the cache."""
 
@@ -51,6 +64,8 @@ class TInvestRestCandleHistorySource:
         timeout_seconds: float = 30.0,
         attempts: int = 5,
         request_interval_seconds: float = 0.05,
+        ca_bundle_path: str | Path | None = None,
+        ssl_context: ssl.SSLContext | None = None,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = clock.sleep,
     ) -> None:
@@ -58,11 +73,18 @@ class TInvestRestCandleHistorySource:
             raise ValueError("T-Invest token must not be empty")
         if attempts < 1:
             raise ValueError("attempts must be positive")
+        if ca_bundle_path is not None and ssl_context is not None:
+            raise ValueError("Set only one of ca_bundle_path and ssl_context")
         self._attempts = attempts
         self._request_interval_seconds = max(0.0, request_interval_seconds)
         self._sleep = sleep
         self._instrument_uids: dict[str, str] = {}
         self._owns_client = client is None
+        verify = (
+            ssl_context
+            if ssl_context is not None
+            else _trusted_ssl_context(ca_bundle_path)
+        )
         self._client = client or httpx.Client(
             headers={
                 "Authorization": f"Bearer {token}",
@@ -70,6 +92,7 @@ class TInvestRestCandleHistorySource:
                 "x-app-name": "investment-signals-candle-cache",
             },
             timeout=httpx.Timeout(timeout_seconds),
+            verify=verify,
         )
 
     def close(self) -> None:

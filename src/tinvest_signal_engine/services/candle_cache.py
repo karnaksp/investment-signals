@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime, timedelta
 import json
+import os
 from pathlib import Path
 from typing import Sequence
 from zoneinfo import ZoneInfo
@@ -49,6 +50,11 @@ DEFAULT_TICKERS = (
 _MOSCOW = ZoneInfo("Europe/Moscow")
 
 
+def _trusted_ca_from_environment() -> Path | None:
+    value = os.environ.get("TINVEST_TRUSTED_CA_FILE", "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="tinvest-cache-candles")
     parser.add_argument(
@@ -63,11 +69,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-timeout", type=float, default=30.0)
     parser.add_argument("--request-attempts", type=int, default=5)
     parser.add_argument("--request-interval", type=float, default=0.05)
+    parser.add_argument(
+        "--ca-cert",
+        type=Path,
+        default=_trusted_ca_from_environment(),
+        help=(
+            "trusted CA bundle (defaults to the public "
+            "TINVEST_TRUSTED_CA_FILE environment setting)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    ca_bundle_path = args.ca_cert.expanduser() if args.ca_cert is not None else None
+    if ca_bundle_path is not None and not ca_bundle_path.is_file():
+        raise SystemExit(f"Trusted CA bundle does not exist: {ca_bundle_path}")
     tickers = tuple(item.strip().upper() for item in args.tickers.split(",") if item.strip())
     if args.start_day is not None or args.end_day is not None:
         if args.start_day is None or args.end_day is None:
@@ -91,6 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         timeout_seconds=args.request_timeout,
         attempts=args.request_attempts,
         request_interval_seconds=args.request_interval,
+        ca_bundle_path=ca_bundle_path,
     )
     try:
         receipt = BuildReusableCandleCache(
