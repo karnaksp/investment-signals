@@ -7,7 +7,7 @@ independent holdout contributes effect values to the evidence portfolio.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from tinvest_signal_engine.application.hypothesis_evidence import (
     AssessEvidencePortfolio,
     BuildMatchedControls,
+    EvidenceDiagnosticsInput,
     EvidenceGatePolicy,
     EvidenceRequest,
 )
@@ -26,6 +27,7 @@ from tinvest_signal_engine.application.prospective_scientific_models import (
 from tinvest_signal_engine.domain.hypothesis_evidence import (
     DatasetPartition,
     EvidenceBundle,
+    EvidenceReasonCount,
     StudyPoint,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
@@ -201,6 +203,18 @@ class ProspectiveEvidenceAssessment:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedProspectiveEvidence:
+    """Compact per-hypothesis input retained after its report is released."""
+
+    request: EvidenceRequest
+    coverage: ProspectiveEvidenceCoverage
+
+    def __post_init__(self) -> None:
+        if self.request.hypothesis_id != self.coverage.hypothesis_id:
+            raise ValueError("prepared evidence request and coverage must align")
+
+
 class AssessProspectiveScientificEvidence:
     """Build five causal controls per event and evaluate the sealed holdout."""
 
@@ -231,19 +245,53 @@ class AssessProspectiveScientificEvidence:
             raise ValueError("requested hypothesis is absent from research report")
 
         paired = tuple(zip(report.features, report.outcomes, strict=True))
-        prepared = tuple(
-            self._request(
+        prepared: list[PreparedProspectiveEvidence] = []
+        for hypothesis in selected:
+            request, coverage = self._request(
                 report,
                 hypothesis,
                 paired,
                 cost_model_version=cost_model_version,
             )
-            for hypothesis in selected
+            prepared.append(
+                PreparedProspectiveEvidence(request=request, coverage=coverage)
+            )
+        return self.assess_prepared(prepared)
+
+    def prepare(
+        self,
+        report: ProspectiveScientificReport,
+        hypothesis: ProspectiveHypothesis,
+        cost_model_version: str,
+    ) -> PreparedProspectiveEvidence:
+        """Prepare one hypothesis so the large source report can be released."""
+
+        if not cost_model_version.strip():
+            raise ValueError("cost_model_version must not be empty")
+        if hypothesis not in report.selected_hypotheses:
+            raise ValueError("requested hypothesis is absent from research report")
+        paired = tuple(zip(report.features, report.outcomes, strict=True))
+        request, coverage = self._request(
+            report,
+            hypothesis,
+            paired,
+            cost_model_version=cost_model_version,
         )
-        requests = tuple(item[0] for item in prepared)
+        return PreparedProspectiveEvidence(request=request, coverage=coverage)
+
+    def assess_prepared(
+        self,
+        prepared: Sequence[PreparedProspectiveEvidence],
+    ) -> ProspectiveEvidenceAssessment:
+        """Apply one multiple-testing correction to all prepared hypotheses."""
+
+        if not prepared:
+            raise ValueError("at least one prepared hypothesis is required")
+        ordered = tuple(sorted(prepared, key=lambda item: item.request.test_id))
+        requests = tuple(item.request for item in ordered)
         return ProspectiveEvidenceAssessment(
             bundles=self._portfolio.execute(requests),
-            coverage=tuple(item[1] for item in prepared),
+            coverage=tuple(item.coverage for item in ordered),
             requests=requests,
         )
 
@@ -262,18 +310,21 @@ class AssessProspectiveScientificEvidence:
             if report.split.partition_for(pair[0].trading_day)
             is DatasetPartition.VALIDATION
         )
-        holdout = tuple(
+        holdout_all = tuple(
             pair
             for pair in relevant
             if report.split.partition_for(pair[0].trading_day)
             is DatasetPartition.HOLDOUT
-            and pair[1].available
         )
+        holdout = tuple(pair for pair in holdout_all if pair[1].available)
         event_thresholds = _event_thresholds(hypothesis, validation)
         volatility_cutoffs = _volatility_cutoffs(hypothesis, validation)
 
         events: list[StudyPoint] = []
         candidates: list[StudyPoint] = []
+        diagnostic_reasons: Counter[str] = Counter(
+            outcome.reason.value for _, outcome in holdout_all if not outcome.available
+        )
         for feature, outcome in holdout:
             effect = _effect_value(
                 feature,
@@ -281,8 +332,11 @@ class AssessProspectiveScientificEvidence:
                 round_trip_cost_bps=report.policy.round_trip_cost_bps,
             )
             if effect is None:
+                diagnostic_reasons[f"feature_{feature.reason.value}"] += 1
                 continue
             treated = _is_event(feature, event_thresholds)
+            if not treated:
+                diagnostic_reasons["event_condition_not_met"] += 1
             point = _study_point(
                 feature,
                 net_effect=effect,
@@ -325,6 +379,15 @@ class AssessProspectiveScientificEvidence:
                 expected_eligible_events=len(events),
                 unmatched_event_ids=matched.unmatched_event_ids,
                 total_available_observations=len(holdout) or None,
+                diagnostics_input=EvidenceDiagnosticsInput(
+                    total_observation_count=len(holdout_all),
+                    available_observation_count=len(holdout),
+                    eligible_event_count=len(events),
+                    reasons_histogram=tuple(
+                        EvidenceReasonCount(reason_code=reason, count=count)
+                        for reason, count in sorted(diagnostic_reasons.items())
+                    ),
+                ),
             ),
             coverage,
         )

@@ -203,6 +203,68 @@ class InstrumentConcentration:
 
 
 @dataclass(frozen=True)
+class EvidenceReasonCount:
+    reason_code: str
+    count: int
+
+    def __post_init__(self) -> None:
+        if not self.reason_code.strip():
+            raise ValueError("evidence diagnostic reason_code must not be empty")
+        if self.count <= 0:
+            raise ValueError("evidence diagnostic reason count must be positive")
+
+
+@dataclass(frozen=True)
+class EvidenceDiagnosticsV2:
+    """Descriptive evidence funnel; it never grants product promotion."""
+
+    version: str
+    event_prevalence: float | None
+    eligible_event_count: int
+    matched_event_count: int
+    match_coverage: float | None
+    data_coverage: float | None
+    reasons_histogram: tuple[EvidenceReasonCount, ...]
+    primary_effect_estimate: float | None
+    primary_effect_interval: ConfidenceInterval | None
+    primary_p_value: float | None
+    descriptive_only: bool
+
+    def __post_init__(self) -> None:
+        if self.version != "evidence-diagnostics-v2":
+            raise ValueError("unsupported evidence diagnostics version")
+        if self.eligible_event_count < 0 or self.matched_event_count < 0:
+            raise ValueError("evidence diagnostic event counts must be non-negative")
+        if self.matched_event_count > self.eligible_event_count:
+            raise ValueError("matched events cannot exceed eligible events")
+        for name, value in (
+            ("event_prevalence", self.event_prevalence),
+            ("match_coverage", self.match_coverage),
+            ("data_coverage", self.data_coverage),
+        ):
+            if value is not None and not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between zero and one")
+        reason_codes = tuple(item.reason_code for item in self.reasons_histogram)
+        if len(reason_codes) != len(set(reason_codes)):
+            raise ValueError("evidence diagnostic reasons must be unique")
+        if reason_codes != tuple(sorted(reason_codes)):
+            raise ValueError("evidence diagnostic reasons must be sorted")
+        statistics = (
+            self.primary_effect_estimate,
+            self.primary_effect_interval,
+            self.primary_p_value,
+        )
+        if any(value is None for value in statistics) and not all(
+            value is None for value in statistics
+        ):
+            raise ValueError(
+                "descriptive primary statistics must be all present or absent"
+            )
+        if self.primary_p_value is not None and not 0.0 <= self.primary_p_value <= 1.0:
+            raise ValueError("primary_p_value must be between zero and one")
+
+
+@dataclass(frozen=True)
 class EvidenceBundle:
     """Immutable positive, negative, or incomplete replication result."""
 
@@ -228,6 +290,7 @@ class EvidenceBundle:
     stability: StabilityAssessment
     instrument_concentration: tuple[InstrumentConcentration, ...]
     maximum_instrument_share: float | None
+    diagnostics_v2: EvidenceDiagnosticsV2 | None = None
 
 
 def chronological_split_60_20_20(trading_days: Sequence[date]) -> ChronologicalSplit:

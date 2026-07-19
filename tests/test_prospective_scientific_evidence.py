@@ -65,7 +65,19 @@ def test_gate_uses_only_holdout_and_five_pre_outcome_controls() -> None:
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
     ):
         request = assessment.request_for(hypothesis)
+        coverage = assessment.coverage_for(hypothesis)
+        diagnostics = assessment.for_hypothesis(hypothesis).diagnostics_v2
         assert len(request.groups) == 8
+        assert diagnostics is not None
+        assert diagnostics.version == "evidence-diagnostics-v2"
+        assert diagnostics.eligible_event_count == coverage.triggered_events
+        assert (
+            diagnostics.matched_event_count == coverage.eligible_common_support_events
+        )
+        assert diagnostics.match_coverage == pytest.approx(
+            coverage.eligible_common_support_events / coverage.triggered_events
+        )
+        assert diagnostics.data_coverage == 1.0
         for group in request.groups:
             assert len(group.controls) == 5
             if (
@@ -79,6 +91,45 @@ def test_gate_uses_only_holdout_and_five_pre_outcome_controls() -> None:
                 assert point.partition is DatasetPartition.HOLDOUT
                 assert point.features_observed_at <= point.occurred_at
                 assert point.matching_key == group.event.matching_key
+
+
+def test_reports_can_be_prepared_one_at_a_time_before_one_global_fdr_pass() -> None:
+    report, _ = _variance_portfolio_report(include_nearby=False)
+    hypotheses = (
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+    )
+    gate = AssessProspectiveScientificEvidence(_fast_policy())
+    expected = gate.execute(report, hypotheses, cost_model_version="cost-v1")
+    prepared = []
+    for index, hypothesis in enumerate(hypotheses):
+        selected = tuple(
+            pair
+            for pair in zip(report.features, report.outcomes, strict=True)
+            if pair[0].hypothesis is hypothesis
+        )
+        one_hypothesis_report = replace(
+            report,
+            report_fingerprint=f"sha256:{index + 1:064x}",
+            selected_hypotheses=(hypothesis,),
+            features=tuple(pair[0] for pair in selected),
+            outcomes=tuple(pair[1] for pair in selected),
+        )
+        prepared.append(
+            gate.prepare(one_hypothesis_report, hypothesis, "cost-v1")
+        )
+
+    actual = gate.assess_prepared(prepared)
+
+    assert actual == expected
+    assert all(bundle.adjusted_q_value is not None for bundle in actual.bundles)
+
+
+def test_assess_prepared_requires_a_non_empty_global_family() -> None:
+    gate = AssessProspectiveScientificEvidence(_fast_policy())
+
+    with pytest.raises(ValueError, match="at least one prepared hypothesis"):
+        gate.assess_prepared(())
 
 
 def test_fdr_is_shared_and_incomplete_controls_fail_closed() -> None:

@@ -10,12 +10,14 @@ from tinvest_signal_engine.application.hypothesis_evidence import (
     AssessEvidencePortfolio,
     BuildChronologicalSplit,
     BuildMatchedControls,
+    EvidenceDiagnosticsInput,
     EvidenceGatePolicy,
     EvidenceRequest,
 )
 from tinvest_signal_engine.domain.hypothesis_evidence import (
     DatasetPartition,
     EvidenceDecision,
+    EvidenceReasonCount,
     MatchedControlGroup,
     MatchedControlsResult,
     StudyPoint,
@@ -356,6 +358,91 @@ def test_insufficient_data_is_retained_as_blocked_bundle() -> None:
     assert bundle.eligible_events == 10
     assert bundle.matched_events == 10
     assert bundle.raw_p_value is None
+    assert bundle.diagnostics_v2 is not None
+    assert bundle.diagnostics_v2.descriptive_only is True
+    assert bundle.diagnostics_v2.primary_effect_estimate == pytest.approx(5.0)
+    assert bundle.diagnostics_v2.primary_effect_interval is not None
+    assert bundle.diagnostics_v2.primary_p_value is not None
+
+
+@pytest.mark.parametrize(
+    ("total", "available", "eligible", "matched"),
+    (
+        (100, 80, 20, 10),
+        (10, 10, 10, 10),
+        (10, 0, 0, 0),
+        (0, 0, 0, 0),
+    ),
+)
+def test_evidence_v2_funnel_ratios_preserve_count_identities(
+    total: int,
+    available: int,
+    eligible: int,
+    matched: int,
+) -> None:
+    available_groups = _request("h-funnel", [5.0], events_per_day=10).groups
+    groups = available_groups[:matched]
+    reasons = tuple(
+        item
+        for item in (
+            EvidenceReasonCount("event_condition_not_met", available - eligible)
+            if available > eligible
+            else None,
+            EvidenceReasonCount("outcome_unavailable", total - available)
+            if total > available
+            else None,
+        )
+        if item is not None
+    )
+    request = EvidenceRequest(
+        hypothesis_id="h-funnel",
+        hypothesis_version="2.0.0",
+        dataset_fingerprint="sha256:funnel",
+        groups=groups,
+        expected_eligible_events=eligible,
+        unmatched_event_ids=tuple(
+            f"unmatched-{index}" for index in range(eligible - matched)
+        ),
+        total_available_observations=available or None,
+        diagnostics_input=EvidenceDiagnosticsInput(
+            total_observation_count=total,
+            available_observation_count=available,
+            eligible_event_count=eligible,
+            reasons_histogram=reasons,
+        ),
+    )
+
+    bundle = AssessEvidencePortfolio(_fast_policy()).execute((request,))[0]
+    diagnostics = bundle.diagnostics_v2
+
+    assert bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
+    assert bundle.raw_p_value is None
+    assert diagnostics is not None
+    assert diagnostics.version == "evidence-diagnostics-v2"
+    assert diagnostics.eligible_event_count == eligible
+    assert diagnostics.matched_event_count == matched
+    assert diagnostics.event_prevalence == (
+        pytest.approx(eligible / available) if available else None
+    )
+    assert diagnostics.match_coverage == (
+        pytest.approx(matched / eligible) if eligible else None
+    )
+    assert diagnostics.data_coverage == (
+        pytest.approx(available / total) if total else None
+    )
+    histogram = {item.reason_code: item.count for item in diagnostics.reasons_histogram}
+    if eligible > matched:
+        assert histogram["matched_controls_unavailable"] == eligible - matched
+    if total > available:
+        assert histogram["outcome_unavailable"] == total - available
+    if matched:
+        assert diagnostics.primary_effect_estimate == pytest.approx(5.0)
+        assert diagnostics.primary_effect_interval is not None
+        assert diagnostics.primary_p_value is not None
+    else:
+        assert diagnostics.primary_effect_estimate is None
+        assert diagnostics.primary_effect_interval is None
+        assert diagnostics.primary_p_value is None
 
 
 def test_low_coverage_blocks_an_otherwise_positive_result() -> None:
@@ -414,6 +501,14 @@ def test_non_holdout_evidence_cannot_pass_independent_gate() -> None:
 
     assert bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
     assert "independent_holdout_required" in bundle.reason_codes
+    assert bundle.raw_p_value is None
+    assert bundle.adjusted_q_value is None
+    assert bundle.fdr_significant is False
+    assert bundle.diagnostics_v2 is not None
+    assert bundle.diagnostics_v2.descriptive_only is True
+    assert bundle.diagnostics_v2.primary_effect_estimate == pytest.approx(5.0)
+    assert bundle.diagnostics_v2.primary_effect_interval is not None
+    assert bundle.diagnostics_v2.primary_p_value is not None
 
 
 def test_single_ticker_concentration_blocks_otherwise_positive_evidence() -> None:

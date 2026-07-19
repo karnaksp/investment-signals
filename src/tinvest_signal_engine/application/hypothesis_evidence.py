@@ -15,6 +15,8 @@ from tinvest_signal_engine.domain.hypothesis_evidence import (
     DatasetPartition,
     EvidenceBundle,
     EvidenceDecision,
+    EvidenceDiagnosticsV2,
+    EvidenceReasonCount,
     InstrumentConcentration,
     MatchedControlGroup,
     MatchedControlsResult,
@@ -115,6 +117,7 @@ class EvidenceRequest:
     expected_eligible_events: int
     unmatched_event_ids: tuple[str, ...] = ()
     total_available_observations: int | None = None
+    diagnostics_input: EvidenceDiagnosticsInput | None = None
 
     def __post_init__(self) -> None:
         if not self.hypothesis_id.strip() or not self.hypothesis_version.strip():
@@ -138,10 +141,41 @@ class EvidenceRequest:
             raise ValueError("matched event ids must be unique")
         if set(event_ids) & set(self.unmatched_event_ids):
             raise ValueError("an event cannot be both matched and unmatched")
+        if (
+            self.diagnostics_input is not None
+            and len(self.groups) > self.diagnostics_input.eligible_event_count
+        ):
+            raise ValueError("diagnostic eligible events cannot be fewer than groups")
 
     @property
     def test_id(self) -> str:
         return f"{self.hypothesis_id}@{self.hypothesis_version}"
+
+
+@dataclass(frozen=True)
+class EvidenceDiagnosticsInput:
+    """Observed data funnel supplied without changing the promotion contract."""
+
+    total_observation_count: int
+    available_observation_count: int
+    eligible_event_count: int
+    reasons_histogram: tuple[EvidenceReasonCount, ...] = ()
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.total_observation_count,
+            self.available_observation_count,
+            self.eligible_event_count,
+        )
+        if any(value < 0 for value in counts):
+            raise ValueError("evidence diagnostic input counts must be non-negative")
+        if self.available_observation_count > self.total_observation_count:
+            raise ValueError("available observations cannot exceed total observations")
+        if self.eligible_event_count > self.available_observation_count:
+            raise ValueError("eligible events cannot exceed available observations")
+        reason_codes = tuple(item.reason_code for item in self.reasons_histogram)
+        if len(reason_codes) != len(set(reason_codes)):
+            raise ValueError("evidence diagnostic input reasons must be unique")
 
 
 @dataclass(frozen=True)
@@ -248,14 +282,32 @@ class AssessEvidencePortfolio:
         if maximum_share is not None and maximum_share > self._policy.maximum_instrument_share:
             reasons.append("single_instrument_concentration_exceeded")
 
-        if reasons or not groups:
+        primary = _calculate_descriptive_primary_effect(
+            request,
+            groups,
+            policy=self._policy,
+            empty_stability=empty_stability,
+        )
+        blocked = bool(reasons or not groups)
+        reason_codes = tuple(
+            dict.fromkeys(reasons or (["no_matched_events"] if not groups else []))
+        )
+        diagnostics = _evidence_diagnostics_v2(
+            request,
+            matched_event_count=len(groups),
+            reason_codes=reason_codes,
+            primary=primary,
+            descriptive_only=blocked,
+        )
+
+        if blocked:
             return EvidenceBundle(
                 evidence_id=_evidence_id(request),
                 hypothesis_id=request.hypothesis_id,
                 hypothesis_version=request.hypothesis_version,
                 dataset_fingerprint=request.dataset_fingerprint,
                 decision=EvidenceDecision.BLOCKED_BY_DATA,
-                reason_codes=tuple(dict.fromkeys(reasons or ["no_matched_events"])),
+                reason_codes=reason_codes,
                 trading_days=len(trading_days),
                 eligible_events=request.expected_eligible_events,
                 matched_events=len(groups),
@@ -272,25 +324,11 @@ class AssessEvidencePortfolio:
                 stability=empty_stability,
                 instrument_concentration=concentrations,
                 maximum_instrument_share=maximum_share,
+                diagnostics_v2=diagnostics,
             )
 
-        lifts_by_day: dict[date, list[float]] = defaultdict(list)
-        for group in groups:
-            lifts_by_day[group.event.trading_day].append(group.lift_bps)
-        lifts = [group.lift_bps for group in groups]
-        positives = sum(value > 0.0 for value in lifts)
-        seed = self._policy.bootstrap_seed + int(
-            sha256(request.test_id.encode("utf-8")).hexdigest()[:8], 16
-        )
-        lift_interval = day_block_bootstrap_interval(
-            lifts_by_day,
-            samples=self._policy.bootstrap_samples,
-            seed=seed,
-        )
-        stability = five_block_stability(
-            lifts_by_day,
-            required_positive_blocks=self._policy.required_positive_stability_blocks,
-        )
+        if primary is None:  # pragma: no cover - complete groups guarantee statistics
+            raise RuntimeError("promotion-eligible evidence lacks primary statistics")
         return EvidenceBundle(
             evidence_id=_evidence_id(request),
             hypothesis_id=request.hypothesis_id,
@@ -303,19 +341,18 @@ class AssessEvidencePortfolio:
             matched_events=len(groups),
             matched_controls=sum(len(group.controls) for group in groups),
             cost_model_version=next(iter(cost_versions)),
-            event_mean_net_bps=sum(group.event.net_effect_bps for group in groups)
-            / len(groups),
-            control_mean_net_bps=sum(group.control_mean_bps for group in groups)
-            / len(groups),
-            mean_lift_bps=sum(lifts) / len(lifts),
-            lift_interval=lift_interval,
-            positive_rate_interval=wilson_interval(positives, len(lifts)),
-            raw_p_value=one_sided_sign_test_p_value(positives, len(lifts)),
+            event_mean_net_bps=primary.event_mean_net_bps,
+            control_mean_net_bps=primary.control_mean_net_bps,
+            mean_lift_bps=primary.mean_lift,
+            lift_interval=primary.lift_interval,
+            positive_rate_interval=primary.positive_rate_interval,
+            raw_p_value=primary.p_value,
             adjusted_q_value=None,
             fdr_significant=False,
-            stability=stability,
+            stability=primary.stability,
             instrument_concentration=concentrations,
             maximum_instrument_share=maximum_share,
+            diagnostics_v2=diagnostics,
         )
 
     @staticmethod
@@ -326,10 +363,10 @@ class AssessEvidencePortfolio:
         if interval.upper <= 0.0 or (
             bundle.stability.assessed and bundle.stability.positive_blocks <= 1
         ):
-            return replace(
+            return _with_decision(
                 bundle,
-                decision=EvidenceDecision.REJECTED,
-                reason_codes=("effect_rejected_on_holdout",),
+                EvidenceDecision.REJECTED,
+                ("effect_rejected_on_holdout",),
             )
         reasons: list[str] = []
         if interval.lower <= 0.0:
@@ -339,16 +376,148 @@ class AssessEvidencePortfolio:
         if not bundle.stability.assessed or not bundle.stability.stable:
             reasons.append("five_block_stability_not_met")
         if reasons:
-            return replace(
+            return _with_decision(
                 bundle,
-                decision=EvidenceDecision.INCONCLUSIVE,
-                reason_codes=tuple(reasons),
+                EvidenceDecision.INCONCLUSIVE,
+                tuple(reasons),
             )
-        return replace(
-            bundle,
-            decision=EvidenceDecision.PASSED,
-            reason_codes=(),
+        return _with_decision(bundle, EvidenceDecision.PASSED, ())
+
+
+@dataclass(frozen=True)
+class _DescriptivePrimaryEffect:
+    event_mean_net_bps: float
+    control_mean_net_bps: float
+    mean_lift: float
+    lift_interval: ConfidenceInterval
+    positive_rate_interval: ConfidenceInterval
+    p_value: float
+    stability: StabilityAssessment
+
+
+def _calculate_descriptive_primary_effect(
+    request: EvidenceRequest,
+    groups: Sequence[MatchedControlGroup],
+    *,
+    policy: EvidenceGatePolicy,
+    empty_stability: StabilityAssessment,
+) -> _DescriptivePrimaryEffect | None:
+    analyzable = tuple(group for group in groups if group.controls)
+    if not analyzable:
+        return None
+    lifts_by_day: dict[date, list[float]] = defaultdict(list)
+    for group in analyzable:
+        lifts_by_day[group.event.trading_day].append(group.lift_bps)
+    lifts = tuple(group.lift_bps for group in analyzable)
+    positives = sum(value > 0.0 for value in lifts)
+    seed = policy.bootstrap_seed + int(
+        sha256(request.test_id.encode("utf-8")).hexdigest()[:8], 16
+    )
+    lift_interval = day_block_bootstrap_interval(
+        lifts_by_day,
+        samples=policy.bootstrap_samples,
+        seed=seed,
+    )
+    stability = (
+        five_block_stability(
+            lifts_by_day,
+            required_positive_blocks=policy.required_positive_stability_blocks,
         )
+        if lifts_by_day
+        else empty_stability
+    )
+    return _DescriptivePrimaryEffect(
+        event_mean_net_bps=sum(group.event.net_effect_bps for group in analyzable)
+        / len(analyzable),
+        control_mean_net_bps=sum(group.control_mean_bps for group in analyzable)
+        / len(analyzable),
+        mean_lift=sum(lifts) / len(lifts),
+        lift_interval=lift_interval,
+        positive_rate_interval=wilson_interval(positives, len(lifts)),
+        p_value=one_sided_sign_test_p_value(positives, len(lifts)),
+        stability=stability,
+    )
+
+
+def _evidence_diagnostics_v2(
+    request: EvidenceRequest,
+    *,
+    matched_event_count: int,
+    reason_codes: Sequence[str],
+    primary: _DescriptivePrimaryEffect | None,
+    descriptive_only: bool,
+) -> EvidenceDiagnosticsV2:
+    supplied = request.diagnostics_input
+    eligible = (
+        supplied.eligible_event_count
+        if supplied is not None
+        else request.expected_eligible_events
+    )
+    available = (
+        supplied.available_observation_count
+        if supplied is not None
+        else request.total_available_observations
+    )
+    total = supplied.total_observation_count if supplied is not None else None
+    histogram = Counter()
+    if supplied is not None:
+        histogram.update(
+            {item.reason_code: item.count for item in supplied.reasons_histogram}
+        )
+    if request.unmatched_event_ids:
+        histogram["matched_controls_unavailable"] += len(request.unmatched_event_ids)
+    histogram.update(reason_codes)
+    return EvidenceDiagnosticsV2(
+        version="evidence-diagnostics-v2",
+        event_prevalence=_ratio(eligible, available),
+        eligible_event_count=eligible,
+        matched_event_count=matched_event_count,
+        match_coverage=_ratio(matched_event_count, eligible),
+        data_coverage=_ratio(available, total),
+        reasons_histogram=tuple(
+            EvidenceReasonCount(reason_code=reason_code, count=count)
+            for reason_code, count in sorted(histogram.items())
+            if count > 0
+        ),
+        primary_effect_estimate=(primary.mean_lift if primary is not None else None),
+        primary_effect_interval=(
+            primary.lift_interval if primary is not None else None
+        ),
+        primary_p_value=(primary.p_value if primary is not None else None),
+        descriptive_only=descriptive_only,
+    )
+
+
+def _ratio(numerator: int | None, denominator: int | None) -> float | None:
+    if numerator is None or denominator is None or denominator == 0:
+        return None
+    return numerator / denominator
+
+
+def _with_decision(
+    bundle: EvidenceBundle,
+    decision: EvidenceDecision,
+    reason_codes: tuple[str, ...],
+) -> EvidenceBundle:
+    diagnostics = bundle.diagnostics_v2
+    if diagnostics is not None and reason_codes:
+        histogram = Counter(
+            {item.reason_code: item.count for item in diagnostics.reasons_histogram}
+        )
+        histogram.update(reason_codes)
+        diagnostics = replace(
+            diagnostics,
+            reasons_histogram=tuple(
+                EvidenceReasonCount(reason_code=reason_code, count=count)
+                for reason_code, count in sorted(histogram.items())
+            ),
+        )
+    return replace(
+        bundle,
+        decision=decision,
+        reason_codes=reason_codes,
+        diagnostics_v2=diagnostics,
+    )
 
 
 def _stable_tie_break(event_id: str, candidate_id: str) -> str:
