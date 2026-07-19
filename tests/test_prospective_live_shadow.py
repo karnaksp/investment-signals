@@ -139,8 +139,9 @@ class _OutcomeSource:
         self.available = available
         self.calls = 0
 
-    def load(self, observation):
+    def load(self, observation, *, as_of):
         self.calls += 1
+        assert as_of >= observation.target_at
         feature = observation.feature
         actual = None
         ewma = phase = None

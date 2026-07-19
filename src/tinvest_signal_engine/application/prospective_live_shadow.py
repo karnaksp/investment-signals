@@ -62,7 +62,10 @@ class ProspectiveLiveShadowStore(Protocol):
 
 class ProspectiveLiveOutcomeSource(Protocol):
     def load(
-        self, observation: ProspectiveLiveObservation
+        self,
+        observation: ProspectiveLiveObservation,
+        *,
+        as_of: datetime,
     ) -> "ProspectiveLiveOutcomeEvidence": ...
 
 
@@ -282,7 +285,7 @@ class ProcessProspectiveLiveOutcomes:
             if now < observation.target_at:
                 pending += 1
                 continue
-            evidence = self._source.load(observation)
+            evidence = self._source.load(observation, as_of=now)
             if evidence.observation_id != observation.observation_id:
                 raise ValueError("outcome evidence belongs to a different observation")
             if evidence.target_at != observation.target_at:
