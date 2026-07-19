@@ -1,0 +1,84 @@
+draft: true
+runtime_catalog: false
+purpose: Exact review input for a future versioned scientific registry update.
+
+sources_to_add:
+  - id: berkman-koch-tuttle-zhang-2012
+    title: "Paying Attention: Overnight Returns and the Hidden Cost of Buying at the Open"
+    authors: [Henk Berkman, Paul D. Koch, Laura Tuttle, Ying Jenny Zhang]
+    year: 2012
+    identifier: "doi:10.1017/S0022109012000270"
+    url: "https://doi.org/10.1017/S0022109012000270"
+    mechanism: Attention-driven buy pressure at the open can temporarily inflate positive overnight returns before liquidity absorbs the imbalance.
+  - id: da-liu-schaumburg-2014
+    title: "A Closer Look at the Short-Term Return Reversal"
+    authors: [Zhi Da, Qianqiu Liu, Ernst Schaumburg]
+    year: 2014
+    identifier: "doi:10.1287/mnsc.2013.1766"
+    url: "https://doi.org/10.1287/mnsc.2013.1766"
+    mechanism: Idiosyncratic price pressure reverses when liquidity providers absorb it; market-driven moves must be removed first.
+  - id: corsi-2009
+    title: "A Simple Approximate Long-Memory Model of Realized Volatility"
+    authors: [Fulvio Corsi]
+    year: 2009
+    identifier: "doi:10.1093/jjfinec/nbp001"
+    url: "https://doi.org/10.1093/jjfinec/nbp001"
+    mechanism: Participants acting over heterogeneous horizons create persistent short-, medium-, and long-window components of realized variance.
+  - id: andersen-1996-volume-volatility
+    title: "Return Volatility and Trading Volume: An Information Flow Interpretation of Stochastic Volatility"
+    authors: [Torben G. Andersen]
+    year: 1996
+    identifier: "doi:10.1111/j.1540-6261.1996.tb05206.x"
+    url: "https://doi.org/10.1111/j.1540-6261.1996.tb05206.x"
+    mechanism: Persistent information arrival jointly clusters trading volume and return volatility.
+
+hypotheses_to_add:
+  - short_id: H10
+    id: h10-positive-main-open-gap-reversion
+    version: "1.0.0"
+    origin: research_extension
+    source_ids: [berkman-koch-tuttle-zhang-2012]
+    statement: A positive main-session opening gap of at least 20 bps reverts over 30 minutes after 10 bps round-trip costs more than matched controls.
+    features: [previous trading-day close, current main-session opening price]
+    feature_cutoff: main-session opening timestamp
+    expected_direction: reversion
+    abstain: [missing previous close, non-positive gap, gap below 20 bps, missing exact 30-minute target]
+    falsified_when: Independent cost-adjusted lift versus controls has a non-positive 95% lower bound or the sign is unstable across time blocks.
+  - short_id: H11
+    id: h11-market-residual-move-reversion
+    version: "1.0.0"
+    origin: research_extension
+    source_ids: [da-liu-schaumburg-2014]
+    statement: A five-minute instrument return residual of at least 20 bps after subtracting the simultaneous equal-weight market return reverts over 15 minutes after 10 bps costs.
+    features: [instrument five-minute return, equal-weight market five-minute return, market member count]
+    feature_cutoff: end of the five-minute event window
+    expected_direction: reversion
+    abstain: [fewer than five market members, zero residual, residual below 20 bps, non-contiguous candles]
+    falsified_when: Independent net residual-reversal lift is not positive or disappears under instrument and month exclusions.
+  - short_id: H15
+    id: h15-har-multiwindow-volatility
+    version: "1.0.0"
+    origin: research_extension
+    source_ids: [corsi-2009]
+    statement: A ridge-stabilized HAR model using 5-, 30-, and 120-minute realized variance improves 30-minute future-variance QLIKE over the sealed 120-minute benchmark.
+    features: [5-minute realized variance, 30-minute realized variance, 120-minute realized variance]
+    feature_cutoff: forecast timestamp; model labels end before the first validation feature
+    expected_direction: none
+    abstain: [fewer than 30 training points, non-contiguous candles, missing exact 30-minute target]
+    falsified_when: Independent mean QLIKE is not lower than the benchmark or improvement is unstable across instruments and months.
+  - short_id: H7V2
+    id: h7-relative-volume-future-activity
+    version: "2.0.0"
+    origin: research_extension
+    source_ids: [graczyk-queiros-2018, andersen-1996-volume-volatility]
+    statement: A 15-minute volume at or above the prior same-phase 90th percentile precedes 30-minute realized variance at least 1.25 times its prior same-phase median.
+    features: [current 15-minute volume, prior same-phase volume distribution, prior same-phase future-variance median]
+    feature_cutoff: end of the 15-minute volume window
+    expected_direction: none
+    abstain: [fewer than 20 prior phase observations, non-positive activity baseline, non-contiguous candles]
+    falsified_when: Future-activity uplift versus phase controls has a non-positive 95% lower bound or fails four-of-five block stability.
+
+shared_preregistration:
+  data_split: 60/20/20 chronological trading days
+  multiple_testing: Benjamini-Hochberg within the candle-model family
+  independent_product_gate: A future sealed period is required because the current cache has already been inspected.
