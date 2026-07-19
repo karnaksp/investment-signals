@@ -390,6 +390,9 @@ class RunHypothesisPortfolio:
             self._validate_resume(snapshot, request)
 
         if snapshot.state is PortfolioRunState.COMPLETED:
+            # Heal a crash that occurred after the durable state save but before
+            # its read-model progress projection was published.
+            self._progress.publish(snapshot)
             return HypothesisPortfolioExecution(
                 snapshot=snapshot,
                 resumed=True,
