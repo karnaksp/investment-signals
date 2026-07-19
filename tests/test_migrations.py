@@ -150,7 +150,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
-            (100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110),
+            (100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111),
         ),
     }
     for engine, (directory, versions) in expected.items():
@@ -337,3 +337,18 @@ def test_scientific_observation_migrations_preserve_decisions_and_outcomes() -> 
     assert "source_max_observed_at DateTime64(6, 'UTC')" in outcomes
     assert "payload_fingerprint String" in outcomes
     assert "TTL toDateTime(target_at) + toIntervalDay(365)" in outcomes
+
+
+def test_live_shadow_migration_adds_lossless_versioned_payload_fields() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "clickhouse"
+        / "migrations"
+        / "0111_add_live_shadow_evidence_fields.up.sql"
+    ).read_text(encoding="utf-8")
+
+    assert migration.count("record_schema_version LowCardinality(String)") == 2
+    assert "measurements_json String DEFAULT '{}'" in migration
+    assert "evidence_fingerprint String DEFAULT ''" in migration
+    assert migration.count("ADD COLUMN IF NOT EXISTS") == 4
