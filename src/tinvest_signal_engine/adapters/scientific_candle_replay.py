@@ -13,18 +13,23 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
-from statistics import fmean
 from typing import Any, Mapping, Sequence
 
+from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
+from tinvest_signal_engine.application.scientific_candle_evidence import (
+    AssessScientificCandleHoldoutEvidence,
+)
 from tinvest_signal_engine.application.scientific_candle_models import (
     ScientificCandleResearchReport,
 )
-from tinvest_signal_engine.domain.hypothesis_evidence import DatasetPartition
+from tinvest_signal_engine.domain.hypothesis_evidence import (
+    DatasetPartition,
+    EvidenceBundle,
+    EvidenceDecision,
+)
 from tinvest_signal_engine.domain.scientific_candle_models import (
-    CausalFeatureVector,
     FeatureDecision,
     ScientificCandleHypothesis,
-    ScientificModelOutcome,
 )
 
 
@@ -85,8 +90,15 @@ _DEFINITIONS = {
 class ScientificCandleReplayArtifactAdapter:
     """Map one report to immutable, reproducible evidence JSON."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        evidence_policy: EvidenceGatePolicy = EvidenceGatePolicy(),
+    ) -> None:
         self._root = Path(root)
+        self._evidence_policy = evidence_policy
+        self._evidence_gate = AssessScientificCandleHoldoutEvidence(evidence_policy)
 
     def save(
         self,
@@ -107,15 +119,23 @@ class ScientificCandleReplayArtifactAdapter:
         artifact_fingerprint = _fingerprint(
             {
                 "cost_model_version": cost_model_version,
+                "evidence_policy": asdict(self._evidence_policy),
                 "report_fingerprint": report.report_fingerprint,
                 "selected_hypotheses": [item.value for item in selected],
             }
         )
         generated_at = _deterministic_generated_at(report)
+        assessment = self._evidence_gate.execute(
+            report,
+            selected,
+            cost_model_version=cost_model_version,
+        )
         evidence = tuple(
             _evidence_row(
                 report,
                 hypothesis,
+                bundle=assessment.for_hypothesis(hypothesis),
+                controls_per_event=self._evidence_policy.controls_per_event,
                 artifact_fingerprint=artifact_fingerprint,
                 generated_at=generated_at,
                 cost_model_version=cost_model_version,
@@ -125,6 +145,7 @@ class ScientificCandleReplayArtifactAdapter:
         run_dir = self._root / artifact_fingerprint.removeprefix("sha256:")
         manifest = {
             "dataset_fingerprint": report.dataset_fingerprint,
+            "evidence_policy": asdict(self._evidence_policy),
             "report_fingerprint": report.report_fingerprint,
             "policy": asdict(report.policy),
             "selected_hypotheses": [item.value for item in selected],
@@ -143,6 +164,8 @@ def _evidence_row(
     report: ScientificCandleResearchReport,
     hypothesis: ScientificCandleHypothesis,
     *,
+    bundle: EvidenceBundle,
+    controls_per_event: int,
     artifact_fingerprint: str,
     generated_at: str,
     cost_model_version: str,
@@ -157,11 +180,26 @@ def _evidence_row(
     matched = tuple(
         pair for pair in pairs if pair[0].decision is FeatureDecision.MATCHED
     )
-    available = tuple(pair for pair in matched if pair[1].available)
-    source_state = "ready" if available else "insufficient_history"
-    decision = "inconclusive" if available else "blocked_by_data"
-    primary = _primary_metric(hypothesis, tuple(item[1] for item in available))
-    sample_count = len(available)
+    source_state = (
+        "insufficient_history"
+        if bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
+        else "ready"
+    )
+    decision = bundle.decision.value
+    primary = bundle.mean_lift_bps
+    sample_count = bundle.matched_events
+    interval = bundle.lift_interval
+    total_block_observations = sum(
+        item.observation_count for item in bundle.stability.blocks
+    )
+    maximum_period_share = (
+        max(
+            item.observation_count / total_block_observations
+            for item in bundle.stability.blocks
+        )
+        if total_block_observations
+        else None
+    )
     return {
         "hypothesis_id": hypothesis.value,
         "catalog_hypothesis_id": definition.catalog_hypothesis_id,
@@ -176,27 +214,27 @@ def _evidence_row(
             ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,
         },
         "sample_count": sample_count,
-        "trading_days": len({item[0].trading_day for item in available}),
+        "trading_days": bundle.trading_days,
         "generated_at": generated_at,
         "artifact_fingerprint": artifact_fingerprint,
         "dataset_fingerprint": report.dataset_fingerprint,
         "formula_fingerprint": _formula_fingerprint(report, hypothesis),
         "cost_model_version": cost_model_version,
         "primary_metric_value": primary,
-        "matched_control_lift_ci95_lower": None,
-        "matched_control_lift_ci95_upper": None,
-        "matched_controls": 0,
-        "controls_per_event": 5,
-        "adjusted_p_value": None,
-        "stable_blocks": 0,
-        "total_blocks": 0,
-        "maximum_ticker_share": _maximum_ticker_share(available),
-        "maximum_period_share": None,
+        "matched_control_lift_ci95_lower": interval.lower if interval else None,
+        "matched_control_lift_ci95_upper": interval.upper if interval else None,
+        "matched_controls": bundle.matched_controls,
+        "controls_per_event": controls_per_event,
+        "adjusted_p_value": bundle.adjusted_q_value,
+        "stable_blocks": bundle.stability.positive_blocks,
+        "total_blocks": len(bundle.stability.blocks),
+        "maximum_ticker_share": bundle.maximum_instrument_share,
+        "maximum_period_share": maximum_period_share,
         "abstention_rate": (1.0 - len(matched) / len(pairs) if pairs else None),
         "horizons": (
             {
                 "horizon_seconds": _horizon_seconds(report, hypothesis),
-                "evidence_scope": "descriptive_only",
+                "evidence_scope": "independent_gate",
                 "source_data_state": source_state,
                 "decision": decision,
                 "sample_count": sample_count,
@@ -204,34 +242,6 @@ def _evidence_row(
             },
         ),
     }
-
-
-def _primary_metric(
-    hypothesis: ScientificCandleHypothesis,
-    outcomes: Sequence[ScientificModelOutcome],
-) -> float | None:
-    if not outcomes:
-        return None
-    if hypothesis in {
-        ScientificCandleHypothesis.OPENING_GAP_REVERSION,
-        ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,
-    }:
-        values = tuple(
-            item.cost_adjusted_value
-            for item in outcomes
-            if item.cost_adjusted_value is not None
-        )
-    elif hypothesis is ScientificCandleHypothesis.HAR_VOLATILITY:
-        values = tuple(
-            item.benchmark_loss - item.model_loss
-            for item in outcomes
-            if item.benchmark_loss is not None and item.model_loss is not None
-        )
-    else:
-        values = tuple(
-            item.actual_value for item in outcomes if item.actual_value is not None
-        )
-    return fmean(values) if values else None
 
 
 def _horizon_seconds(
@@ -246,17 +256,6 @@ def _horizon_seconds(
     if hypothesis is ScientificCandleHypothesis.HAR_VOLATILITY:
         return policy.har_horizon_seconds
     return policy.activity_horizon_seconds
-
-
-def _maximum_ticker_share(
-    pairs: Sequence[tuple[CausalFeatureVector, ScientificModelOutcome]],
-) -> float | None:
-    if not pairs:
-        return None
-    counts: dict[str, int] = {}
-    for feature, _ in pairs:
-        counts[feature.ticker] = counts.get(feature.ticker, 0) + 1
-    return max(counts.values()) / len(pairs)
 
 
 def _formula_fingerprint(

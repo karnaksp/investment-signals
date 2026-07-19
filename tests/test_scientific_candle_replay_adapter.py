@@ -4,8 +4,6 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 
-import pytest
-
 from tinvest_signal_engine.adapters.scientific_candle_replay import (
     ScientificCandleReplayArtifactAdapter,
 )
@@ -162,23 +160,20 @@ def test_adapter_writes_deterministic_holdout_evidence(tmp_path: Path) -> None:
         "H15",
         "H7V2",
     ]
-    assert all(item["decision"] == "inconclusive" for item in first.evidence)
+    assert all(item["decision"] == "blocked_by_data" for item in first.evidence)
     assert all(item["independent_validation"] is True for item in first.evidence)
-    assert all(item["sample_count"] == 1 for item in first.evidence)
+    assert all(item["sample_count"] == 0 for item in first.evidence)
     assert all(
         item["artifact_fingerprint"] == first.artifact_fingerprint
         for item in first.evidence
     )
     assert all(
-        item["evidence_scope"] == "descriptive_only"
+        item["evidence_scope"] == "independent_gate"
         for row in first.evidence
         for item in row["horizons"]
     )
     by_id = {item["hypothesis_id"]: item for item in first.evidence}
-    assert by_id["H10"]["primary_metric_value"] == pytest.approx(20.0)
-    assert by_id["H11"]["primary_metric_value"] == pytest.approx(20.0)
-    assert by_id["H15"]["primary_metric_value"] > 0.0
-    assert by_id["H7V2"]["primary_metric_value"] == pytest.approx(2.0)
+    assert all(item["primary_metric_value"] is None for item in by_id.values())
     assert all(
         ReplayEvidenceResponse.model_validate(row).hypothesis_id == row["hypothesis_id"]
         for row in first.evidence
@@ -187,7 +182,7 @@ def test_adapter_writes_deterministic_holdout_evidence(tmp_path: Path) -> None:
     assert stored == json.loads(json.dumps(first.evidence))
 
 
-def test_adapter_never_promotes_descriptive_rows_to_passed(tmp_path: Path) -> None:
+def test_adapter_blocks_rows_without_complete_controls(tmp_path: Path) -> None:
     artifact = ScientificCandleReplayArtifactAdapter(tmp_path).save(
         _report(),
         (ScientificCandleHypothesis.OPENING_GAP_REVERSION,),
@@ -195,7 +190,7 @@ def test_adapter_never_promotes_descriptive_rows_to_passed(tmp_path: Path) -> No
     )
 
     row = artifact.evidence[0]
-    assert row["decision"] == "inconclusive"
+    assert row["decision"] == "blocked_by_data"
     assert row["matched_controls"] == 0
     assert row["matched_control_lift_ci95_lower"] is None
     assert row["adjusted_p_value"] is None

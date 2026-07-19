@@ -561,8 +561,24 @@ def directional_outcome(
 ) -> ScientificModelOutcome:
     if feature.target is not ScientificTarget.DIRECTIONAL_RETURN_BPS:
         raise ValueError("directional outcome requires directional feature")
-    if feature.decision is not FeatureDecision.MATCHED or forward_return_bps is None:
+    if feature.decision is FeatureDecision.ABSTAIN or forward_return_bps is None:
         return _unavailable_outcome(feature, target_at)
+    if feature.decision is FeatureDecision.NOT_MATCHED:
+        # A non-event remains eligible as a causal control observation.  Its
+        # raw future return is sealed, while event direction and trading costs
+        # are deliberately left undefined until an evidence study pairs it
+        # with a treated event of the same direction.
+        return ScientificModelOutcome(
+            observation_id=feature.observation_id,
+            target_at=target_at,
+            available=True,
+            reason=AbstentionReason.CONDITIONS_NOT_MET,
+            actual_value=forward_return_bps,
+            cost_adjusted_value=None,
+            model_loss=None,
+            benchmark_loss=None,
+            supported=None,
+        )
     net = feature.expected_direction * forward_return_bps - policy.round_trip_cost_bps
     return ScientificModelOutcome(
         observation_id=feature.observation_id,
@@ -590,7 +606,7 @@ def variance_outcome(
     }:
         raise ValueError("variance outcome requires an activity or variance feature")
     if (
-        feature.decision is not FeatureDecision.MATCHED
+        feature.decision is FeatureDecision.ABSTAIN
         or actual_future_variance is None
         or actual_future_variance < 0.0
     ):
@@ -618,6 +634,20 @@ def variance_outcome(
     if baseline <= 0.0:
         return _unavailable_outcome(feature, target_at)
     uplift = actual_future_variance / baseline
+    if feature.decision is FeatureDecision.NOT_MATCHED:
+        # Keep the realized activity of non-events for matched controls without
+        # assigning a signal verdict to them.
+        return ScientificModelOutcome(
+            observation_id=feature.observation_id,
+            target_at=target_at,
+            available=True,
+            reason=AbstentionReason.CONDITIONS_NOT_MET,
+            actual_value=uplift,
+            cost_adjusted_value=None,
+            model_loss=None,
+            benchmark_loss=None,
+            supported=None,
+        )
     return ScientificModelOutcome(
         observation_id=feature.observation_id,
         target_at=target_at,
