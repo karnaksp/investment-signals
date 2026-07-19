@@ -213,10 +213,21 @@ def _instrument_ids(limit: int) -> tuple[str, ...]:
                 or "/etc/investment-signals-pro/instruments.yaml"
             ).strip()
         )
-        selected = tuple(
+        configured = tuple(load_instrument_configs(path))
+        candle_enabled = tuple(
             item.instrument_id
-            for item in load_instrument_configs(path)
+            for item in configured
             if item.candles and item.candle_interval == "1m"
+        )
+        # Installations created before the prospective evidence worker did not
+        # enable the candle subscription. They may still contain replayed
+        # scientific candles, so keep the worker operational for every active
+        # market-data instrument while the installation is upgraded. Fresh
+        # installations enable one-minute candles explicitly.
+        selected = candle_enabled or tuple(
+            item.instrument_id
+            for item in configured
+            if item.trades or item.last_price or item.candles
         )
     unique = tuple(dict.fromkeys(selected))
     if not unique:

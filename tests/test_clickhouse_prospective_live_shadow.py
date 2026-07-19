@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -45,6 +46,7 @@ from tinvest_signal_engine.domain.scientific_candles import (
 )
 from tinvest_signal_engine.services.prospective_live_shadow_worker import (
     PRODUCTION_LIVE_POLICY,
+    _instrument_ids,
     build_clickhouse_prospective_live_shadow_runtime,
 )
 
@@ -326,6 +328,63 @@ def test_production_composition_wires_all_twenty_five_instruments() -> None:
     assert runtime.snapshot_source._instrument_ids == instrument_ids
     assert runtime.store._live_instrument_ids == instrument_ids
     assert runtime.policy.jump_horizons_seconds == (900,)
+
+
+def test_worker_uses_active_legacy_instruments_without_candle_subscription(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "instruments.yaml"
+    config.write_text(
+        """
+instruments:
+  - ticker: SBER
+    class_code: TQBR
+    subscriptions:
+      trades: true
+      last_price: true
+      candles: false
+      candle_interval: 1m
+  - ticker: GAZP
+    class_code: TQBR
+    subscriptions:
+      trades: false
+      last_price: false
+      candles: false
+      candle_interval: 1m
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PROSPECTIVE_LIVE_INSTRUMENT_IDS", raising=False)
+    monkeypatch.setenv("INSTRUMENTS_CONFIG", str(config))
+
+    assert _instrument_ids(25) == ("SBER_TQBR",)
+
+
+def test_worker_prefers_one_minute_candle_instruments_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "instruments.yaml"
+    config.write_text(
+        """
+instruments:
+  - ticker: SBER
+    class_code: TQBR
+    subscriptions:
+      trades: true
+      candles: false
+  - ticker: GAZP
+    class_code: TQBR
+    subscriptions:
+      trades: true
+      candles: true
+      candle_interval: 1m
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PROSPECTIVE_LIVE_INSTRUMENT_IDS", raising=False)
+    monkeypatch.setenv("INSTRUMENTS_CONFIG", str(config))
+
+    assert _instrument_ids(25) == ("GAZP_TQBR",)
 
 
 def _candle(candle_at: datetime, index: int) -> ScientificCandle:
