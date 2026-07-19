@@ -8,23 +8,26 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.application.prospective_scientific_evidence import (
     PROSPECTIVE_EVIDENCE_DEFINITIONS,
     AssessProspectiveScientificEvidence,
+    PreparedProspectiveEvidence,
     ProspectiveEvidenceCoverage,
 )
 from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificReport,
 )
 from tinvest_signal_engine.domain.hypothesis_evidence import (
+    ChronologicalSplit,
     EvidenceBundle,
     EvidenceDecision,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveHypothesis,
+    ProspectiveScientificPolicy,
 )
 
 
@@ -50,6 +53,15 @@ class ProspectiveScientificReplayArtifact:
     evidence: tuple[Mapping[str, Any], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _ReportSummary:
+    dataset_fingerprint: str
+    report_fingerprint: str
+    split: ChronologicalSplit
+    policy: ProspectiveScientificPolicy
+    generated_at: str
+
+
 class ProspectiveScientificReplayArtifactAdapter:
     """Write deterministic evidence once, or verify byte-for-byte identity."""
 
@@ -72,21 +84,104 @@ class ProspectiveScientificReplayArtifactAdapter:
         *,
         cost_model_version: str,
     ) -> ProspectiveScientificReplayArtifact:
+        return self.save_portfolio(
+            (report,),
+            requested_hypotheses,
+            cost_model_version=cost_model_version,
+        )
+
+    def save_portfolio(
+        self,
+        reports: Iterable[ProspectiveScientificReport],
+        requested_hypotheses: Sequence[ProspectiveHypothesis],
+        *,
+        cost_model_version: str,
+    ) -> ProspectiveScientificReplayArtifact:
+        """Persist one globally assessed portfolio from sequential reports.
+
+        Callers may yield one report per hypothesis.  Only compact matched
+        control requests and report summaries are retained, so the six-model
+        portfolio does not keep six full feature/outcome graphs in memory.
+        """
+
         selected = tuple(sorted(set(requested_hypotheses), key=lambda item: item.value))
         if not selected:
             raise ValueError("at least one prospective hypothesis is required")
         if not cost_model_version.strip():
             raise ValueError("cost_model_version must not be empty")
-        unavailable = set(selected) - set(report.selected_hypotheses)
+
+        prepared: list[PreparedProspectiveEvidence] = []
+        summaries: dict[ProspectiveHypothesis, _ReportSummary] = {}
+        portfolio_dataset_fingerprint: str | None = None
+        portfolio_policy: ProspectiveScientificPolicy | None = None
+        for report in reports:
+            included = tuple(
+                hypothesis
+                for hypothesis in selected
+                if hypothesis in report.selected_hypotheses
+                and hypothesis not in summaries
+            )
+            if not included:
+                raise ValueError("research report adds no requested hypothesis")
+            if portfolio_dataset_fingerprint is None:
+                portfolio_dataset_fingerprint = report.dataset_fingerprint
+                portfolio_policy = report.policy
+            elif (
+                report.dataset_fingerprint != portfolio_dataset_fingerprint
+                or report.policy != portfolio_policy
+            ):
+                raise ValueError("portfolio reports must share dataset and policy")
+            summary = _ReportSummary(
+                dataset_fingerprint=report.dataset_fingerprint,
+                report_fingerprint=report.report_fingerprint,
+                split=report.split,
+                policy=report.policy,
+                generated_at=_deterministic_generated_at(report),
+            )
+            for hypothesis in included:
+                prepared.append(
+                    self._evidence_gate.prepare(
+                        report,
+                        hypothesis,
+                        cost_model_version,
+                    )
+                )
+                summaries[hypothesis] = summary
+        unavailable = set(selected) - set(summaries)
         if unavailable:
-            raise ValueError("requested hypothesis is absent from research report")
+            raise ValueError("requested hypothesis is absent from research reports")
+        if portfolio_dataset_fingerprint is None or portfolio_policy is None:
+            raise ValueError("at least one research report is required")
+
+        report_fingerprints = tuple(
+            summaries[hypothesis].report_fingerprint for hypothesis in selected
+        )
+        unique_report_fingerprints = tuple(dict.fromkeys(report_fingerprints))
+        portfolio_report_fingerprint = (
+            unique_report_fingerprints[0]
+            if len(unique_report_fingerprints) == 1
+            else _fingerprint(
+                {
+                    "schema": "prospective-scientific-report-portfolio-v1",
+                    "reports": [
+                        {
+                            "hypothesis": hypothesis.value,
+                            "report_fingerprint": summaries[
+                                hypothesis
+                            ].report_fingerprint,
+                        }
+                        for hypothesis in selected
+                    ],
+                }
+            )
+        )
 
         artifact_fingerprint = _fingerprint(
             {
                 "artifact_schema": "prospective-scientific-evidence-v1.0.0",
                 "cost_model_version": cost_model_version,
                 "evidence_policy": asdict(self._evidence_policy),
-                "report_fingerprint": report.report_fingerprint,
+                "report_fingerprint": portfolio_report_fingerprint,
                 "selected_hypotheses": [item.value for item in selected],
                 "claim_definitions": [
                     {
@@ -109,15 +204,11 @@ class ProspectiveScientificReplayArtifactAdapter:
                 ],
             }
         )
-        generated_at = _deterministic_generated_at(report)
-        assessment = self._evidence_gate.execute(
-            report,
-            selected,
-            cost_model_version=cost_model_version,
-        )
+        generated_at = max(summaries[item].generated_at for item in selected)
+        assessment = self._evidence_gate.assess_prepared(prepared)
         evidence = tuple(
             _evidence_row(
-                report,
+                summaries[hypothesis],
                 hypothesis,
                 bundle=assessment.for_hypothesis(hypothesis),
                 coverage=assessment.coverage_for(hypothesis),
@@ -126,7 +217,7 @@ class ProspectiveScientificReplayArtifactAdapter:
                 generated_at=generated_at,
                 cost_model_version=cost_model_version,
                 independent_validation=_has_primary_holdout(
-                    report,
+                    summaries[hypothesis],
                     starts_on=self._primary_holdout_start,
                 ),
             )
@@ -135,10 +226,14 @@ class ProspectiveScientificReplayArtifactAdapter:
         run_dir = self._root / artifact_fingerprint.removeprefix("sha256:")
         manifest = {
             "artifact_schema": "prospective-scientific-evidence-v1.0.0",
-            "dataset_fingerprint": report.dataset_fingerprint,
+            "dataset_fingerprint": portfolio_dataset_fingerprint,
             "evidence_policy": asdict(self._evidence_policy),
-            "report_fingerprint": report.report_fingerprint,
-            "policy": asdict(report.policy),
+            "report_fingerprint": portfolio_report_fingerprint,
+            "report_fingerprints": {
+                hypothesis.value: summaries[hypothesis].report_fingerprint
+                for hypothesis in selected
+            },
+            "policy": asdict(portfolio_policy),
             "selected_hypotheses": [item.value for item in selected],
             "cost_model_version": cost_model_version,
             "evidence_coverage": {
@@ -156,7 +251,7 @@ class ProspectiveScientificReplayArtifactAdapter:
 
 
 def _evidence_row(
-    report: ProspectiveScientificReport,
+    report: _ReportSummary,
     hypothesis: ProspectiveHypothesis,
     *,
     bundle: EvidenceBundle,
@@ -242,7 +337,7 @@ def _evidence_row(
 
 
 def _has_primary_holdout(
-    report: ProspectiveScientificReport,
+    report: _ReportSummary,
     *,
     starts_on: date,
 ) -> bool:
@@ -264,7 +359,7 @@ def _coverage_manifest(
 
 
 def _horizons(
-    report: ProspectiveScientificReport,
+    report: _ReportSummary,
     hypothesis: ProspectiveHypothesis,
 ) -> tuple[int, ...]:
     if hypothesis in {
@@ -282,7 +377,7 @@ def _horizons(
 
 
 def _formula_fingerprint(
-    report: ProspectiveScientificReport,
+    report: _ReportSummary,
     hypothesis: ProspectiveHypothesis,
 ) -> str:
     definition = PROSPECTIVE_EVIDENCE_DEFINITIONS[hypothesis]

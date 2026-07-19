@@ -124,14 +124,14 @@ def test_internal_runner_wires_prospective_portfolio_as_one_evidence_family(
             return (object(),)
 
     class FakeArtifacts:
-        def save(
+        def save_portfolio(
             self,
-            actual_report: object,
+            actual_reports: object,
             requested: tuple[object, ...],
             *,
             cost_model_version: str,
         ) -> object:
-            captured["artifact_report"] = actual_report
+            captured["artifact_reports"] = tuple(actual_reports)
             captured["requested"] = tuple(item.value for item in requested)
             captured["cost_model_version"] = cost_model_version
             return SimpleNamespace(
@@ -150,7 +150,7 @@ def test_internal_runner_wires_prospective_portfolio_as_one_evidence_family(
     ) -> object:
         captured["candles"] = candles
         captured["dataset_fingerprint"] = dataset_fingerprint
-        captured["request"] = request
+        captured.setdefault("requests", []).append(request)
         return report
 
     monkeypatch.setattr(
@@ -171,11 +171,12 @@ def test_internal_runner_wires_prospective_portfolio_as_one_evidence_family(
 
     result = runner.execute(request, run_fingerprint="sha256:" + "d" * 64)
 
-    selected = tuple(
-        item.value for item in captured["request"].selected_hypotheses
-    )
-    assert selected == request.hypothesis_ids
-    assert captured["request"].policy.round_trip_cost_bps == 10.0
+    requests = captured["requests"]
+    assert tuple(
+        item.selected_hypotheses[0].value for item in requests
+    ) == request.hypothesis_ids
+    assert all(item.policy.round_trip_cost_bps == 10.0 for item in requests)
+    assert len(captured["artifact_reports"]) == len(request.hypothesis_ids)
     assert captured["dataset_fingerprint"] == report.dataset_fingerprint
     assert captured["requested"] == request.hypothesis_ids
     assert captured["cost_model_version"] == "cost-v3"

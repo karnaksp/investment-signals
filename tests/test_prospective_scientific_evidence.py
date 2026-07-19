@@ -263,6 +263,52 @@ def test_adapter_is_deterministic_typed_and_immutable(tmp_path: Path) -> None:
         adapter.save(report, selected, cost_model_version="cost-v1")
 
 
+def test_sequential_portfolio_matches_single_full_report_assessment(
+    tmp_path: Path,
+) -> None:
+    report, _ = _variance_portfolio_report(include_nearby=False)
+    selected = (
+        ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+    )
+    full = ProspectiveScientificReplayArtifactAdapter(
+        tmp_path / "full",
+        evidence_policy=_fast_policy(),
+    ).save(report, selected, cost_model_version="cost-v1")
+
+    def reports():
+        for index, hypothesis in enumerate(selected):
+            pairs = tuple(
+                (feature, outcome)
+                for feature, outcome in zip(
+                    report.features, report.outcomes, strict=True
+                )
+                if feature.hypothesis is hypothesis
+            )
+            yield replace(
+                report,
+                report_fingerprint="sha256:" + f"{index + 1:x}" * 64,
+                selected_hypotheses=(hypothesis,),
+                features=tuple(item[0] for item in pairs),
+                outcomes=tuple(item[1] for item in pairs),
+            )
+
+    sequential = ProspectiveScientificReplayArtifactAdapter(
+        tmp_path / "sequential",
+        evidence_policy=_fast_policy(),
+    ).save_portfolio(reports(), selected, cost_model_version="cost-v1")
+
+    excluded = {"artifact_fingerprint", "generated_at"}
+    assert tuple(
+        {key: value for key, value in row.items() if key not in excluded}
+        for row in sequential.evidence
+    ) == tuple(
+        {key: value for key, value in row.items() if key not in excluded}
+        for row in full.evidence
+    )
+
+
 def test_adapter_preserves_rejected_and_inconclusive_results(tmp_path: Path) -> None:
     report, _ = _variance_portfolio_report(include_nearby=False)
     h7_event_number = 0

@@ -666,25 +666,30 @@ class LocalHypothesisPortfolioRunner:
         )
         if requested_prospective:
             descriptor = candle_cache.describe()
-            report = build_prospective_scientific_research(
-                candle_cache.load(),
-                dataset_fingerprint=descriptor.dataset_fingerprint,
-                request=ProspectiveScientificRequest(
-                    selected_hypotheses=requested_prospective,
-                    policy=ProspectiveScientificPolicy(
-                        round_trip_cost_bps=request.cost_model.round_trip_bps
-                    ),
-                ),
+            candles = candle_cache.load()
+            policy = ProspectiveScientificPolicy(
+                round_trip_cost_bps=request.cost_model.round_trip_bps
             )
-            artifact = self._prospective_artifacts.save(
-                report,
+            reports = (
+                build_prospective_scientific_research(
+                    candles,
+                    dataset_fingerprint=descriptor.dataset_fingerprint,
+                    request=ProspectiveScientificRequest(
+                        selected_hypotheses=(hypothesis,),
+                        policy=policy,
+                    ),
+                )
+                for hypothesis in requested_prospective
+            )
+            artifact = self._prospective_artifacts.save_portfolio(
+                reports,
                 requested_prospective,
                 cost_model_version=request.cost_model.version,
             )
             engines.append({
                 "engine": "prospective_scientific_replay",
                 "hypothesis_ids": tuple(item.value for item in requested_prospective),
-                "application_run_id": report.report_fingerprint,
+                "application_run_id": artifact.artifact_fingerprint,
                 "artifact_fingerprint": artifact.artifact_fingerprint,
                 "artifact_uri": artifact.artifact_uri,
                 "resumed": False,
