@@ -318,14 +318,14 @@ def test_top_level_analytical_change_is_also_versioned() -> None:
 def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> None:
     registry = VersionedScientificRegistry.from_file(REGISTRY)
 
-    assert registry.schema_version == "1.0.0"
-    assert len(registry.sources) == 7
+    assert registry.schema_version == "1.1.0"
+    assert len(registry.sources) == 11
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 9
+    assert len(registry.hypotheses) == 13
     assert sum(
         item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
         for item in registry.hypotheses
-    ) == 7
+    ) == 11
     assert sum(
         item.lifecycle is HypothesisLifecycle.SHADOW
         for item in registry.hypotheses
@@ -398,8 +398,8 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
-    assert payload["sources"] == 7
-    assert payload["hypotheses"] == 9
+    assert payload["sources"] == 11
+    assert payload["hypotheses"] == 13
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

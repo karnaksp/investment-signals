@@ -1,4 +1,4 @@
-"""Cross-boundary drift tests for the checked-in H1-H9 replay contract."""
+"""Cross-boundary drift tests for the checked-in active replay contract."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
     )
 
     assert validate_contract(registry, fixture) == ()
+    assert fixture["contract_version"] == "1.1.0"
     assert tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1) == tuple(
         f"H{number}" for number in range(1, 10)
     )
@@ -37,6 +38,7 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
         item.data_requirement is ReplayDataRequirement.LIVE_ORDERBOOK
         for item in SCIENTIFIC_REPLAY_CONTRACT_V1[-2:]
     )
+    assert all(item.catalog_version == "1.0.0" for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 
 
 def test_contract_validator_detects_direction_drift() -> None:

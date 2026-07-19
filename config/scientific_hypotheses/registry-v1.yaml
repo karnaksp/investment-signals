@@ -1,4 +1,4 @@
-schema_version: "1.0.0"
+schema_version: "1.1.0"
 
 # This registry records research leads. A publication is never, by itself,
 # evidence that the effect works on MOEX. Applied hypotheses additionally need
@@ -122,6 +122,74 @@ sources:
       - Event ordering, latency, lot sizes, and session structure differ on MOEX.
       - Trade volume alone is a noisier proxy than synchronized order-flow imbalance.
     original_result: Short-interval price changes had a robust approximately linear relation with order-flow imbalance and an inverse relation with market depth.
+
+  - source_id: berkman-koch-tuttle-zhang-2012
+    title: "Paying Attention: Overnight Returns and the Hidden Cost of Buying at the Open"
+    authors: [Henk Berkman, Paul D. Koch, Laura Tuttle, Ying Jenny Zhang]
+    publication_year: 2012
+    identifier: doi:10.1017/S0022109012000270
+    url: https://doi.org/10.1017/S0022109012000270
+    primary_publication: true
+    market: United States equities
+    sample_period: Historical U.S. equity sample documented in the publication
+    sample_description: Individual stocks grouped by investor attention, valuation uncertainty, arbitrage cost, and sentiment
+    data_frequency: Overnight close-to-open and subsequent intraday returns
+    economic_mechanism: Attention-driven buying near the open can create a temporary positive price pressure that is subsequently reversed during the trading day.
+    limitations:
+      - The source identifies an attention-related U.S. effect, not a ready-made MOEX opening rule.
+      - MOEX pre-market trading, session boundaries, costs, and investor composition require a new local test.
+    original_result: Positive overnight returns, especially in high-attention stocks, tended to reverse during the following trading day.
+
+  - source_id: da-liu-schaumburg-2014
+    title: A Closer Look at the Short-Term Return Reversal
+    authors: [Zhi Da, Qianqiu Liu, Ernst Schaumburg]
+    publication_year: 2014
+    identifier: doi:10.1287/mnsc.2013.1766
+    url: https://doi.org/10.1287/mnsc.2013.1766
+    primary_publication: true
+    market: United States equities
+    sample_period: Historical U.S. equity sample documented in the publication
+    sample_description: Individual-stock returns decomposed using cash-flow news proxies and market characteristics
+    data_frequency: Short-horizon stock returns and analyst-information variables
+    economic_mechanism: Return components unrelated to fundamental news are more likely to reflect temporary liquidity pressure or sentiment and therefore reverse.
+    limitations:
+      - Analyst revisions used in the source are not available in the local candle cache.
+      - Removing only the market component is a weaker intraday proxy and must be described as a research extension.
+    original_result: Residual return components unrelated to fundamental news exhibited stronger short-term reversal than standard past returns.
+
+  - source_id: corsi-2009
+    title: A Simple Approximate Long-Memory Model of Realized Volatility
+    authors: [Fulvio Corsi]
+    publication_year: 2009
+    identifier: doi:10.1093/jjfinec/nbp001
+    url: https://doi.org/10.1093/jjfinec/nbp001
+    primary_publication: true
+    market: Multiple liquid financial markets documented in the publication
+    sample_period: Historical realized-volatility samples documented in the publication
+    sample_description: Realized volatility represented by additive components over heterogeneous time horizons
+    data_frequency: High-frequency returns aggregated to realized-volatility horizons
+    economic_mechanism: Participants operating at different horizons create a persistent cascade of short-, medium-, and long-horizon volatility components.
+    limitations:
+      - The original model forecasts volatility rather than price direction.
+      - Intraday MOEX windows, trading breaks, microstructure noise, and sparse instruments require a separately validated adaptation.
+    original_result: A parsimonious heterogeneous autoregressive specification reproduced long-memory-like volatility dynamics and delivered strong forecasts.
+
+  - source_id: darrat-rahman-zhong-2003
+    title: "Intraday Trading Volume and Return Volatility of the DJIA Stocks: A Note"
+    authors: [Ali F. Darrat, Shafiqur Rahman, Maosen Zhong]
+    publication_year: 2003
+    identifier: doi:10.1016/S0378-4266(02)00321-7
+    url: https://doi.org/10.1016/S0378-4266(02)00321-7
+    primary_publication: true
+    market: United States, Dow Jones Industrial Average constituents
+    sample_period: Historical five-minute DJIA sample documented in the publication
+    sample_description: All thirty DJIA stocks with intraday volume and return-volatility measurements
+    data_frequency: Five-minute trades, volume, and estimated return volatility
+    economic_mechanism: Sequential information arrival can create lead-lag relations between unusual trading volume and subsequent volatility.
+    limitations:
+      - The source reported heterogeneous lead-lag effects and little contemporaneous relation for most stocks.
+      - A MOEX activity warning must be allowed to fail by instrument and phase rather than assume a universal effect.
+    original_result: Significant volume-volatility lead-lag relations appeared for many, but not all, DJIA stocks.
 
 hypotheses:
   - hypothesis_id: h1-morning-low-volume-reversion
@@ -354,6 +422,138 @@ hypotheses:
       cost_model_version: "1.0.0"
       data_split_policy: 60/20/20 chronological trading days
       multiple_testing_policy: Benjamini-Hochberg within activity family at q<=0.05
+
+  - hypothesis_id: h7-relative-volume-future-activity
+    version: "2.0.0"
+    title: Аномальный относительный объём и будущая активность — причинная версия
+    origin: research_extension
+    source_ids: [graczyk-queiros-2018, darrat-rahman-zhong-2003]
+    testable_statement: Завершённое 15-минутное окно с объёмом выше 90-го процентиля собственной прошлой нормы той же фазы предшествует повышенной реализованной изменчивости и частоте сделок в следующие 30 минут относительно фазовых контролей.
+    economic_mechanism: Кластеризация поступления информации и последовательное вовлечение участников могут сохранять повышенную активность после объёмной аномалии.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [relative_volume_15m_percentile >= 0.90, completed_window_trade_count >= 30]
+    expected_direction: activity_increase
+    horizon_seconds: [900, 1800]
+    abstention_conditions: [fewer_than_40_prior_phase_observations, trading_gap, volume_unavailable, incomplete_window, fewer_than_30_trades]
+    falsification_criterion: Будущая реализованная изменчивость и частота сделок не превосходят фазовый контроль с положительной нижней 95%-границей либо знак не сохраняется в трёх из пяти последовательных блоков.
+    original_market_result: На исходных рынках внутридневная сезонность объёма менялась во времени, а связь объёма с последующей изменчивостью была неоднородной; версия заранее допускает отсутствие эффекта по отдельным инструментам.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h7-v2
+      hypothesis_id: h7-relative-volume-future-activity
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-19T09:00:00+03:00"
+      expected_direction: activity_increase
+      feature_definitions: [relative volume uses only completed 15-minute windows from prior trading days in the same phase, future volatility and trade count start strictly after the event window]
+      thresholds: {relative_volume_percentile_min: 0.90, prior_phase_observations_min: 40, completed_window_trade_count_min: 30, primary_horizon_seconds: 1800, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [900, 1800]
+      success_criterion: At least 200 matched events over 20 days with coverage>=0.10; future realized-volatility lift has a positive daily-bootstrap 95% lower bound, adjusted p<=0.05, and the sign is stable in at least 3 of 5 chronological blocks for shadow candidacy.
+      abstention_conditions: [fewer_than_40_prior_phase_observations, trading_gap, volume_unavailable, incomplete_window, fewer_than_30_trades]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days with an embargo of at least 1800 seconds
+      multiple_testing_policy: Benjamini-Hochberg within activity family at q<=0.05 for research; Holm on future primary release tests
+
+  - hypothesis_id: h10-positive-main-open-gap-reversion
+    version: "1.0.0"
+    title: Возврат положительного разрыва на открытии основной сессии
+    origin: research_extension
+    source_ids: [berkman-koch-tuttle-zhang-2012, jegadeesh-titman-1995]
+    testable_statement: Положительный разрыв между предыдущим закрытием и первой завершённой минутой основной сессии выше двух прошлых стандартных отклонений частично возвращается в следующие 30 минут чаще сопоставимых контрольных открытий.
+    economic_mechanism: Сосредоточенный спрос и внимание на открытии могут временно завысить цену; последующая ликвидность поглощает давление.
+    market_phase: main_session_open
+    trigger_conditions: [positive_main_open_gap_z >= 2.0, first_completed_main_session_minute]
+    expected_direction: reversion_to_previous_close
+    horizon_seconds: [1800, 3600]
+    abstention_conditions: [missing_previous_close, shortened_session, exchange_schedule_unknown, market_wide_positive_gap_z >= 2.0, corporate_action_suspected]
+    falsification_criterion: Возврат после издержек не превосходит сопоставимые контрольные открытия с положительной нижней 95%-границей либо эффект исчезает при исключении одного инструмента или месяца.
+    original_market_result: В исходной работе положительная ночная доходность, особенно у бумаг с высоким вниманием, часто разворачивалась в течение следующей сессии; формула основной сессии MOEX является развитием.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h10-v1
+      hypothesis_id: h10-positive-main-open-gap-reversion
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T09:00:00+03:00"
+      expected_direction: reversion_to_previous_close
+      feature_definitions: [previous close is the last valid price of the previous trading day, opening gap uses the first completed main-session minute, gap normalization uses prior trading days only]
+      thresholds: {positive_main_open_gap_z_min: 2.0, market_gap_z_abstention_min: 2.0, primary_horizon_seconds: 1800, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: main_session_open
+      horizon_seconds: [1800, 3600]
+      success_criterion: At least 200 matched events over 20 days and 5 instruments; cost-adjusted reversion lift has a positive daily-bootstrap 95% lower bound and stable sign in at least 3 of 5 blocks for shadow candidacy.
+      abstention_conditions: [missing_previous_close, shortened_session, exchange_schedule_unknown, market_wide_positive_gap_z >= 2.0, corporate_action_suspected]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days with an embargo of at least 3600 seconds
+      multiple_testing_policy: Benjamini-Hochberg within opening-reversion family at q<=0.05 for research; Holm on future primary release tests
+
+  - hypothesis_id: h11-residual-move-reversion
+    version: "1.0.0"
+    title: Возврат остаточного движения после удаления движения рынка
+    origin: research_extension
+    source_ids: [da-liu-schaumburg-2014, jegadeesh-titman-1995]
+    testable_statement: Пятиминутное остаточное движение акции выше 99-го процентиля после удаления причинно оценённой рыночной компоненты чаще разворачивается в следующие 15 минут, чем сопоставимые контрольные события.
+    economic_mechanism: Часть движения, не объяснённая общерыночным потоком, может отражать временное давление ликвидности или настроений, которое поглощают поставщики ликвидности.
+    market_phase: main_session
+    trigger_conditions: [absolute_residual_return_5m_percentile >= 0.99, past_only_market_beta_available]
+    expected_direction: reversal
+    horizon_seconds: [900, 1800]
+    abstention_conditions: [market_beta_unavailable, basket_coverage_below_80_percent, trading_gap, corporate_action_suspected, market_wide_move_same_direction]
+    falsification_criterion: Остаточный разворот после издержек не превосходит контроль либо исчезает при исключении одного инструмента, месяца или при причинной переоценке рыночной беты.
+    original_market_result: Исходная работа показала более сильный разворот у компонентов доходности, не связанных с фундаментальными новостями; удаление только рыночного движения является более слабым локальным приближением.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h11-v1
+      hypothesis_id: h11-residual-move-reversion
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T09:00:00+03:00"
+      expected_direction: reversal
+      feature_definitions: [market beta is estimated from completed prior trading days only, market basket uses a fixed eligible universe, residual return equals stock return minus past-only beta times contemporaneous basket return]
+      thresholds: {absolute_residual_return_5m_percentile_min: 0.99, beta_lookback_trading_days: 20, basket_coverage_min: 0.80, primary_horizon_seconds: 900, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: main_session
+      horizon_seconds: [900, 1800]
+      success_criterion: At least 200 matched events over 20 days and 5 instruments; cost-adjusted residual-reversal lift has a positive daily-bootstrap 95% lower bound and stable sign in at least 3 of 5 blocks for shadow candidacy.
+      abstention_conditions: [market_beta_unavailable, basket_coverage_below_80_percent, trading_gap, corporate_action_suspected, market_wide_move_same_direction]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days with an embargo of at least 1800 seconds
+      multiple_testing_policy: Benjamini-Hochberg within residual-reversion family at q<=0.05 for research; Holm on future primary release tests
+
+  - hypothesis_id: h15-multi-window-volatility-forecast
+    version: "1.0.0"
+    title: Многооконный прогноз будущей изменчивости
+    origin: research_extension
+    source_ids: [corsi-2009]
+    testable_statement: Причинная модель короткой, средней и длинной реализованной изменчивости улучшает прогноз изменчивости следующих 30 минут относительно фазовой нормы и экспоненциального среднего на будущих торговых днях.
+    economic_mechanism: Участники с разными горизонтами создают устойчивый каскад компонентов изменчивости, поэтому несколько прошлых окон содержат дополнительную информацию о ближайшем риске.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [completed_return_windows_5m_30m_120m, predicted_volatility_percentile >= 0.90]
+    expected_direction: volatility_increase
+    horizon_seconds: [1800, 3600]
+    abstention_conditions: [insufficient_120m_history, trading_gap, shortened_session, sparse_prices, model_not_fitted_on_prior_days]
+    falsification_criterion: На последовательных внеобучающих блоках модель не улучшает QLIKE и среднюю абсолютную ошибку относительно экспоненциального среднего либо предупреждение высокого риска не даёт положительного прироста к фазовому контролю.
+    original_market_result: Исходная модель показала, что компоненты реализованной изменчивости разных горизонтов дают экономное и сильное прогнозирование; внутридневная MOEX-адаптация является новой версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h15-v1
+      hypothesis_id: h15-multi-window-volatility-forecast
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T09:00:00+03:00"
+      expected_direction: volatility_increase
+      feature_definitions: [realized volatility uses completed one-minute returns in 5m 30m and 120m windows ending at observation time, model coefficients and phase normalization are fitted on prior trading days only]
+      thresholds: {forecast_percentile_min: 0.90, short_window_seconds: 300, medium_window_seconds: 1800, long_window_seconds: 7200, primary_horizon_seconds: 1800, minimum_training_events: 1000, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [1800, 3600]
+      success_criterion: Outside training blocks HAR improves QLIKE over EWMA and phase baseline, and high-risk observations have positive realized-volatility lift with a daily-bootstrap 95% lower bound above zero and 3/5 block stability for shadow candidacy.
+      abstention_conditions: [insufficient_120m_history, trading_gap, shortened_session, sparse_prices, model_not_fitted_on_prior_days]
+      cost_model_version: "1.0.0"
+      data_split_policy: expanding chronological walk-forward with an embargo of at least 3600 seconds; current cache is research-only
+      multiple_testing_policy: Benjamini-Hochberg within volatility family at q<=0.05 for research; Holm on future primary release tests
 
   - hypothesis_id: h8-best-queue-imbalance
     version: "1.0.0"

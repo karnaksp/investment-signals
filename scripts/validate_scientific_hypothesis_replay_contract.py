@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when the H1-H9 registry, replay vocabulary, and transport drift."""
+"""Fail when the active replay vocabulary and transport drift from the registry."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         "Scientific replay contract: OK "
-        f"({len(SCIENTIFIC_REPLAY_CONTRACT_V1)} hypotheses, H1-H9)"
+        f"({len(SCIENTIFIC_REPLAY_CONTRACT_V1)} active hypotheses)"
     )
     return 0
 
@@ -57,7 +57,9 @@ def validate_contract(
     fixture_rows = fixture.get("hypotheses")
     if not isinstance(fixture_rows, list):
         return ("fixture hypotheses must be an array",)
-    registry_by_id = {item.hypothesis_id: item for item in registry.hypotheses}
+    registry_by_key = {
+        (item.hypothesis_id, item.version): item for item in registry.hypotheses
+    }
     fixture_by_id = {
         str(item.get("short_id")): item
         for item in fixture_rows
@@ -67,20 +69,29 @@ def validate_contract(
     if contract_ids != ALL_HYPOTHESES:
         errors.append("transport hypothesis selection differs from domain contract")
     if set(fixture_by_id) != set(contract_ids):
-        errors.append("fixture must contain every H1-H9 definition exactly once")
-    if set(registry_by_id) != {
-        item.catalog_hypothesis_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1
-    }:
-        errors.append("scientific registry and replay contract portfolios differ")
+        errors.append("fixture must contain every active replay definition exactly once")
+    contract_registry_keys = {
+        (item.catalog_hypothesis_id, item.catalog_version)
+        for item in SCIENTIFIC_REPLAY_CONTRACT_V1
+    }
+    missing_registry_keys = contract_registry_keys - set(registry_by_key)
+    if missing_registry_keys:
+        errors.append(
+            "active replay definitions are absent from the scientific registry: "
+            f"{sorted(missing_registry_keys)}"
+        )
 
     for definition in SCIENTIFIC_REPLAY_CONTRACT_V1:
         row = fixture_by_id.get(definition.short_id)
-        catalog = registry_by_id.get(definition.catalog_hypothesis_id)
+        catalog = registry_by_key.get(
+            (definition.catalog_hypothesis_id, definition.catalog_version)
+        )
         if row is None or catalog is None:
             continue
         expected = {
             "short_id": definition.short_id,
             "catalog_hypothesis_id": definition.catalog_hypothesis_id,
+            "catalog_version": definition.catalog_version,
             "expected_direction": definition.expected_direction,
             "market_phase": definition.market_phase,
             "horizons_seconds": list(definition.horizons_seconds),
