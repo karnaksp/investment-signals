@@ -50,6 +50,7 @@ tinvest-delivery-worker = "tinvest_signal_engine.services.delivery_worker:main"
 tinvest-observation-worker = "tinvest_signal_engine.services.observation_worker:main"
 tinvest-signal-outcome-worker = "tinvest_signal_engine.services.signal_outcome_worker:main"
 tinvest-bond-convergence-emitter = "tinvest_signal_engine.services.bond_convergence_emitter:main"
+tinvest-cache-candles = "tinvest_signal_engine.services.candle_cache:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

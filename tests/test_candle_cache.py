@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+
+from tinvest_signal_engine.adapters.candle_cache import (
+    JsonCandleCacheManifest,
+    ParquetCandlePartitionRepository,
+    TInvestRestCandleHistorySource,
+)
+from tinvest_signal_engine.adapters.local_hypothesis_replay import LocalCandleCache
+from tinvest_signal_engine.application.candle_cache import BuildReusableCandleCache
+from tinvest_signal_engine.domain.candle_cache import (
+    CachedCandle,
+    CandleCacheScope,
+    CandlePartitionKey,
+)
+
+
+pytest.importorskip("duckdb")
+
+
+class _Source:
+    def __init__(self, rows: dict[str, tuple[CachedCandle, ...] | Exception]) -> None:
+        self.rows = rows
+        self.calls: list[str] = []
+
+    def fetch(self, key: CandlePartitionKey) -> tuple[CachedCandle, ...]:
+        self.calls.append(key.manifest_key)
+        result = self.rows[key.manifest_key]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _candle(ticker: str, day: date, *, close: float = 100.0) -> CachedCandle:
+    return CachedCandle(
+        ticker=ticker,
+        at=datetime(day.year, day.month, day.day, 4, 0, tzinfo=UTC),
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=100.0,
+        volume_buy=60.0,
+        volume_sell=40.0,
+    )
+
+
+def _use_case(cache_dir: Path, source: _Source) -> BuildReusableCandleCache:
+    return BuildReusableCandleCache(
+        source=source,
+        repository=ParquetCandlePartitionRepository(cache_dir),
+        manifest=JsonCandleCacheManifest(cache_dir),
+    )
+
+
+def test_cache_resume_skips_valid_partition_and_keeps_fingerprint(tmp_path: Path) -> None:
+    day = date(2026, 7, 15)
+    key = CandlePartitionKey("SBER", day)
+    source = _Source({key.manifest_key: (_candle("SBER", day),)})
+    scope = CandleCacheScope(("SBER",), day, day)
+
+    first = _use_case(tmp_path, source).execute(scope)
+    first_bytes = (tmp_path / "ticker=SBER" / "date=2026-07-15.parquet").read_bytes()
+    second = _use_case(tmp_path, source).execute(scope)
+
+    assert source.calls == ["SBER/2026-07-15"]
+    assert first.written_partitions == 1
+    assert second.written_partitions == 0
+    assert second.skipped_partitions == 1
+    assert second.inventory.dataset_fingerprint == first.inventory.dataset_fingerprint
+    assert (tmp_path / "ticker=SBER" / "date=2026-07-15.parquet").read_bytes() == first_bytes
+    compatible_cache = LocalCandleCache(tmp_path)
+    assert compatible_cache.describe().dataset_fingerprint == (
+        f"sha256:{first.inventory.dataset_fingerprint}"
+    )
+    assert len(compatible_cache.load()) == 1
+
+
+def test_corrupted_partition_is_detected_and_replaced(tmp_path: Path) -> None:
+    day = date(2026, 7, 15)
+    key = CandlePartitionKey("SBER", day)
+    target = tmp_path / "ticker=SBER" / "date=2026-07-15.parquet"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"not parquet")
+    source = _Source({key.manifest_key: (_candle("SBER", day),)})
+
+    receipt = _use_case(tmp_path, source).execute(
+        CandleCacheScope(("SBER",), day, day)
+    )
+
+    assert receipt.written_partitions == 1
+    assert not receipt.failures
+    assert ParquetCandlePartitionRepository(tmp_path).inspect(key).valid is True
+
+
+def test_manifest_distinguishes_empty_day_and_records_actual_morning_rows(
+    tmp_path: Path,
+) -> None:
+    first_day = date(2026, 7, 18)
+    second_day = date(2026, 7, 19)
+    source = _Source(
+        {
+            "SBER/2026-07-18": (_candle("SBER", first_day),),
+            "SBER/2026-07-19": (),
+        }
+    )
+
+    _use_case(tmp_path, source).execute(
+        CandleCacheScope(("SBER",), first_day, second_day)
+    )
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["quality"]["empty_partitions"] == ["SBER/2026-07-19"]
+    assert manifest["quality"]["failed_partitions"] == []
+    assert manifest["quality"]["morning_session"] == {
+        "partitions_with_rows": 1,
+        "rows_by_partition": {"SBER/2026-07-18": 1},
+        "rows_present": True,
+        "window": "07:00-09:50 Europe/Moscow",
+    }
+
+
+def test_incomplete_candle_never_replaces_a_valid_historical_partition(
+    tmp_path: Path,
+) -> None:
+    day = date(2026, 7, 15)
+    repository = ParquetCandlePartitionRepository(tmp_path)
+    key = CandlePartitionKey("SBER", day)
+    repository.replace_atomically(key, (_candle("SBER", day),))
+    target = tmp_path / "ticker=SBER" / "date=2026-07-15.parquet"
+    before = target.read_bytes()
+    incomplete = CachedCandle(
+        ticker="SBER",
+        at=datetime(2026, 7, 15, 8, 0, tzinfo=UTC),
+        open=101.0,
+        high=101.0,
+        low=101.0,
+        close=101.0,
+        volume=10.0,
+        complete=False,
+    )
+
+    with pytest.raises(ValueError, match="incomplete candle"):
+        repository.replace_atomically(key, (incomplete,))
+
+    assert target.read_bytes() == before
+
+
+def test_failed_fetch_does_not_change_existing_valid_partition_or_leak_secrets(
+    tmp_path: Path,
+) -> None:
+    day = date(2026, 7, 15)
+    repository = ParquetCandlePartitionRepository(tmp_path)
+    sber = CandlePartitionKey("SBER", day)
+    repository.replace_atomically(sber, (_candle("SBER", day),))
+    target = tmp_path / "ticker=SBER" / "date=2026-07-15.parquet"
+    before = target.read_bytes()
+    secret = "secret-token-value"
+    account = "account-123"
+    uid = "raw-instrument-uid"
+    source = _Source(
+        {
+            "GAZP/2026-07-15": RuntimeError(f"{secret} {account} {uid}"),
+        }
+    )
+
+    receipt = _use_case(tmp_path, source).execute(
+        CandleCacheScope(("SBER", "GAZP"), day, day)
+    )
+
+    assert receipt.skipped_partitions == 1
+    assert len(receipt.failures) == 1
+    assert target.read_bytes() == before
+    persisted = (
+        (tmp_path / "manifest.json").read_text(encoding="utf-8")
+        + (tmp_path / "failure-summary.json").read_text(encoding="utf-8")
+    )
+    assert secret not in persisted
+    assert account not in persisted
+    assert uid not in persisted
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["privacy"] == {
+        "account_identifiers_persisted": False,
+        "instrument_uids_persisted": False,
+        "tokens_persisted": False,
+    }
+    assert manifest["quality"]["rows_by_partition"] == {"SBER/2026-07-15": 1}
+
+
+def test_rest_source_keeps_uid_out_of_returned_candles_and_requests_full_session() -> None:
+    uid = "raw-instrument-uid"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "FindInstrument" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "instruments": [
+                        {
+                            "ticker": "SBER",
+                            "classCode": "TQBR",
+                            "uid": uid,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "candles": [
+                    {
+                        "time": "2026-07-15T04:00:00Z",
+                        "open": {"units": "100", "nano": 0},
+                        "high": {"units": "101", "nano": 0},
+                        "low": {"units": "99", "nano": 0},
+                        "close": {"units": "100", "nano": 500000000},
+                        "volume": "10",
+                        "volumeBuy": "6",
+                        "volumeSell": "4",
+                        "isComplete": True,
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    source = TInvestRestCandleHistorySource(
+        token="token-value",
+        client=client,
+        request_interval_seconds=0,
+    )
+    try:
+        candles = source.fetch(CandlePartitionKey("SBER", date(2026, 7, 15)))
+    finally:
+        client.close()
+
+    assert len(candles) == 1
+    assert candles[0].ticker == "SBER"
+    assert uid not in repr(candles)
+    candle_request = json.loads(requests[1].content)
+    assert candle_request["instrumentId"] == uid
+    assert candle_request["from"] == "2026-07-15T03:50:00Z"
+    assert candle_request["to"] == "2026-07-15T21:00:00Z"
