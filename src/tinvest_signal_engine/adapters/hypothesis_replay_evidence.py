@@ -18,6 +18,10 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.domain.hypothesis_evidence import EvidenceDecision
 from tinvest_signal_engine.domain.hypothesis_formulas import HypothesisId, default_rule
+from tinvest_signal_engine.domain.scientific_replay_contract import (
+    ReplaySourceDataState,
+    scientific_replay_definition,
+)
 
 
 _CANONICAL_TO_SHORT = {
@@ -44,6 +48,7 @@ class LocalReplayEvidenceReader:
         completion = _read_object(root / "completion.json")
         evidence_rows = _read_array(root / "evidence.json")
         summaries = _read_array(root / "summaries.json")
+        outcomes = tuple(_read_json_lines(root / "outcomes.jsonl"))
         split = _read_nullable_object(root / "split.json")
         manifest = _read_object(root / "manifest.json")
         artifact_fingerprint = _sha256_value(completion.get("artifact_fingerprint"))
@@ -84,6 +89,10 @@ class LocalReplayEvidenceReader:
                     )
                 ),
                 abstention_rates=(abstention_rate,),
+                horizons=_general_horizon_evidence(
+                    hypothesis_id,
+                    outcomes,
+                ),
                 generated_at=generated_at,
             ))
         return tuple(result)
@@ -149,6 +158,7 @@ class LocalReplayEvidenceReader:
                 abstention_rates=tuple(
                     abstention_by_test[(hypothesis_id, horizon)] for horizon in horizons
                 ),
+                horizons=_jump_horizon_evidence(hypothesis_id, evidence_rows),
                 generated_at=generated_at,
             ))
         return tuple(result)
@@ -164,6 +174,7 @@ def _aggregate(
     fallback_dataset_fingerprint: str,
     fallback_cost_model_version: str,
     abstention_rates: Sequence[float | None],
+    horizons: Sequence[Mapping[str, Any]],
     generated_at: str,
 ) -> Mapping[str, Any]:
     decisions = tuple(_decision(row.get("decision")) for row in rows)
@@ -186,8 +197,18 @@ def _aggregate(
     if len(cost_versions) != 1 or not next(iter(cost_versions), ""):
         raise ValueError("evidence must have one versioned cost model")
 
+    definition = scientific_replay_definition(hypothesis_id)
+    source_data_state = (
+        ReplaySourceDataState.INSUFFICIENT_HISTORY
+        if decision == EvidenceDecision.BLOCKED_BY_DATA.value
+        else ReplaySourceDataState.READY
+    )
     return {
         "hypothesis_id": hypothesis_id,
+        "catalog_hypothesis_id": definition.catalog_hypothesis_id,
+        "expected_direction": definition.expected_direction,
+        "market_phase": definition.market_phase,
+        "source_data_state": source_data_state.value,
         "decision": decision,
         "independent_validation": independent_validation,
         "cost_adjusted": bool(next(iter(cost_versions))),
@@ -224,7 +245,86 @@ def _aggregate(
         ),
         "maximum_period_share": _strict_period_share(rows),
         "abstention_rate": _strict_values(abstention_rates, max),
+        "horizons": tuple(horizons),
     }
+
+
+def _general_horizon_evidence(
+    hypothesis_id: str,
+    outcomes: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    definition = scientific_replay_definition(hypothesis_id)
+    relevant = [
+        row for row in outcomes
+        if str(row.get("hypothesis_id", "")).upper() == hypothesis_id
+    ]
+    result: list[Mapping[str, Any]] = []
+    for horizon in definition.horizons_seconds:
+        horizon_rows = [
+            row for row in relevant if _integer(row.get("horizon_seconds")) == horizon
+        ]
+        available = [
+            float(row["net_effect_bps"])
+            for row in horizon_rows
+            if row.get("label_available") is True
+            and isinstance(row.get("net_effect_bps"), (int, float))
+        ]
+        result.append({
+            "horizon_seconds": horizon,
+            "evidence_scope": "descriptive_only",
+            "source_data_state": (
+                ReplaySourceDataState.READY.value
+                if available
+                else ReplaySourceDataState.INSUFFICIENT_HISTORY.value
+            ),
+            "decision": None,
+            "sample_count": len(available),
+            "primary_metric_value": (
+                sum(available) / len(available) if available else None
+            ),
+        })
+    return tuple(result)
+
+
+def _jump_horizon_evidence(
+    hypothesis_id: str,
+    evidence_rows: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    definition = scientific_replay_definition(hypothesis_id)
+    by_horizon = {
+        _integer(row.get("horizon_seconds")): _mapping(
+            row.get("bundle"), "evidence.bundle"
+        )
+        for row in evidence_rows
+        if str(row.get("hypothesis", "")).upper() == hypothesis_id
+    }
+    result: list[Mapping[str, Any]] = []
+    for horizon in definition.horizons_seconds:
+        bundle = by_horizon.get(horizon)
+        if bundle is None:
+            result.append({
+                "horizon_seconds": horizon,
+                "evidence_scope": "not_evaluated",
+                "source_data_state": ReplaySourceDataState.INSUFFICIENT_HISTORY.value,
+                "decision": None,
+                "sample_count": 0,
+                "primary_metric_value": None,
+            })
+            continue
+        decision = _decision(bundle.get("decision"))
+        result.append({
+            "horizon_seconds": horizon,
+            "evidence_scope": "independent_gate",
+            "source_data_state": (
+                ReplaySourceDataState.INSUFFICIENT_HISTORY.value
+                if decision == EvidenceDecision.BLOCKED_BY_DATA.value
+                else ReplaySourceDataState.READY.value
+            ),
+            "decision": decision,
+            "sample_count": _integer(bundle.get("eligible_events")),
+            "primary_metric_value": _optional_number(bundle.get("mean_lift_bps")),
+        })
+    return tuple(result)
 
 
 def _general_formula_fingerprint(hypothesis_id: str) -> str:
@@ -335,6 +435,14 @@ def _integer(value: object) -> int:
     return result
 
 
+def _optional_number(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("evidence metric must be numeric or null")
+    return float(value)
+
+
 def _sha256_value(value: object) -> str:
     normalized = str(value)
     if len(normalized) != 71 or not normalized.startswith("sha256:"):
@@ -386,6 +494,8 @@ def _read_array(path: Path) -> tuple[Mapping[str, Any], ...]:
 
 
 def _read_json_lines(path: Path) -> Iterable[Mapping[str, Any]]:
+    if not path.is_file():
+        return
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             yield _mapping(json.loads(line), str(path))

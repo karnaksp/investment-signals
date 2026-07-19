@@ -18,6 +18,9 @@ from tinvest_signal_engine.services.hypothesis_replay_api import (
     StartReplayRequest,
     create_app,
 )
+from tinvest_signal_engine.domain.scientific_replay_contract import (
+    scientific_replay_definition,
+)
 import tinvest_signal_engine.services.hypothesis_replay_api as replay_api
 
 
@@ -58,8 +61,13 @@ class FakeReplayRunner:
 
 def _fake_evidence(hypothesis_id: str) -> Mapping[str, Any]:
     fingerprint = "sha256:" + "b" * 64
+    definition = scientific_replay_definition(hypothesis_id)
     return {
         "hypothesis_id": hypothesis_id,
+        "catalog_hypothesis_id": definition.catalog_hypothesis_id,
+        "expected_direction": definition.expected_direction,
+        "market_phase": definition.market_phase,
+        "source_data_state": "insufficient_history",
         "decision": "blocked_by_data",
         "independent_validation": True,
         "cost_adjusted": True,
@@ -81,6 +89,14 @@ def _fake_evidence(hypothesis_id: str) -> Mapping[str, Any]:
         "maximum_ticker_share": None,
         "maximum_period_share": None,
         "abstention_rate": None,
+        "horizons": tuple({
+            "horizon_seconds": horizon,
+            "evidence_scope": "not_evaluated",
+            "source_data_state": "insufficient_history",
+            "decision": "blocked_by_data",
+            "sample_count": 0,
+            "primary_metric_value": None,
+        } for horizon in definition.horizons_seconds),
     }
 
 
@@ -238,6 +254,46 @@ def test_transport_rejects_token_and_unknown_fields(tmp_path: Path) -> None:
 
     assert StartReplayRequest().cost_model.version == "research-cost-v1.0.0"
     assert StartReplayRequest().cost_model.round_trip_bps == 10.0
+
+
+def test_orderbook_catalog_hypotheses_are_explicitly_blocked_without_live_data(
+    tmp_path: Path,
+) -> None:
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "cache",
+        artifact_root=tmp_path / "artifacts",
+    )
+    runner._descriptor_cache = SimpleNamespace(  # type: ignore[assignment]
+        describe=lambda: SimpleNamespace(
+            dataset_fingerprint="sha256:" + "a" * 64,
+        )
+    )
+
+    result = runner.execute(
+        StartReplayRequest(hypothesis_ids=("H8", "H9")),
+        run_fingerprint="sha256:" + "c" * 64,
+    )
+
+    assert result["engines"] == ({
+        "engine": "live_orderbook_replay",
+        "hypothesis_ids": ("H8", "H9"),
+        "availability": "requires_live_orderbook",
+        "resumed": False,
+    },)
+    evidence = result["evidence"]
+    assert [item["hypothesis_id"] for item in evidence] == ["H8", "H9"]
+    assert all(item["decision"] == "blocked_by_data" for item in evidence)
+    assert all(
+        item["source_data_state"] == "requires_live_orderbook"
+        for item in evidence
+    )
+    assert [
+        row["horizon_seconds"] for row in evidence[1]["horizons"]
+    ] == [1, 5, 60, 300, 900]
+    assert all(
+        row["evidence_scope"] == "not_evaluated"
+        for item in evidence for row in item["horizons"]
+    )
 
 
 def test_failure_is_persisted_without_traceback(tmp_path: Path) -> None:

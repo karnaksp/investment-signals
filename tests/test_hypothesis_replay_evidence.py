@@ -61,6 +61,14 @@ def test_general_artifact_maps_canonical_registry_id_to_short_id(tmp_path: Path)
     assert row["artifact_fingerprint"] == ARTIFACT
     assert str(row["formula_fingerprint"]).startswith("sha256:")
     assert row["abstention_rate"] == 0.3
+    assert row["catalog_hypothesis_id"] == "h1-morning-low-volume-reversion"
+    assert row["expected_direction"] == "reversion_to_previous_close"
+    assert row["market_phase"] == "morning_0700_0949"
+    assert row["source_data_state"] == "insufficient_history"
+    assert [item["horizon_seconds"] for item in row["horizons"]] == [1800, 3600]
+    assert all(
+        item["evidence_scope"] == "descriptive_only" for item in row["horizons"]
+    )
 
 
 def test_jump_horizons_aggregate_fail_closed_and_conservatively(tmp_path: Path) -> None:
@@ -157,6 +165,15 @@ def test_jump_horizons_aggregate_fail_closed_and_conservatively(tmp_path: Path) 
     assert h4["primary_metric_value"] is None
     assert h4["adjusted_p_value"] is None
     assert h4["maximum_ticker_share"] is None
+    assert [item["decision"] for item in h3["horizons"]] == [
+        "passed", "passed", "rejected",
+    ]
+    assert [item["horizon_seconds"] for item in h4["horizons"]] == [
+        300, 900, 1800,
+    ]
+    assert all(
+        item["evidence_scope"] == "independent_gate" for item in h3["horizons"]
+    )
 
 
 def _bundle(

@@ -45,12 +45,19 @@ from tinvest_signal_engine.application.jump_activity_replay import (
 from tinvest_signal_engine.domain.historical_hypothesis_replay import ReplayCostModel
 from tinvest_signal_engine.domain.hypothesis_formulas import HypothesisId
 from tinvest_signal_engine.domain.jump_activity_replay import CostModel, JumpReplayPolicy
+from tinvest_signal_engine.domain.scientific_replay_contract import (
+    ReplaySourceDataState,
+    SCIENTIFIC_REPLAY_CONTRACT_V1,
+    scientific_replay_definition,
+    scientific_replay_formula_fingerprint,
+)
 
 
 JobState = Literal["queued", "running", "completed", "failed"]
-ALL_HYPOTHESES = tuple(f"H{number}" for number in range(1, 8))
+ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 GENERAL_HYPOTHESES = frozenset({"H1", "H2", "H5", "H6", "H7"})
 JUMP_HYPOTHESES = frozenset({"H3", "H4"})
+ORDERBOOK_HYPOTHESES = frozenset({"H8", "H9"})
 JOB_SCHEMA_VERSION = 1
 
 
@@ -145,7 +152,19 @@ class ReplayEvidenceResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    hypothesis_id: str = Field(pattern=r"^H[1-7]$")
+    hypothesis_id: str = Field(pattern=r"^H[1-9]$")
+    catalog_hypothesis_id: str = Field(min_length=1)
+    expected_direction: str = Field(min_length=1)
+    market_phase: str = Field(min_length=1)
+    source_data_state: Literal[
+        "ready",
+        "insufficient_history",
+        "requires_live_orderbook",
+        "stale_live_orderbook",
+        "sequence_gap",
+        "timestamp_desynchronization",
+        "unavailable",
+    ]
     decision: Literal["passed", "rejected", "inconclusive", "blocked_by_data"]
     independent_validation: bool
     cost_adjusted: bool
@@ -167,6 +186,28 @@ class ReplayEvidenceResponse(BaseModel):
     maximum_ticker_share: float | None = Field(default=None, ge=0.0, le=1.0)
     maximum_period_share: float | None = Field(default=None, ge=0.0, le=1.0)
     abstention_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    horizons: tuple["ReplayHorizonEvidenceResponse", ...]
+
+
+class ReplayHorizonEvidenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    horizon_seconds: int = Field(ge=1)
+    evidence_scope: Literal["independent_gate", "descriptive_only", "not_evaluated"]
+    source_data_state: Literal[
+        "ready",
+        "insufficient_history",
+        "requires_live_orderbook",
+        "stale_live_orderbook",
+        "sequence_gap",
+        "timestamp_desynchronization",
+        "unavailable",
+    ]
+    decision: Literal[
+        "passed", "rejected", "inconclusive", "blocked_by_data"
+    ] | None
+    sample_count: int = Field(ge=0)
+    primary_metric_value: float | None
 
 
 class ReplayRunner(Protocol):
@@ -401,7 +442,7 @@ class IdempotencyConflict(RuntimeError):
 
 
 class LocalHypothesisPortfolioRunner:
-    """Composition adapter for the existing H1-H7 application use cases."""
+    """Composition adapter for the H1-H9 scientific replay portfolio."""
 
     def __init__(
         self,
@@ -507,6 +548,25 @@ class LocalHypothesisPortfolioRunner:
                 tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
                 generated_at=generated_at,
             ))
+        requested_orderbook = tuple(
+            item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
+        )
+        if requested_orderbook:
+            engines.append({
+                "engine": "live_orderbook_replay",
+                "hypothesis_ids": requested_orderbook,
+                "availability": "requires_live_orderbook",
+                "resumed": False,
+            })
+            evidence.extend(
+                _blocked_orderbook_evidence(
+                    hypothesis_id,
+                    dataset_fingerprint=self.dataset_fingerprint(),
+                    cost_model_version=request.cost_model.version,
+                    generated_at=generated_at,
+                )
+                for hypothesis_id in requested_orderbook
+            )
         ordered = tuple(sorted(evidence, key=lambda item: str(item["hypothesis_id"])))
         if tuple(item["hypothesis_id"] for item in ordered) != request.hypothesis_ids:
             raise ValueError("replay must produce exactly one evidence row per hypothesis")
@@ -515,6 +575,55 @@ class LocalHypothesisPortfolioRunner:
             "engines": tuple(engines),
             "evidence": ordered,
         }
+
+
+def _blocked_orderbook_evidence(
+    hypothesis_id: str,
+    *,
+    dataset_fingerprint: str,
+    cost_model_version: str,
+    generated_at: str,
+) -> Mapping[str, Any]:
+    definition = scientific_replay_definition(hypothesis_id)
+    formula_fingerprint = scientific_replay_formula_fingerprint(hypothesis_id)
+    return {
+        "hypothesis_id": hypothesis_id,
+        "catalog_hypothesis_id": definition.catalog_hypothesis_id,
+        "expected_direction": definition.expected_direction,
+        "market_phase": definition.market_phase,
+        "source_data_state": ReplaySourceDataState.REQUIRES_LIVE_ORDERBOOK.value,
+        "decision": "blocked_by_data",
+        "independent_validation": False,
+        "cost_adjusted": False,
+        "sample_count": 0,
+        "trading_days": 0,
+        "generated_at": generated_at,
+        "artifact_fingerprint": formula_fingerprint,
+        "dataset_fingerprint": dataset_fingerprint,
+        "formula_fingerprint": formula_fingerprint,
+        "cost_model_version": cost_model_version,
+        "primary_metric_value": None,
+        "matched_control_lift_ci95_lower": None,
+        "matched_control_lift_ci95_upper": None,
+        "matched_controls": 0,
+        "controls_per_event": 5,
+        "adjusted_p_value": None,
+        "stable_blocks": 0,
+        "total_blocks": 0,
+        "maximum_ticker_share": None,
+        "maximum_period_share": None,
+        "abstention_rate": None,
+        "horizons": tuple({
+            "horizon_seconds": horizon,
+            "evidence_scope": "not_evaluated",
+            "source_data_state": (
+                ReplaySourceDataState.REQUIRES_LIVE_ORDERBOOK.value
+            ),
+            "decision": "blocked_by_data",
+            "sample_count": 0,
+            "primary_metric_value": None,
+        } for horizon in definition.horizons_seconds),
+    }
 
 
 def create_app(
