@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import json
 from pathlib import Path
 import ssl
@@ -20,6 +20,7 @@ from tinvest_signal_engine.domain.candle_cache import (
     CachedCandle,
     CandleCacheScope,
     CandlePartitionKey,
+    CandlePartitionState,
 )
 
 
@@ -126,6 +127,70 @@ def test_manifest_distinguishes_empty_day_and_records_actual_morning_rows(
         "rows_present": True,
         "window": "07:00-09:50 Europe/Moscow",
     }
+
+
+def test_large_inventory_releases_each_partition_before_reading_next(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partition_count = 4_500
+    rows_per_partition = 10
+    first_day = date(2025, 1, 1)
+    keys = tuple(
+        CandlePartitionKey("SBER", first_day + timedelta(days=offset))
+        for offset in range(partition_count)
+    )
+    pending_keys = iter(keys)
+    marker = tmp_path / "partition.parquet"
+    marker.write_bytes(b"present")
+
+    class TrackedRecord(dict[str, object]):
+        active = 0
+        peak = 0
+
+        def __init__(self, values: dict[str, object]) -> None:
+            super().__init__(values)
+            type(self).active += 1
+            type(self).peak = max(type(self).peak, type(self).active)
+
+        def __del__(self) -> None:
+            type(self).active -= 1
+
+    def read_partition(_path: Path) -> tuple[dict[str, object], ...]:
+        key = next(pending_keys)
+        start = datetime.combine(key.trading_day, datetime.min.time(), tzinfo=UTC)
+        return tuple(
+            TrackedRecord(
+                {
+                    "ticker": key.ticker,
+                    "at": start + timedelta(minutes=minute),
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 1.0,
+                    "volume_buy": 1.0,
+                    "volume_sell": 0.0,
+                    "complete": True,
+                }
+            )
+            for minute in range(rows_per_partition)
+        )
+
+    repository = ParquetCandlePartitionRepository(tmp_path)
+    monkeypatch.setattr(repository, "_path", lambda _key: marker)
+    monkeypatch.setattr(repository, "_read", read_partition)
+    monkeypatch.setattr(
+        repository,
+        "inspect",
+        lambda key: CandlePartitionState(key, True, rows_per_partition),
+    )
+
+    inventory = repository.inventory(keys)
+
+    assert len(inventory.rows_by_partition) == partition_count
+    assert TrackedRecord.peak <= rows_per_partition
+    assert TrackedRecord.active == 0
 
 
 def test_incomplete_candle_never_replaces_a_valid_historical_partition(

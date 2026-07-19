@@ -224,26 +224,41 @@ class ParquetCandlePartitionRepository:
         self,
         keys: tuple[CandlePartitionKey, ...],
     ) -> CandleCacheInventory:
-        all_records: list[Mapping[str, object]] = []
+        digest = sha256()
         row_counts: list[tuple[str, int]] = []
         morning_row_counts: list[tuple[str, int]] = []
-        for key in keys:
-            state = self.inspect(key)
-            if not state.valid:
+        for key in sorted(keys, key=lambda item: (item.ticker, item.trading_day)):
+            summary = self._inventory_partition(key, digest)
+            if summary is None:
                 continue
-            records = self._read(self._path(key))
-            all_records.extend(records)
-            row_counts.append((key.manifest_key, len(records)))
-            morning_rows = sum(
-                1 for record in records if _is_morning(_cached_candle(record).at)
-            )
+            row_count, morning_rows = summary
+            row_counts.append((key.manifest_key, row_count))
             if morning_rows:
                 morning_row_counts.append((key.manifest_key, morning_rows))
         return CandleCacheInventory(
-            dataset_fingerprint=_records_fingerprint(all_records),
+            dataset_fingerprint=digest.hexdigest(),
             rows_by_partition=tuple(sorted(row_counts)),
             morning_rows_by_partition=tuple(sorted(morning_row_counts)),
         )
+
+    def _inventory_partition(
+        self,
+        key: CandlePartitionKey,
+        digest: Any,
+    ) -> tuple[int, int] | None:
+        path = self._path(key)
+        if not path.is_file() or path.stat().st_size <= 0:
+            return None
+        try:
+            records = self._read(path)
+            self._validate(key, records)
+        except Exception:
+            return None
+        morning_rows = sum(
+            1 for record in records if _is_morning(_cached_candle(record).at)
+        )
+        _update_records_fingerprint(digest, records)
+        return len(records), morning_rows
 
     def _path(self, key: CandlePartitionKey) -> Path:
         return (
@@ -443,15 +458,16 @@ def _cached_candle(record: Mapping[str, object]) -> CachedCandle:
     )
 
 
-def _records_fingerprint(records: list[Mapping[str, object]]) -> str:
-    digest = sha256()
+def _update_records_fingerprint(
+    digest: Any,
+    records: tuple[Mapping[str, object], ...],
+) -> None:
     canonical = (_record(_cached_candle(item)) for item in records)
     for record in sorted(canonical, key=lambda item: (str(item["ticker"]), str(item["at"]))):
         digest.update(
             json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
         digest.update(b"\n")
-    return digest.hexdigest()
 
 
 def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
