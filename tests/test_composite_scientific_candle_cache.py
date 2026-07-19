@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+from tinvest_signal_engine.adapters.composite_scientific_candle_cache import (
+    ClickHouseScientificCandleSource,
+    CompositeScientificCandleCache,
+    VersionedHistoricalCandle,
+)
+from tinvest_signal_engine.adapters.local_hypothesis_replay import LocalCandleCache
+from tinvest_signal_engine.domain.historical_hypothesis_replay import HistoricalCandle
+
+
+UTC = timezone.utc
+
+
+class _Response:
+    def __init__(self, payload: str) -> None:
+        self._payload = payload.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+class _LiveSource:
+    def __init__(self, rows: tuple[VersionedHistoricalCandle, ...]) -> None:
+        self.rows = rows
+        self.calls: list[datetime] = []
+
+    def load_as_of(self, as_of: datetime) -> tuple[VersionedHistoricalCandle, ...]:
+        self.calls.append(as_of)
+        return self.rows
+
+
+def _candle(
+    minute: int,
+    *,
+    close: float = 100.0,
+    ticker: str = "SBER",
+    complete: bool = True,
+) -> HistoricalCandle:
+    return HistoricalCandle(
+        ticker=ticker,
+        at=datetime(2026, 7, 17, 10, minute, tzinfo=UTC),
+        open=100.0,
+        high=max(101.0, close),
+        low=min(99.0, close),
+        close=close,
+        volume=1_000.0,
+        complete=complete,
+    )
+
+
+def _write_cache(cache_dir: Path, candles: tuple[HistoricalCandle, ...]) -> None:
+    by_day: dict[tuple[str, str], list[HistoricalCandle]] = {}
+    for candle in candles:
+        key = (candle.ticker, candle.at.date().isoformat())
+        by_day.setdefault(key, []).append(candle)
+    for (ticker, day), rows in by_day.items():
+        path = cache_dir / f"ticker={ticker}" / f"date={day}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "ticker": item.ticker,
+                        "at": item.at.isoformat(),
+                        "open": item.open,
+                        "high": item.high,
+                        "low": item.low,
+                        "close": item.close,
+                        "volume": item.volume,
+                        "complete": item.complete,
+                    }
+                )
+                + "\n"
+                for item in rows
+            ),
+            encoding="utf-8",
+        )
+    days = sorted(item.at.date().isoformat() for item in candles)
+    (cache_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": "tinvest_research_candle_cache",
+                "scope": {
+                    "tickers": sorted({item.ticker for item in candles}),
+                    "from": days[0],
+                    "to": days[-1],
+                },
+                "quality": {"partition_count": len(by_day)},
+                "privacy": {
+                    "tokens_persisted": False,
+                    "account_identifiers_persisted": False,
+                    "instrument_uids_persisted": False,
+                },
+                "content_fingerprint": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _clickhouse_row(
+    *,
+    source_time: str = "2026-07-17T10:00:00Z",
+    close: str = "102",
+    version: int = 5,
+    received_at: str = "2026-07-17T10:00:01Z",
+) -> dict[str, object]:
+    return {
+        "ticker": "SBER",
+        "source_time": source_time,
+        "open_price": "100",
+        "high_price": "103",
+        "low_price": "99",
+        "close_price": close,
+        "volume": 1200,
+        "is_complete": 1,
+        "source_at": source_time,
+        "received_at": received_at,
+        "record_version": version,
+    }
+
+
+def test_clickhouse_source_queries_causal_snapshot_and_prefers_latest_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    payload = "\n".join(
+        json.dumps(row)
+        for row in (
+            _clickhouse_row(close="101", version=4),
+            _clickhouse_row(close="102", version=5),
+        )
+    )
+
+    def open_request(request, timeout: float):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _Response(payload)
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        open_request,
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret-token",
+        timeout_seconds=7.0,
+    )
+
+    rows = source.load_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
+
+    assert len(rows) == 1
+    assert rows[0].record_version == 5
+    assert rows[0].candle.close == 102.0
+    request = captured["request"]
+    query = parse_qs(urlparse(request.full_url).query)
+    assert query["database"] == ["signal_engine"]
+    assert query["param_as_of"] == ["2026-07-17T11:00:00.000000Z"]
+    sql = request.data.decode("utf-8")
+    assert "candle_at <=" in sql
+    assert "source_at <=" in sql
+    assert "received_at <=" in sql
+    assert "secret-token" not in request.full_url
+    assert "secret-token" not in sql
+    assert captured["timeout"] == 7.0
+
+
+def test_clickhouse_source_rejects_future_row_even_if_backend_returns_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.dumps(_clickhouse_row(received_at="2026-07-17T12:00:00Z"))
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        lambda request, timeout: _Response(payload),
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+    )
+
+    with pytest.raises(ValueError, match="causal cutoff"):
+        source.load_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
+
+
+def test_composite_merges_local_cache_and_live_revisions_without_future_data(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "candles"
+    old = _candle(0, close=100.0)
+    future = HistoricalCandle(
+        ticker="SBER",
+        at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=100.0,
+    )
+    _write_cache(cache_dir, (old, future))
+    latest = VersionedHistoricalCandle(_candle(0, close=102.0), 7)
+    next_minute = VersionedHistoricalCandle(_candle(1, close=101.0), 3)
+    live = _LiveSource((next_minute, latest))
+    cache = CompositeScientificCandleCache(
+        historical=LocalCandleCache(cache_dir),
+        live=live,
+        as_of=datetime(2026, 7, 17, 11, 0, tzinfo=UTC),
+    )
+
+    descriptor = cache.describe()
+    loaded = cache.load()
+
+    assert [(item.at.minute, item.close) for item in loaded] == [
+        (0, 102.0),
+        (1, 101.0),
+    ]
+    assert descriptor.tickers == ("SBER",)
+    assert descriptor.partition_count == 1
+    assert descriptor.start_day == descriptor.end_day == old.at.date()
+    assert descriptor.dataset_fingerprint.startswith("sha256:")
+    assert live.calls == [datetime(2026, 7, 17, 11, 0, tzinfo=UTC)]
+
+
+def test_composite_fingerprint_is_stable_and_contains_no_storage_credentials(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "candles"
+    _write_cache(cache_dir, (_candle(0),))
+    rows = (
+        VersionedHistoricalCandle(_candle(2), 2),
+        VersionedHistoricalCandle(_candle(1), 1),
+    )
+    as_of = datetime(2026, 7, 17, 11, 0, tzinfo=UTC)
+    first = CompositeScientificCandleCache(
+        historical=LocalCandleCache(cache_dir), live=_LiveSource(rows), as_of=as_of
+    ).describe()
+    second = CompositeScientificCandleCache(
+        historical=LocalCandleCache(cache_dir),
+        live=_LiveSource(tuple(reversed(rows))),
+        as_of=as_of,
+    ).describe()
+
+    assert first == second
+    assert "secret" not in first.dataset_fingerprint
+    assert "token" not in first.dataset_fingerprint
+
+
+def test_composite_rejects_same_version_with_different_payloads(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "candles"
+    _write_cache(cache_dir, (_candle(1),))
+    live = _LiveSource(
+        (
+            VersionedHistoricalCandle(_candle(0, close=101.0), 5),
+            VersionedHistoricalCandle(_candle(0, close=102.0), 5),
+        )
+    )
+    cache = CompositeScientificCandleCache(
+        historical=LocalCandleCache(cache_dir),
+        live=live,
+        as_of=datetime(2026, 7, 17, 11, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="conflicting candle payloads"):
+        cache.load()
