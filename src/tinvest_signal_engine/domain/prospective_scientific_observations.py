@@ -8,7 +8,7 @@ no storage, broker, or framework concerns.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 from hashlib import sha256
 import json
@@ -187,6 +187,9 @@ class ProspectiveScientificOutcome:
     outcome_id: str
     observation_id: str
     hypothesis: ScientificCandleHypothesis
+    hypothesis_version: str
+    instrument_id: str
+    trading_day: date
     target: ScientificTarget
     target_at: datetime
     result: ScientificModelOutcome
@@ -207,6 +210,8 @@ class ProspectiveScientificOutcome:
             raise ValueError("outcome_id does not match its deterministic identity")
         if self.result.observation_id != self.observation_id:
             raise ValueError("outcome result belongs to a different observation")
+        if not self.hypothesis_version.strip() or not self.instrument_id.strip():
+            raise ValueError("outcome hypothesis version and instrument are required")
         if self.result.target_at != self.target_at:
             raise ValueError("outcome result target_at differs from sealed target")
         if not self.outcome_policy_version.strip():
@@ -232,6 +237,9 @@ class ProspectiveScientificOutcome:
         expected = prospective_outcome_payload_fingerprint(
             observation_id=self.observation_id,
             hypothesis=self.hypothesis,
+            hypothesis_version=self.hypothesis_version,
+            instrument_id=self.instrument_id,
+            trading_day=self.trading_day,
             target=self.target,
             result=self.result,
             outcome_policy_version=self.outcome_policy_version,
@@ -302,6 +310,9 @@ def prospective_outcome_payload_fingerprint(
     *,
     observation_id: str,
     hypothesis: ScientificCandleHypothesis,
+    hypothesis_version: str,
+    instrument_id: str,
+    trading_day: date,
     target: ScientificTarget,
     result: ScientificModelOutcome,
     outcome_policy_version: str,
@@ -314,7 +325,9 @@ def prospective_outcome_payload_fingerprint(
     return _fingerprint(
         {
             "hypothesis": hypothesis.value,
+            "hypothesis_version": hypothesis_version,
             "input_fingerprint": input_fingerprint,
+            "instrument_id": instrument_id,
             "observation_id": observation_id,
             "outcome_policy_version": outcome_policy_version,
             "result": _outcome_result_payload(result),
@@ -323,6 +336,7 @@ def prospective_outcome_payload_fingerprint(
             "source_window_end": source_window_end.isoformat(),
             "source_window_start": source_window_start.isoformat(),
             "target": target.value,
+            "trading_day": trading_day.isoformat(),
         }
     )
 
