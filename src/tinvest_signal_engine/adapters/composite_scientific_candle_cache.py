@@ -134,13 +134,19 @@ class CompositeScientificCandleCache:
         self._historical = historical
         self._live = live
         self._as_of = _aware_utc(as_of, "as_of")
+        self._live_snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
         self._snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
         self._descriptor: CandleCacheDescriptor | None = None
 
     def describe(self) -> CandleCacheDescriptor:
-        self._seal()
-        if self._descriptor is None:  # pragma: no cover - guarded by _seal
-            raise RuntimeError("composite candle cache descriptor was not sealed")
+        if self._descriptor is None:
+            historical = self._historical.describe()
+            live = self._load_live()
+            self._descriptor = _composite_descriptor(
+                historical,
+                live,
+                as_of=self._as_of,
+            )
         return self._descriptor
 
     def load(self) -> tuple[HistoricalCandle, ...]:
@@ -155,25 +161,17 @@ class CompositeScientificCandleCache:
             for item in self._historical.load()
             if item.at.astimezone(timezone.utc) <= self._as_of
         )
-        snapshot = _deduplicate((*historical, *self._live.load_as_of(self._as_of)))
+        snapshot = _deduplicate((*historical, *self._load_live()))
         if not snapshot:
             raise ValueError("composite candle cache contains no causal candles")
-
-        candles = tuple(item.candle for item in snapshot)
-        days = tuple(item.at.astimezone(timezone.utc).date() for item in candles)
-        partitions = {
-            (item.ticker, item.at.astimezone(timezone.utc).date()) for item in candles
-        }
-        descriptor = CandleCacheDescriptor(
-            dataset_fingerprint=_snapshot_fingerprint(snapshot, self._as_of),
-            partition_count=len(partitions),
-            tickers=tuple(sorted({item.ticker for item in candles})),
-            start_day=min(days),
-            end_day=max(days),
-        )
         self._snapshot = snapshot
-        self._descriptor = descriptor
+        self.describe()
         return snapshot
+
+    def _load_live(self) -> tuple[VersionedHistoricalCandle, ...]:
+        if self._live_snapshot is None:
+            self._live_snapshot = _deduplicate(self._live.load_as_of(self._as_of))
+        return self._live_snapshot
 
 
 def _versioned_candle(
@@ -237,13 +235,29 @@ def _deduplicate(
     )
 
 
-def _snapshot_fingerprint(
-    rows: tuple[VersionedHistoricalCandle, ...],
+def _composite_descriptor(
+    historical: CandleCacheDescriptor,
+    live: tuple[VersionedHistoricalCandle, ...],
+    *,
     as_of: datetime,
-) -> str:
+) -> CandleCacheDescriptor:
+    live_days = tuple(
+        item.candle.at.astimezone(timezone.utc).date() for item in live
+    )
+    live_partitions = {
+        (item.candle.ticker, item.candle.at.astimezone(timezone.utc).date())
+        for item in live
+    }
+    known_historical_partitions = {
+        partition
+        for partition in live_partitions
+        if partition[0] in historical.tickers
+        and historical.start_day <= partition[1] <= historical.end_day
+    }
     payload = {
         "as_of": _timestamp(as_of),
-        "candles": [
+        "historical_fingerprint": historical.dataset_fingerprint,
+        "live_candles": [
             {
                 "ticker": item.candle.ticker,
                 "source_time": _timestamp(item.candle.at),
@@ -255,7 +269,7 @@ def _snapshot_fingerprint(
                 "complete": item.candle.complete,
                 "record_version": item.record_version,
             }
-            for item in rows
+            for item in live
         ],
     }
     encoded = json.dumps(
@@ -265,7 +279,19 @@ def _snapshot_fingerprint(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    return "sha256:" + sha256(encoded).hexdigest()
+    all_days = (historical.start_day, historical.end_day, *live_days)
+    return CandleCacheDescriptor(
+        dataset_fingerprint="sha256:" + sha256(encoded).hexdigest(),
+        partition_count=(
+            historical.partition_count
+            + len(live_partitions - known_historical_partitions)
+        ),
+        tickers=tuple(
+            sorted({*historical.tickers, *(item.candle.ticker for item in live)})
+        ),
+        start_day=min(all_days),
+        end_day=max(all_days),
+    )
 
 
 def _parse_timestamp(value: object, field: str) -> datetime:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -13,7 +13,10 @@ from tinvest_signal_engine.adapters.composite_scientific_candle_cache import (
     VersionedHistoricalCandle,
 )
 from tinvest_signal_engine.adapters.local_hypothesis_replay import LocalCandleCache
-from tinvest_signal_engine.domain.historical_hypothesis_replay import HistoricalCandle
+from tinvest_signal_engine.domain.historical_hypothesis_replay import (
+    CandleCacheDescriptor,
+    HistoricalCandle,
+)
 
 
 UTC = timezone.utc
@@ -41,6 +44,24 @@ class _LiveSource:
     def load_as_of(self, as_of: datetime) -> tuple[VersionedHistoricalCandle, ...]:
         self.calls.append(as_of)
         return self.rows
+
+
+class _DescriptorOnlyHistory:
+    def __init__(self) -> None:
+        self.load_calls = 0
+
+    def describe(self) -> CandleCacheDescriptor:
+        return CandleCacheDescriptor(
+            dataset_fingerprint="sha256:" + "a" * 64,
+            partition_count=6_000,
+            tickers=("SBER",),
+            start_day=date(2025, 11, 20),
+            end_day=date(2026, 7, 17),
+        )
+
+    def load(self) -> tuple[HistoricalCandle, ...]:
+        self.load_calls += 1
+        raise AssertionError("describe must not load the historical dataset")
 
 
 def _candle(
@@ -260,6 +281,23 @@ def test_composite_fingerprint_is_stable_and_contains_no_storage_credentials(
     assert first == second
     assert "secret" not in first.dataset_fingerprint
     assert "token" not in first.dataset_fingerprint
+
+
+def test_composite_descriptor_does_not_scan_historical_candles() -> None:
+    historical = _DescriptorOnlyHistory()
+    live = _LiveSource(())
+    cache = CompositeScientificCandleCache(
+        historical=historical,
+        live=live,
+        as_of=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+    )
+
+    descriptor = cache.describe()
+
+    assert descriptor.partition_count == 6_000
+    assert descriptor.tickers == ("SBER",)
+    assert historical.load_calls == 0
+    assert live.calls == [datetime(2026, 7, 19, 12, 0, tzinfo=UTC)]
 
 
 def test_composite_rejects_same_version_with_different_payloads(
