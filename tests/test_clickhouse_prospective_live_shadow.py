@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -14,6 +15,7 @@ from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
 )
 from tinvest_signal_engine.adapters.clickhouse_prospective_scientific_observations import (
     ClickHouseProspectiveLiveShadowStore,
+    _live_observation_from_row,
     _live_observation_row,
     _live_outcome_from_row,
     _live_outcome_row,
@@ -176,6 +178,22 @@ def test_live_clickhouse_rows_round_trip_new_schema_columns() -> None:
     assert outcome_row["evidence_fingerprint"] == SHA_A
     assert "values" in json.loads(str(outcome_row["measurements_json"]))
     assert _live_outcome_from_row(outcome_row) == outcome
+
+
+def test_live_clickhouse_round_trip_preserves_integer_zero_fingerprint() -> None:
+    store = InMemoryProspectiveLiveShadowStore()
+    RecordProspectivePortfolioSnapshot(
+        store=store,
+        policy=PRODUCTION_LIVE_POLICY,
+    ).execute(replace(_snapshot(), har=HarFeatureInput(0, 0, 0, None)))
+    observation = next(
+        item
+        for item in store.observations()
+        if item.feature.target.value == "future_realized_variance"
+    )
+    row = _live_observation_row(observation)
+
+    assert _live_observation_from_row(row) == observation
 
 
 def test_live_clickhouse_store_persists_and_reads_immutable_records(

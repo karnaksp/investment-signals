@@ -856,7 +856,7 @@ def _live_observation_from_row(
             MetricValue(
                 name=str(raw_forecast["name"]),
                 unit=MetricUnit(str(raw_forecast["unit"])),
-                value=float(raw_forecast["value"]),
+                value=_metric_number(raw_forecast["value"]),
             )
             if raw_forecast is not None
             else None
@@ -865,7 +865,7 @@ def _live_observation_from_row(
             MetricValue(
                 name=str(item["name"]),
                 unit=MetricUnit(str(item["unit"])),
-                value=float(item["value"]),
+                value=_metric_number(item["value"]),
             )
             for item in raw_values
             if isinstance(item, dict)
@@ -900,7 +900,7 @@ def _live_outcome_from_row(row: Mapping[str, object]) -> ProspectiveLiveOutcome:
             MetricValue(
                 name=str(item["name"]),
                 unit=MetricUnit(str(item["unit"])),
-                value=float(item["value"]),
+                value=_metric_number(item["value"]),
             )
             for item in raw_measurements
             if isinstance(item, dict)
@@ -1113,6 +1113,13 @@ def _boolean(value: object) -> bool:
     if normalized in {"0", "false"}:
         return False
     raise ValueError(f"invalid ClickHouse boolean: {value!r}")
+
+
+def _metric_number(value: object) -> float | int:
+    """Preserve the JSON numeric representation used by sealed fingerprints."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"invalid ClickHouse metric number: {value!r}")
+    return value
 
 
 def _json(value: object) -> str:
