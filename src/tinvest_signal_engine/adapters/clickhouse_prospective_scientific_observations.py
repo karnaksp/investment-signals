@@ -456,7 +456,11 @@ class ClickHouseProspectiveLiveShadowStore(ClickHouseProspectiveScientificStore)
         self._live_instrument_ids = normalized
 
     def _live_parameters(self) -> dict[str, str]:
-        return {"instrument_ids": json.dumps(self._live_instrument_ids)}
+        return {
+            "instrument_ids": _clickhouse_string_array_parameter(
+                self._live_instrument_ids
+            )
+        }
 
     def persist_observation(
         self, observation: ProspectiveLiveObservation
@@ -1130,3 +1134,17 @@ def _json_each_row(payload: bytes) -> tuple[Mapping[str, object], ...]:
             raise ValueError("ClickHouse JSONEachRow response must contain objects")
         rows.append(row)
     return tuple(rows)
+
+
+def _clickhouse_string_array_parameter(values: tuple[str, ...]) -> str:
+    """Encode a typed ``Array(String)`` HTTP query parameter.
+
+    ClickHouse 25.3 expects SQL literal syntax here rather than JSON syntax.
+    Values remain typed request parameters and are never interpolated into SQL.
+    """
+    if not values:
+        raise ValueError("ClickHouse string array parameter must not be empty")
+    return "[" + ",".join(
+        "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        for value in values
+    ) + "]"

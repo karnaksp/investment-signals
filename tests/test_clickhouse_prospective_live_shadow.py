@@ -266,7 +266,7 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
     assert "max_execution_time = 30" in sql
     assert "timeout_before_checking_execution_speed = 0" in sql
     assert parameters["lookback_start"] < parameters["as_of"]
-    assert json.loads(parameters["instrument_ids"]) == ["SBER_TQBR"]
+    assert parameters["instrument_ids"] == "['SBER_TQBR']"
     store = InMemoryProspectiveLiveShadowStore()
     result = RecordProspectivePortfolioSnapshot(
         store=store,

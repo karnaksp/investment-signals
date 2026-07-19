@@ -13,6 +13,7 @@ from statistics import median
 from typing import Mapping, Protocol, Sequence
 
 from tinvest_signal_engine.adapters.clickhouse_prospective_scientific_observations import (
+    _clickhouse_string_array_parameter,
     _json_each_row,
 )
 from tinvest_signal_engine.application.prospective_live_shadow import (
@@ -241,7 +242,9 @@ def _load_candles(
         parameters["instrument_id"] = instrument_id
         sql = _OUTCOME_CANDLES_SQL
     else:
-        parameters["instrument_ids"] = json.dumps(instrument_ids)
+        parameters["instrument_ids"] = _clickhouse_string_array_parameter(
+            instrument_ids
+        )
         sql = _SNAPSHOT_CANDLES_SQL
     payload = client._request(
         sql,
