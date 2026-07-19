@@ -83,6 +83,17 @@ _DEFINITIONS = {
 }
 
 
+INTERMEDIATE_SCIENTIFIC_CANDLE_EVIDENCE_POLICY = EvidenceGatePolicy(
+    minimum_trading_days=20,
+    minimum_eligible_events=200,
+    controls_per_event=5,
+    false_discovery_rate=0.05,
+    required_positive_stability_blocks=3,
+    maximum_instrument_share=0.40,
+    minimum_coverage=0.10,
+)
+
+
 class ScientificCandleReplayArtifactAdapter:
     """Map one report to immutable, reproducible evidence JSON."""
 
@@ -90,7 +101,9 @@ class ScientificCandleReplayArtifactAdapter:
         self,
         root: str | Path,
         *,
-        evidence_policy: EvidenceGatePolicy = EvidenceGatePolicy(),
+        evidence_policy: EvidenceGatePolicy = (
+            INTERMEDIATE_SCIENTIFIC_CANDLE_EVIDENCE_POLICY
+        ),
     ) -> None:
         self._root = Path(root)
         self._evidence_policy = evidence_policy

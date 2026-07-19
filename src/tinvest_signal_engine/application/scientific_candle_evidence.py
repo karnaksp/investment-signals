@@ -219,6 +219,7 @@ class AssessScientificCandleHoldoutEvidence:
                 groups=matched.groups,
                 expected_eligible_events=len(matched.groups),
                 unmatched_event_ids=(),
+                total_available_observations=len(holdout),
             ),
             coverage,
         )

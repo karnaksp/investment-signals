@@ -114,6 +114,7 @@ class EvidenceRequest:
     groups: tuple[MatchedControlGroup, ...]
     expected_eligible_events: int
     unmatched_event_ids: tuple[str, ...] = ()
+    total_available_observations: int | None = None
 
     def __post_init__(self) -> None:
         if not self.hypothesis_id.strip() or not self.hypothesis_version.strip():
@@ -122,6 +123,16 @@ class EvidenceRequest:
             raise ValueError("dataset_fingerprint must not be empty")
         if self.expected_eligible_events < 0:
             raise ValueError("expected_eligible_events must not be negative")
+        if (
+            self.total_available_observations is not None
+            and self.total_available_observations <= 0
+        ):
+            raise ValueError("total_available_observations must be positive")
+        if (
+            self.total_available_observations is not None
+            and self.expected_eligible_events > self.total_available_observations
+        ):
+            raise ValueError("eligible events cannot exceed available observations")
         event_ids = tuple(group.event.point_id for group in self.groups)
         if len(event_ids) != len(set(event_ids)):
             raise ValueError("matched event ids must be unique")
@@ -143,6 +154,7 @@ class EvidenceGatePolicy:
     false_discovery_rate: float = 0.05
     required_positive_stability_blocks: int = 4
     maximum_instrument_share: float = 0.50
+    minimum_coverage: float = 0.10
 
     def __post_init__(self) -> None:
         if self.minimum_trading_days <= 0 or self.minimum_eligible_events <= 0:
@@ -153,6 +165,8 @@ class EvidenceGatePolicy:
             raise ValueError("false_discovery_rate must be between zero and one")
         if not 0.0 < self.maximum_instrument_share < 1.0:
             raise ValueError("maximum_instrument_share must be between zero and one")
+        if not 0.0 < self.minimum_coverage <= 1.0:
+            raise ValueError("minimum_coverage must be in (0, 1]")
 
 
 class AssessEvidencePortfolio:
@@ -201,6 +215,12 @@ class AssessEvidencePortfolio:
         reasons: list[str] = []
         if request.expected_eligible_events < self._policy.minimum_eligible_events:
             reasons.append("minimum_eligible_events_not_met")
+        if (
+            request.total_available_observations is not None
+            and request.expected_eligible_events / request.total_available_observations
+            < self._policy.minimum_coverage
+        ):
+            reasons.append("minimum_coverage_not_met")
         if len(trading_days) < self._policy.minimum_trading_days:
             reasons.append("minimum_trading_days_not_met")
         if request.unmatched_event_ids or len(groups) != request.expected_eligible_events:

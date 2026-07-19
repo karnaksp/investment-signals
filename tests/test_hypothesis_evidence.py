@@ -358,6 +358,20 @@ def test_insufficient_data_is_retained_as_blocked_bundle() -> None:
     assert bundle.raw_p_value is None
 
 
+def test_low_coverage_blocks_an_otherwise_positive_result() -> None:
+    request = replace(
+        _request("h-low-coverage", [5.0] * 30),
+        total_available_observations=3_001,
+    )
+
+    (bundle,) = AssessEvidencePortfolio(_fast_policy()).execute((request,))
+
+    assert bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
+    assert bundle.reason_codes == ("minimum_coverage_not_met",)
+    assert bundle.eligible_events == 300
+    assert bundle.raw_p_value is None
+
+
 def test_incomplete_controls_and_mixed_cost_versions_block_the_gate() -> None:
     request = _request("h-costs", [5.0] * 30)
     groups = list(request.groups)

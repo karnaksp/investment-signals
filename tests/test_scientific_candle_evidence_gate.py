@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from tinvest_signal_engine.adapters.scientific_candle_replay import (
+    INTERMEDIATE_SCIENTIFIC_CANDLE_EVIDENCE_POLICY,
     ScientificCandleReplayArtifactAdapter,
 )
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
@@ -25,6 +26,17 @@ from tinvest_signal_engine.domain.scientific_candle_models import (
 UTC = timezone.utc
 START = date(2026, 1, 1)
 TICKERS = ("SBER", "GAZP")
+
+
+def test_intermediate_policy_matches_preregistered_product_gate() -> None:
+    policy = INTERMEDIATE_SCIENTIFIC_CANDLE_EVIDENCE_POLICY
+
+    assert policy.minimum_trading_days == 20
+    assert policy.minimum_eligible_events == 200
+    assert policy.controls_per_event == 5
+    assert policy.minimum_coverage == 0.10
+    assert policy.required_positive_stability_blocks == 3
+    assert policy.maximum_instrument_share == 0.40
 
 
 def test_real_shaped_h15_and_h7_use_causal_common_support(
