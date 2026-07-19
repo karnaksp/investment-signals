@@ -12,6 +12,9 @@ from statistics import fmean, median
 from typing import Protocol, Sequence
 from zoneinfo import ZoneInfo
 
+from tinvest_signal_engine.application.historical_hypothesis_replay import (
+    DEFAULT_LIQUID_UNIVERSE,
+)
 from tinvest_signal_engine.domain.historical_hypothesis_replay import (
     CandleCacheDescriptor,
     HistoricalCandle,
@@ -56,7 +59,7 @@ class ScientificCandleResearchRequest:
     selected_hypotheses: tuple[ScientificCandleHypothesis, ...] = tuple(
         ScientificCandleHypothesis
     )
-    market_universe: tuple[str, ...] = ()
+    market_universe: tuple[str, ...] = DEFAULT_LIQUID_UNIVERSE
     policy: ScientificCandlePolicy = ScientificCandlePolicy()
 
     def __post_init__(self) -> None:
@@ -150,7 +153,7 @@ def build_scientific_candle_model_research(
             _residual_reversal_rows(
                 by_ticker,
                 policy,
-                request.market_universe or tuple(sorted(by_ticker)),
+                request.market_universe,
             )
         )
 
@@ -244,17 +247,26 @@ class _WindowReturn:
     rows: tuple[HistoricalCandle, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _ResidualObservation:
+    window: _WindowReturn
+    market_return_bps: float
+    basket_coverage: float
+
+
 def _residual_reversal_rows(
     by_ticker: dict[str, tuple[HistoricalCandle, ...]],
     policy: ScientificCandlePolicy,
     market_universe: tuple[str, ...],
 ) -> list[tuple[CausalFeatureVector, ScientificModelOutcome]]:
+    if not market_universe:
+        raise ValueError("H11 requires a fixed non-empty market universe")
     returns_by_time: defaultdict[datetime, list[_WindowReturn]] = defaultdict(list)
     observed_candles = {
         ticker: {_observed_at(candle): candle for candle in rows}
         for ticker, rows in by_ticker.items()
     }
-    universe = set(market_universe)
+    universe = frozenset(market_universe)
     for ticker, rows in by_ticker.items():
         for index in range(len(rows)):
             observed_at = _observed_at(rows[index])
@@ -276,27 +288,95 @@ def _residual_reversal_rows(
                 )
             )
 
-    result: list[tuple[CausalFeatureVector, ScientificModelOutcome]] = []
+    observations_by_ticker: defaultdict[str, list[_ResidualObservation]] = defaultdict(
+        list
+    )
     for observed_at in sorted(returns_by_time):
-        items = returns_by_time[observed_at]
+        items = tuple(returns_by_time[observed_at])
         market_items = tuple(item for item in items if item.ticker in universe)
         market_return = (
             fmean(item.return_bps for item in market_items) if market_items else 0.0
         )
+        coverage = len({item.ticker for item in market_items}) / len(universe)
         for item in items:
+            observations_by_ticker[item.ticker].append(
+                _ResidualObservation(
+                    window=item,
+                    market_return_bps=market_return,
+                    basket_coverage=coverage,
+                )
+            )
+
+    trading_days = tuple(
+        sorted(
+            {
+                item.window.trading_day
+                for observations in observations_by_ticker.values()
+                for item in observations
+            }
+        )
+    )
+    result: list[tuple[CausalFeatureVector, ScientificModelOutcome]] = []
+    for ticker in sorted(observations_by_ticker):
+        ticker_observations = tuple(observations_by_ticker[ticker])
+        for item in ticker_observations:
+            prior_days = tuple(
+                day for day in trading_days if day < item.window.trading_day
+            )[-policy.residual_beta_lookback_days :]
+            prior_day_set = frozenset(prior_days)
+            history = tuple(
+                candidate
+                for candidate in ticker_observations
+                if candidate.window.trading_day in prior_day_set
+                and candidate.basket_coverage >= policy.residual_basket_coverage_min
+            )
+            history_days = frozenset(
+                candidate.window.trading_day for candidate in history
+            )
+            beta = (
+                _causal_market_beta(history)
+                if len(prior_days) == policy.residual_beta_lookback_days
+                and history_days == prior_day_set
+                else None
+            )
+            beta_observed_until = (
+                max(candidate.window.observed_at for candidate in history)
+                if beta is not None
+                else None
+            )
+            residual_history = (
+                tuple(
+                    abs(
+                        candidate.window.return_bps - beta * candidate.market_return_bps
+                    )
+                    for candidate in history
+                )
+                if beta is not None
+                else ()
+            )
+            market_history = tuple(
+                abs(candidate.market_return_bps) for candidate in history
+            )
             feature = residual_reversal_feature(
-                ticker=item.ticker,
-                trading_day=item.trading_day,
-                observed_at=item.observed_at,
-                instrument_return_bps=item.return_bps,
-                market_return_bps=market_return,
-                market_members=len(market_items),
+                ticker=item.window.ticker,
+                trading_day=item.window.trading_day,
+                observed_at=item.window.observed_at,
+                instrument_return_bps=item.window.return_bps,
+                market_return_bps=item.market_return_bps,
+                market_beta=beta,
+                beta_observed_until=beta_observed_until,
+                beta_history_days=len(history_days),
+                basket_coverage=item.basket_coverage,
+                absolute_residual_history=residual_history,
+                absolute_market_return_history=market_history,
                 policy=policy,
             )
-            target_at = observed_at + timedelta(seconds=feature.horizon_seconds)
-            target = observed_candles[item.ticker].get(target_at)
+            target_at = item.window.observed_at + timedelta(
+                seconds=feature.horizon_seconds
+            )
+            target = observed_candles[item.window.ticker].get(target_at)
             forward = (
-                (target.close / item.anchor_price - 1.0) * 10_000.0
+                (target.close / item.window.anchor_price - 1.0) * 10_000.0
                 if target is not None
                 else None
             )
@@ -312,6 +392,24 @@ def _residual_reversal_rows(
                 )
             )
     return result
+
+
+def _causal_market_beta(history: Sequence[_ResidualObservation]) -> float | None:
+    if len(history) < 2:
+        return None
+    market_mean = fmean(item.market_return_bps for item in history)
+    instrument_mean = fmean(item.window.return_bps for item in history)
+    market_variance = sum(
+        (item.market_return_bps - market_mean) ** 2 for item in history
+    )
+    if market_variance <= 1e-12:
+        return None
+    covariance = sum(
+        (item.market_return_bps - market_mean)
+        * (item.window.return_bps - instrument_mean)
+        for item in history
+    )
+    return covariance / market_variance
 
 
 @dataclass(frozen=True, slots=True)

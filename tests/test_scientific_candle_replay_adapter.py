@@ -36,7 +36,6 @@ HOLDOUT_DAY = date(2026, 1, 9)
 def _report() -> ScientificCandleResearchReport:
     policy = ScientificCandlePolicy(
         opening_gap_min_bps=5.0,
-        residual_move_min_bps=5.0,
         activity_history_days=20,
         round_trip_cost_bps=10.0,
     )
@@ -63,7 +62,12 @@ def _report() -> ScientificCandleResearchReport:
         observed_at=observed_at,
         instrument_return_bps=50.0,
         market_return_bps=0.0,
-        market_members=5,
+        market_beta=1.0,
+        beta_observed_until=datetime(2026, 1, 8, 15, 0, tzinfo=UTC),
+        beta_history_days=20,
+        basket_coverage=1.0,
+        absolute_residual_history=tuple(float(item) for item in range(1, 21)),
+        absolute_market_return_history=tuple(float(item) for item in range(1, 21)),
         policy=policy,
     )
     h15 = har_volatility_feature(

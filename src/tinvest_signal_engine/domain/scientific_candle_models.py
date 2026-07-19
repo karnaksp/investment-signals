@@ -39,6 +39,10 @@ class AbstentionReason(str, Enum):
     CONDITIONS_NOT_MET = "conditions_not_met"
     INSUFFICIENT_HISTORY = "insufficient_history"
     INSUFFICIENT_MARKET_MEMBERS = "insufficient_market_members"
+    MARKET_BETA_UNAVAILABLE = "market_beta_unavailable"
+    BASKET_COVERAGE_BELOW_MINIMUM = "basket_coverage_below_minimum"
+    CORPORATE_ACTION_SUSPECTED = "corporate_action_suspected"
+    MARKET_WIDE_MOVE_SAME_DIRECTION = "market_wide_move_same_direction"
     NON_POSITIVE_OPENING_GAP = "non_positive_opening_gap"
     DIRECTION_UNAVAILABLE = "direction_unavailable"
     NON_CONTIGUOUS_WINDOW = "non_contiguous_window"
@@ -53,9 +57,10 @@ class ScientificCandlePolicy:
     opening_gap_min_bps: float = 20.0
     opening_gap_horizon_seconds: int = 1800
     residual_window_minutes: int = 5
-    residual_move_min_bps: float = 20.0
     residual_horizon_seconds: int = 900
-    minimum_market_members: int = 5
+    residual_beta_lookback_days: int = 20
+    residual_basket_coverage_min: float = 0.80
+    residual_percentile_min: float = 0.99
     har_windows_minutes: tuple[int, int, int] = (5, 30, 120)
     har_horizon_seconds: int = 1800
     har_minimum_training_points: int = 30
@@ -74,9 +79,8 @@ class ScientificCandlePolicy:
             self.opening_gap_min_bps,
             self.opening_gap_horizon_seconds,
             self.residual_window_minutes,
-            self.residual_move_min_bps,
             self.residual_horizon_seconds,
-            self.minimum_market_members,
+            self.residual_beta_lookback_days,
             *self.har_windows_minutes,
             self.har_horizon_seconds,
             self.har_minimum_training_points,
@@ -95,6 +99,10 @@ class ScientificCandlePolicy:
             raise ValueError("HAR requires three unique windows")
         if not 0.0 < self.activity_volume_percentile < 1.0:
             raise ValueError("activity_volume_percentile must be between zero and one")
+        if not 0.0 < self.residual_basket_coverage_min <= 1.0:
+            raise ValueError("residual_basket_coverage_min must be in (0, 1]")
+        if not 0.0 < self.residual_percentile_min < 1.0:
+            raise ValueError("residual_percentile_min must be between zero and one")
         if self.har_ridge_penalty < 0.0 or self.round_trip_cost_bps < 0.0:
             raise ValueError("ridge penalty and costs must be non-negative")
 
@@ -325,21 +333,87 @@ def residual_reversal_feature(
     observed_at: datetime,
     instrument_return_bps: float,
     market_return_bps: float,
-    market_members: int,
+    market_beta: float | None,
+    beta_observed_until: datetime | None,
+    beta_history_days: int,
+    basket_coverage: float,
+    absolute_residual_history: Iterable[float],
+    absolute_market_return_history: Iterable[float],
+    trading_gap: bool = False,
+    corporate_action_suspected: bool = False,
     policy: ScientificCandlePolicy,
 ) -> CausalFeatureVector:
-    residual_bps = instrument_return_bps - market_return_bps
-    if market_members < policy.minimum_market_members:
+    residual_history = tuple(absolute_residual_history)
+    market_history = tuple(absolute_market_return_history)
+    if not 0.0 <= basket_coverage <= 1.0:
+        raise ValueError("basket_coverage must be between zero and one")
+    if any(value < 0.0 or not isfinite(value) for value in residual_history):
+        raise ValueError("absolute residual history must be finite and non-negative")
+    if any(value < 0.0 or not isfinite(value) for value in market_history):
+        raise ValueError("absolute market history must be finite and non-negative")
+    if market_beta is not None and not isfinite(market_beta):
+        raise ValueError("market_beta must be finite")
+    if beta_observed_until is not None:
+        _require_aware(beta_observed_until, "beta_observed_until")
+        if beta_observed_until >= observed_at:
+            raise ValueError("market beta must use completed prior trading days only")
+
+    resolved_beta = market_beta or 0.0
+    residual_bps = instrument_return_bps - resolved_beta * market_return_bps
+    residual_percentile = (
+        sum(value <= abs(residual_bps) for value in residual_history)
+        / len(residual_history)
+        if residual_history
+        else 0.0
+    )
+    market_percentile = (
+        sum(value <= abs(market_return_bps) for value in market_history)
+        / len(market_history)
+        if market_history
+        else 0.0
+    )
+    same_market_direction = (
+        instrument_return_bps != 0.0
+        and market_return_bps != 0.0
+        and (instrument_return_bps > 0.0) == (market_return_bps > 0.0)
+    )
+    if trading_gap:
         decision, reason = (
             FeatureDecision.ABSTAIN,
-            AbstentionReason.INSUFFICIENT_MARKET_MEMBERS,
+            AbstentionReason.NON_CONTIGUOUS_WINDOW,
+        )
+    elif basket_coverage < policy.residual_basket_coverage_min:
+        decision, reason = (
+            FeatureDecision.ABSTAIN,
+            AbstentionReason.BASKET_COVERAGE_BELOW_MINIMUM,
+        )
+    elif corporate_action_suspected:
+        decision, reason = (
+            FeatureDecision.ABSTAIN,
+            AbstentionReason.CORPORATE_ACTION_SUSPECTED,
+        )
+    elif (
+        market_beta is None
+        or beta_observed_until is None
+        or beta_history_days < policy.residual_beta_lookback_days
+        or not residual_history
+        or not market_history
+    ):
+        decision, reason = (
+            FeatureDecision.ABSTAIN,
+            AbstentionReason.MARKET_BETA_UNAVAILABLE,
+        )
+    elif same_market_direction and market_percentile >= policy.residual_percentile_min:
+        decision, reason = (
+            FeatureDecision.ABSTAIN,
+            AbstentionReason.MARKET_WIDE_MOVE_SAME_DIRECTION,
         )
     elif residual_bps == 0.0:
         decision, reason = (
             FeatureDecision.ABSTAIN,
             AbstentionReason.DIRECTION_UNAVAILABLE,
         )
-    elif abs(residual_bps) < policy.residual_move_min_bps:
+    elif residual_percentile < policy.residual_percentile_min:
         decision, reason = (
             FeatureDecision.NOT_MATCHED,
             AbstentionReason.CONDITIONS_NOT_MET,
@@ -353,6 +427,7 @@ def residual_reversal_feature(
         ticker=ticker,
         trading_day=trading_day,
         observed_at=observed_at,
+        model_trained_until=beta_observed_until,
         horizon_seconds=policy.residual_horizon_seconds,
         target=ScientificTarget.DIRECTIONAL_RETURN_BPS,
         decision=decision,
@@ -362,8 +437,12 @@ def residual_reversal_feature(
         feature_values=(
             ("instrument_return_bps", instrument_return_bps),
             ("market_return_bps", market_return_bps),
+            ("market_beta", resolved_beta),
             ("market_residual_bps", residual_bps),
-            ("market_members", float(market_members)),
+            ("market_beta_history_days", float(beta_history_days)),
+            ("basket_coverage", basket_coverage),
+            ("absolute_residual_percentile", residual_percentile),
+            ("absolute_market_return_percentile", market_percentile),
         ),
     )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
+from math import exp
 
 import pytest
 
@@ -32,13 +33,12 @@ from tinvest_signal_engine.domain.scientific_candle_models import (
 UTC = timezone.utc
 START_DAY = date(2026, 1, 5)
 TICKERS = ("SBER", "GAZP", "LKOH", "ROSN", "NVTK", "MOEX")
+H11_BASKET = ("GAZP", "LKOH", "ROSN", "NVTK", "MOEX")
 
 
 def _policy() -> ScientificCandlePolicy:
     return ScientificCandlePolicy(
         opening_gap_min_bps=5.0,
-        residual_move_min_bps=0.1,
-        minimum_market_members=5,
         har_minimum_training_points=20,
         activity_history_days=5,
         activity_volume_percentile=0.80,
@@ -85,6 +85,42 @@ def _candles(days: int = 15) -> tuple[HistoricalCandle, ...]:
                 )
                 last = close
             previous[ticker] = last
+    return tuple(rows)
+
+
+def _h11_candles(days: int = 22) -> tuple[HistoricalCandle, ...]:
+    rows: list[HistoricalCandle] = []
+    market_moves = (-8.0, -4.0, 4.0, 8.0)
+    for day_index in range(days):
+        for ticker in ("SBER", *H11_BASKET):
+            price = 100.0
+            for minute_index in range(31):
+                bucket = minute_index // 5
+                market_move_bps = market_moves[(day_index + bucket) % 4]
+                if ticker == "SBER":
+                    idiosyncratic_bps = (
+                        100.0
+                        if day_index == days - 1 and bucket == 0
+                        else (1.0 if day_index % 2 else -1.0)
+                    )
+                    minute_return_bps = (
+                        2.0 * market_move_bps + idiosyncratic_bps
+                    ) / 5.0
+                else:
+                    minute_return_bps = market_move_bps / 5.0
+                close = price * exp(minute_return_bps / 10_000.0)
+                rows.append(
+                    HistoricalCandle(
+                        ticker=ticker,
+                        at=_at(day_index) + timedelta(minutes=minute_index),
+                        open=price,
+                        high=max(price, close) + 0.01,
+                        low=min(price, close) - 0.01,
+                        close=close,
+                        volume=100.0,
+                    )
+                )
+                price = close
     return tuple(rows)
 
 
@@ -143,7 +179,12 @@ def test_h11_removes_market_move_before_choosing_reversal() -> None:
         observed_at=_at(0, 7, 5),
         instrument_return_bps=35.0,
         market_return_bps=10.0,
-        market_members=6,
+        market_beta=1.0,
+        beta_observed_until=_at(0, 7, 5) - timedelta(days=1),
+        beta_history_days=20,
+        basket_coverage=1.0,
+        absolute_residual_history=tuple(float(item) for item in range(1, 21)),
+        absolute_market_return_history=tuple(float(item) for item in range(1, 21)),
         policy=_policy(),
     )
     assert feature.value("market_residual_bps") == 25.0
@@ -156,10 +197,144 @@ def test_h11_removes_market_move_before_choosing_reversal() -> None:
         observed_at=_at(0, 7, 5),
         instrument_return_bps=35.0,
         market_return_bps=10.0,
-        market_members=2,
+        market_beta=1.0,
+        beta_observed_until=_at(0, 7, 5) - timedelta(days=1),
+        beta_history_days=20,
+        basket_coverage=0.50,
+        absolute_residual_history=tuple(float(item) for item in range(1, 21)),
+        absolute_market_return_history=tuple(float(item) for item in range(1, 21)),
         policy=_policy(),
     )
-    assert refused.reason is AbstentionReason.INSUFFICIENT_MARKET_MEMBERS
+    assert refused.reason is AbstentionReason.BASKET_COVERAGE_BELOW_MINIMUM
+
+
+def test_h11_abstains_for_causal_registry_guards() -> None:
+    common = {
+        "ticker": "SBER",
+        "trading_day": START_DAY,
+        "observed_at": _at(0, 7, 5),
+        "instrument_return_bps": 35.0,
+        "market_return_bps": 10.0,
+        "market_beta": 1.0,
+        "beta_observed_until": _at(0, 7, 5) - timedelta(days=1),
+        "beta_history_days": 20,
+        "basket_coverage": 1.0,
+        "absolute_residual_history": tuple(float(item) for item in range(1, 21)),
+        "absolute_market_return_history": (1.0,) * 20,
+        "policy": _policy(),
+    }
+
+    assert (
+        residual_reversal_feature(
+            **common,
+            trading_gap=True,
+        ).reason
+        is AbstentionReason.NON_CONTIGUOUS_WINDOW
+    )
+    assert (
+        residual_reversal_feature(
+            **common,
+            corporate_action_suspected=True,
+        ).reason
+        is AbstentionReason.CORPORATE_ACTION_SUSPECTED
+    )
+    assert (
+        residual_reversal_feature(
+            **common,
+        ).reason
+        is AbstentionReason.MARKET_WIDE_MOVE_SAME_DIRECTION
+    )
+    with pytest.raises(ValueError, match="prior trading days"):
+        residual_reversal_feature(
+            **{
+                **common,
+                "beta_observed_until": _at(0, 7, 5),
+            }
+        )
+
+
+def test_h11_uses_only_twenty_completed_prior_days_and_has_no_label_leakage() -> None:
+    candles = _h11_candles()
+    request = ScientificCandleResearchRequest(
+        selected_hypotheses=(ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,),
+        market_universe=H11_BASKET,
+        policy=_policy(),
+    )
+    baseline = build_scientific_candle_model_research(
+        candles,
+        dataset_fingerprint="sha256:" + "4" * 64,
+        request=request,
+    )
+    event_day = START_DAY + timedelta(days=21)
+    event_at = _at(21, 7, 5)
+    feature = next(
+        item
+        for item in baseline.features
+        if item.ticker == "SBER"
+        and item.trading_day == event_day
+        and item.observed_at == event_at
+    )
+    outcome = baseline.outcomes[baseline.features.index(feature)]
+
+    assert feature.decision is FeatureDecision.MATCHED
+    assert feature.model_trained_until is not None
+    assert feature.model_trained_until.date() < event_day
+    assert feature.value("market_beta_history_days") == 20.0
+    assert feature.value("basket_coverage") == 1.0
+    assert feature.value("market_beta") == pytest.approx(2.0, rel=0.05)
+    assert feature.value("absolute_residual_percentile") == 1.0
+    assert outcome.available is True
+
+    target_candle_at = outcome.target_at - timedelta(minutes=1)
+    changed = tuple(
+        replace(
+            candle,
+            high=candle.high + 10.0,
+            close=candle.close + 10.0,
+        )
+        if candle.ticker == "SBER" and candle.at == target_candle_at
+        else candle
+        for candle in candles
+    )
+    modified = build_scientific_candle_model_research(
+        changed,
+        dataset_fingerprint="sha256:" + "5" * 64,
+        request=request,
+    )
+    modified_feature = next(
+        item
+        for item in modified.features
+        if item.ticker == "SBER"
+        and item.trading_day == event_day
+        and item.observed_at == event_at
+    )
+    modified_outcome = modified.outcomes[modified.features.index(modified_feature)]
+
+    assert modified_feature == feature
+    assert modified_outcome != outcome
+
+
+def test_h11_abstains_until_twenty_prior_days_are_complete() -> None:
+    report = build_scientific_candle_model_research(
+        _h11_candles(days=20),
+        dataset_fingerprint="sha256:" + "6" * 64,
+        request=ScientificCandleResearchRequest(
+            selected_hypotheses=(ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,),
+            market_universe=H11_BASKET,
+            policy=_policy(),
+        ),
+    )
+    latest_day = START_DAY + timedelta(days=19)
+    latest = tuple(
+        item
+        for item in report.features
+        if item.ticker == "SBER" and item.trading_day == latest_day
+    )
+
+    assert latest
+    assert all(
+        item.reason is AbstentionReason.MARKET_BETA_UNAVAILABLE for item in latest
+    )
 
 
 def test_har_fit_is_deterministic_and_rejects_future_trained_parameters() -> None:
@@ -290,7 +465,10 @@ def test_feature_contract_rejects_future_feature_timestamp() -> None:
 
 def test_full_package_is_deterministic_partitioned_and_causal() -> None:
     candles = _candles()
-    request = ScientificCandleResearchRequest(policy=_policy())
+    request = ScientificCandleResearchRequest(
+        policy=_policy(),
+        market_universe=TICKERS,
+    )
     first = build_scientific_candle_model_research(
         candles,
         dataset_fingerprint="sha256:" + "1" * 64,
