@@ -30,15 +30,43 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
     )
 
     assert validate_contract(registry, fixture) == ()
-    assert fixture["contract_version"] == "1.1.0"
-    assert tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1) == tuple(
-        f"H{number}" for number in range(1, 10)
+    assert fixture["contract_version"] == "1.2.0"
+    assert tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1) == (
+        "H1",
+        "H2",
+        "H3",
+        "H4",
+        "H5",
+        "H6",
+        "H7",
+        "H7V2",
+        "H10",
+        "H11",
+        "H15",
+        "H8",
+        "H9",
     )
     assert all(
         item.data_requirement is ReplayDataRequirement.LIVE_ORDERBOOK
         for item in SCIENTIFIC_REPLAY_CONTRACT_V1[-2:]
     )
-    assert all(item.catalog_version == "1.0.0" for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
+    assert {
+        item.short_id: item.catalog_version for item in SCIENTIFIC_REPLAY_CONTRACT_V1
+    } == {
+        "H1": "1.0.0",
+        "H2": "1.0.0",
+        "H3": "1.0.0",
+        "H4": "1.0.0",
+        "H5": "1.0.0",
+        "H6": "1.0.0",
+        "H7": "1.0.0",
+        "H7V2": "2.0.0",
+        "H10": "1.0.0",
+        "H11": "1.0.0",
+        "H15": "1.0.0",
+        "H8": "1.0.0",
+        "H9": "1.0.0",
+    }
 
 
 def test_contract_validator_detects_direction_drift() -> None:

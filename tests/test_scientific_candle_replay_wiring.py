@@ -100,9 +100,7 @@ def test_internal_runner_wires_all_next_candle_hypotheses(
 
 
 def test_internal_request_keeps_legacy_default_but_accepts_next_ids() -> None:
-    assert StartReplayRequest().hypothesis_ids == tuple(
-        item.short_id for item in replay_api.SCIENTIFIC_REPLAY_CONTRACT_V1
-    )
+    assert StartReplayRequest().hypothesis_ids == replay_api.LEGACY_DEFAULT_HYPOTHESES
     assert StartReplayRequest(
         hypothesis_ids=("H10", "H11", "H15", "H7V2")
     ).hypothesis_ids == ("H10", "H11", "H15", "H7V2")

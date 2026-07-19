@@ -68,6 +68,9 @@ JobState = Literal["queued", "running", "completed", "failed"]
 ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H10", "H11", "H15", "H7V2"})
 SUPPORTED_HYPOTHESES = frozenset(ALL_HYPOTHESES) | SCIENTIFIC_CANDLE_HYPOTHESES
+LEGACY_DEFAULT_HYPOTHESES = tuple(
+    item for item in ALL_HYPOTHESES if item not in SCIENTIFIC_CANDLE_HYPOTHESES
+)
 GENERAL_HYPOTHESES = frozenset({"H1", "H2", "H5", "H6", "H7"})
 JUMP_HYPOTHESES = frozenset({"H3", "H4"})
 ORDERBOOK_HYPOTHESES = frozenset({"H8", "H9"})
@@ -98,7 +101,7 @@ class StartReplayRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    hypothesis_ids: tuple[str, ...] = ALL_HYPOTHESES
+    hypothesis_ids: tuple[str, ...] = LEGACY_DEFAULT_HYPOTHESES
     tickers: tuple[str, ...] = ()
     liquid_universe: tuple[str, ...] = DEFAULT_LIQUID_UNIVERSE
     cost_model: ReplayCostModelRequest = ReplayCostModelRequest()

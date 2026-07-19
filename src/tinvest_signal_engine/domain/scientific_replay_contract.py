@@ -91,6 +91,26 @@ SCIENTIFIC_REPLAY_CONTRACT_V1 = (
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
     ),
     ScientificReplayDefinition(
+        "H7V2", "h7-relative-volume-future-activity", "2.0.0", "activity_increase",
+        "any_liquid_session_phase", (900, 1800),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
+        "H10", "h10-positive-main-open-gap-reversion", "1.0.0",
+        "reversion_to_previous_close", "main_session_open", (1800, 3600),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
+        "H11", "h11-residual-move-reversion", "1.0.0", "reversal",
+        "main_session", (900, 1800),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
+        "H15", "h15-multi-window-volatility-forecast", "1.0.0",
+        "volatility_increase", "any_liquid_session_phase", (1800, 3600),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
         "H8", "h8-best-queue-imbalance", "1.0.0", "same_as_queue_imbalance",
         "live_orderbook_only", (1, 5),
         ReplayDataRequirement.LIVE_ORDERBOOK, _ORDERBOOK_STATES,
