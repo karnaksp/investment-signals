@@ -10,6 +10,7 @@ from tinvest_signal_engine.application.scientific_candle_models import (
     ScientificCandleResearchRequest,
     build_scientific_candle_model_research,
 )
+import tinvest_signal_engine.application.scientific_candle_models as candle_models
 from tinvest_signal_engine.domain.historical_hypothesis_replay import HistoricalCandle
 from tinvest_signal_engine.domain.scientific_candle_models import (
     AbstentionReason,
@@ -265,6 +266,9 @@ def test_h11_uses_only_twenty_completed_prior_days_and_has_no_label_leakage() ->
         dataset_fingerprint="sha256:" + "4" * 64,
         request=request,
     )
+    assert baseline.report_fingerprint == (
+        "sha256:7d897bd27ad736291f87545a0114888d01a5cf1078ccd5caa9ea0818e7a481b5"
+    )
     event_day = START_DAY + timedelta(days=21)
     event_at = _at(21, 7, 5)
     feature = next(
@@ -312,6 +316,36 @@ def test_h11_uses_only_twenty_completed_prior_days_and_has_no_label_leakage() ->
 
     assert modified_feature == feature
     assert modified_outcome != outcome
+
+
+def test_h11_precomputes_beta_once_per_ticker_and_trading_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = candle_models._causal_market_beta
+    beta_calls = 0
+
+    def counted(history: object) -> float | None:
+        nonlocal beta_calls
+        beta_calls += 1
+        return original(history)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(candle_models, "_causal_market_beta", counted)
+    days = 45
+    report = build_scientific_candle_model_research(
+        _h11_candles(days=days),
+        dataset_fingerprint="sha256:" + "7" * 64,
+        request=ScientificCandleResearchRequest(
+            selected_hypotheses=(ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,),
+            market_universe=H11_BASKET,
+            policy=_policy(),
+        ),
+    )
+
+    ticker_count = 1 + len(H11_BASKET)
+    expected_days_with_history = days - _policy().residual_beta_lookback_days
+    assert beta_calls == ticker_count * expected_days_with_history
+    assert len(report.features) == ticker_count * days * 6
+    assert beta_calls * 5 < len(report.features)
 
 
 def test_h11_abstains_until_twenty_prior_days_are_complete() -> None:

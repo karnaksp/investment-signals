@@ -93,7 +93,6 @@ def _portfolio_report() -> ScientificCandleResearchReport:
     )
     policy = ScientificCandlePolicy(
         opening_gap_min_bps=5.0,
-        residual_move_min_bps=5.0,
         activity_history_days=20,
         round_trip_cost_bps=10.0,
     )
@@ -151,7 +150,12 @@ def _portfolio_report() -> ScientificCandleResearchReport:
                 observed_at=observed_at,
                 instrument_return_bps=50.0 if event else 1.0,
                 market_return_bps=0.0,
-                market_members=5,
+                market_beta=1.0,
+                beta_observed_until=observed_at - timedelta(days=1),
+                beta_history_days=20,
+                basket_coverage=1.0,
+                absolute_residual_history=((1.0 if event else 2.0),) * 100,
+                absolute_market_return_history=(1.0,) * 100,
                 policy=policy,
             )
             har = har_volatility_feature(

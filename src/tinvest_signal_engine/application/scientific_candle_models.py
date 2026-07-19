@@ -254,6 +254,15 @@ class _ResidualObservation:
     basket_coverage: float
 
 
+@dataclass(frozen=True, slots=True)
+class _ResidualHistoryContext:
+    beta: float | None
+    beta_observed_until: datetime | None
+    history_days: int
+    absolute_residuals: tuple[float, ...]
+    absolute_market_returns: tuple[float, ...]
+
+
 def _residual_reversal_rows(
     by_ticker: dict[str, tuple[HistoricalCandle, ...]],
     policy: ScientificCandlePolicy,
@@ -319,56 +328,25 @@ def _residual_reversal_rows(
     result: list[tuple[CausalFeatureVector, ScientificModelOutcome]] = []
     for ticker in sorted(observations_by_ticker):
         ticker_observations = tuple(observations_by_ticker[ticker])
+        history_by_day = _residual_history_by_day(
+            ticker_observations,
+            trading_days,
+            policy,
+        )
         for item in ticker_observations:
-            prior_days = tuple(
-                day for day in trading_days if day < item.window.trading_day
-            )[-policy.residual_beta_lookback_days :]
-            prior_day_set = frozenset(prior_days)
-            history = tuple(
-                candidate
-                for candidate in ticker_observations
-                if candidate.window.trading_day in prior_day_set
-                and candidate.basket_coverage >= policy.residual_basket_coverage_min
-            )
-            history_days = frozenset(
-                candidate.window.trading_day for candidate in history
-            )
-            beta = (
-                _causal_market_beta(history)
-                if len(prior_days) == policy.residual_beta_lookback_days
-                and history_days == prior_day_set
-                else None
-            )
-            beta_observed_until = (
-                max(candidate.window.observed_at for candidate in history)
-                if beta is not None
-                else None
-            )
-            residual_history = (
-                tuple(
-                    abs(
-                        candidate.window.return_bps - beta * candidate.market_return_bps
-                    )
-                    for candidate in history
-                )
-                if beta is not None
-                else ()
-            )
-            market_history = tuple(
-                abs(candidate.market_return_bps) for candidate in history
-            )
+            history = history_by_day[item.window.trading_day]
             feature = residual_reversal_feature(
                 ticker=item.window.ticker,
                 trading_day=item.window.trading_day,
                 observed_at=item.window.observed_at,
                 instrument_return_bps=item.window.return_bps,
                 market_return_bps=item.market_return_bps,
-                market_beta=beta,
-                beta_observed_until=beta_observed_until,
-                beta_history_days=len(history_days),
+                market_beta=history.beta,
+                beta_observed_until=history.beta_observed_until,
+                beta_history_days=history.history_days,
                 basket_coverage=item.basket_coverage,
-                absolute_residual_history=residual_history,
-                absolute_market_return_history=market_history,
+                absolute_residual_history=history.absolute_residuals,
+                absolute_market_return_history=history.absolute_market_returns,
                 policy=policy,
             )
             target_at = item.window.observed_at + timedelta(
@@ -391,6 +369,56 @@ def _residual_reversal_rows(
                     ),
                 )
             )
+    return result
+
+
+def _residual_history_by_day(
+    observations: Sequence[_ResidualObservation],
+    trading_days: Sequence[date],
+    policy: ScientificCandlePolicy,
+) -> dict[date, _ResidualHistoryContext]:
+    observations_by_day: defaultdict[date, list[_ResidualObservation]] = defaultdict(
+        list
+    )
+    for item in observations:
+        if item.basket_coverage >= policy.residual_basket_coverage_min:
+            observations_by_day[item.window.trading_day].append(item)
+
+    result: dict[date, _ResidualHistoryContext] = {}
+    lookback = policy.residual_beta_lookback_days
+    for day_index, trading_day in enumerate(trading_days):
+        prior_days = tuple(trading_days[max(0, day_index - lookback) : day_index])
+        history = tuple(
+            item
+            for prior_day in prior_days
+            for item in observations_by_day.get(prior_day, ())
+        )
+        history_days = frozenset(item.window.trading_day for item in history)
+        beta = (
+            _causal_market_beta(history)
+            if len(prior_days) == lookback and history_days == frozenset(prior_days)
+            else None
+        )
+        result[trading_day] = _ResidualHistoryContext(
+            beta=beta,
+            beta_observed_until=(
+                max(item.window.observed_at for item in history)
+                if beta is not None
+                else None
+            ),
+            history_days=len(history_days),
+            absolute_residuals=(
+                tuple(
+                    abs(item.window.return_bps - beta * item.market_return_bps)
+                    for item in history
+                )
+                if beta is not None
+                else ()
+            ),
+            absolute_market_returns=tuple(
+                abs(item.market_return_bps) for item in history
+            ),
+        )
     return result
 
 
