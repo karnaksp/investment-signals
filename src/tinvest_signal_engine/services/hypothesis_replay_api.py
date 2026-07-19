@@ -34,6 +34,9 @@ from tinvest_signal_engine.adapters.local_hypothesis_replay import (
     ImmutableReplayArtifactStore,
     LocalCandleCache,
 )
+from tinvest_signal_engine.adapters.scientific_candle_replay import (
+    ScientificCandleReplayArtifactAdapter,
+)
 from tinvest_signal_engine.application.historical_hypothesis_replay import (
     DEFAULT_LIQUID_UNIVERSE,
     HistoricalReplayRequest,
@@ -42,9 +45,17 @@ from tinvest_signal_engine.application.historical_hypothesis_replay import (
 from tinvest_signal_engine.application.jump_activity_replay import (
     RunJumpActivityReplay,
 )
+from tinvest_signal_engine.application.scientific_candle_models import (
+    BuildScientificCandleModelResearch,
+    ScientificCandleResearchRequest,
+)
 from tinvest_signal_engine.domain.historical_hypothesis_replay import ReplayCostModel
 from tinvest_signal_engine.domain.hypothesis_formulas import HypothesisId
 from tinvest_signal_engine.domain.jump_activity_replay import CostModel, JumpReplayPolicy
+from tinvest_signal_engine.domain.scientific_candle_models import (
+    ScientificCandleHypothesis,
+    ScientificCandlePolicy,
+)
 from tinvest_signal_engine.domain.scientific_replay_contract import (
     ReplaySourceDataState,
     SCIENTIFIC_REPLAY_CONTRACT_V1,
@@ -55,6 +66,8 @@ from tinvest_signal_engine.domain.scientific_replay_contract import (
 
 JobState = Literal["queued", "running", "completed", "failed"]
 ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
+SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H10", "H11", "H15", "H7V2"})
+SUPPORTED_HYPOTHESES = frozenset(ALL_HYPOTHESES) | SCIENTIFIC_CANDLE_HYPOTHESES
 GENERAL_HYPOTHESES = frozenset({"H1", "H2", "H5", "H6", "H7"})
 JUMP_HYPOTHESES = frozenset({"H3", "H4"})
 ORDERBOOK_HYPOTHESES = frozenset({"H8", "H9"})
@@ -97,7 +110,7 @@ class StartReplayRequest(BaseModel):
         normalized = tuple(sorted({value.strip().upper() for value in values}))
         if not normalized:
             raise ValueError("at least one hypothesis must be selected")
-        unsupported = sorted(set(normalized) - set(ALL_HYPOTHESES))
+        unsupported = sorted(set(normalized) - SUPPORTED_HYPOTHESES)
         if unsupported:
             raise ValueError(f"unsupported hypotheses: {unsupported}")
         jump_selection = set(normalized) & JUMP_HYPOTHESES
@@ -152,7 +165,7 @@ class ReplayEvidenceResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    hypothesis_id: str = Field(pattern=r"^H[1-9]$")
+    hypothesis_id: str = Field(pattern=r"^H(?:[1-9]|10|11|15|7V2)$")
     catalog_hypothesis_id: str = Field(min_length=1)
     expected_direction: str = Field(min_length=1)
     market_phase: str = Field(min_length=1)
@@ -450,11 +463,17 @@ class LocalHypothesisPortfolioRunner:
         cache_dir: str | Path,
         artifact_root: str | Path,
         evidence_reader: ReplayEvidenceReader | None = None,
+        scientific_artifacts: ScientificCandleReplayArtifactAdapter | None = None,
     ) -> None:
         self._cache_dir = Path(cache_dir)
         self._artifact_root = Path(artifact_root)
         self._descriptor_cache = LocalCandleCache(self._cache_dir)
         self._evidence_reader = evidence_reader or LocalReplayEvidenceReader()
+        self._scientific_artifacts = scientific_artifacts or (
+            ScientificCandleReplayArtifactAdapter(
+                self._artifact_root / "h10-h11-h15-h7v2"
+            )
+        )
 
     def dataset_fingerprint(self) -> str:
         return self._descriptor_cache.describe().dataset_fingerprint
@@ -548,6 +567,37 @@ class LocalHypothesisPortfolioRunner:
                 tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
                 generated_at=generated_at,
             ))
+        requested_scientific = tuple(
+            ScientificCandleHypothesis(item)
+            for item in request.hypothesis_ids
+            if item in SCIENTIFIC_CANDLE_HYPOTHESES
+        )
+        if requested_scientific:
+            report = BuildScientificCandleModelResearch(
+                LocalCandleCache(self._cache_dir)
+            ).execute(
+                ScientificCandleResearchRequest(
+                    selected_hypotheses=requested_scientific,
+                    market_universe=request.liquid_universe,
+                    policy=ScientificCandlePolicy(
+                        round_trip_cost_bps=request.cost_model.round_trip_bps
+                    ),
+                )
+            )
+            artifact = self._scientific_artifacts.save(
+                report,
+                requested_scientific,
+                cost_model_version=request.cost_model.version,
+            )
+            engines.append({
+                "engine": "next_scientific_candle_replay",
+                "hypothesis_ids": tuple(item.value for item in requested_scientific),
+                "application_run_id": report.report_fingerprint,
+                "artifact_fingerprint": artifact.artifact_fingerprint,
+                "artifact_uri": artifact.artifact_uri,
+                "resumed": False,
+            })
+            evidence.extend(artifact.evidence)
         requested_orderbook = tuple(
             item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
         )

@@ -1,0 +1,312 @@
+"""Persist conservative internal evidence for the next candle hypotheses.
+
+The application layer owns causal feature and outcome calculation.  This
+adapter only selects the sealed holdout partition, maps it to the internal
+replay evidence vocabulary, and writes a deterministic local artifact.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, time, timezone
+from hashlib import sha256
+import json
+import os
+from pathlib import Path
+from statistics import fmean
+from typing import Any, Mapping, Sequence
+
+from tinvest_signal_engine.application.scientific_candle_models import (
+    ScientificCandleResearchReport,
+)
+from tinvest_signal_engine.domain.hypothesis_evidence import DatasetPartition
+from tinvest_signal_engine.domain.scientific_candle_models import (
+    CausalFeatureVector,
+    FeatureDecision,
+    ScientificCandleHypothesis,
+    ScientificModelOutcome,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ScientificCandleReplayDefinition:
+    hypothesis: ScientificCandleHypothesis
+    catalog_hypothesis_id: str
+    hypothesis_version: str
+    expected_direction: str
+    market_phase: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScientificCandleReplayArtifact:
+    artifact_uri: str
+    artifact_fingerprint: str
+    evidence: tuple[Mapping[str, Any], ...]
+
+
+_DEFINITIONS = {
+    ScientificCandleHypothesis.OPENING_GAP_REVERSION: (
+        ScientificCandleReplayDefinition(
+            ScientificCandleHypothesis.OPENING_GAP_REVERSION,
+            "h10-positive-main-open-gap-reversion",
+            "1.0.0",
+            "reversion_to_previous_close",
+            "main_session_open",
+        )
+    ),
+    ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION: (
+        ScientificCandleReplayDefinition(
+            ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,
+            "h11-residual-move-reversion",
+            "1.0.0",
+            "reversal",
+            "main_session",
+        )
+    ),
+    ScientificCandleHypothesis.HAR_VOLATILITY: ScientificCandleReplayDefinition(
+        ScientificCandleHypothesis.HAR_VOLATILITY,
+        "h15-multi-window-volatility-forecast",
+        "1.0.0",
+        "volatility_increase",
+        "any_liquid_session_phase",
+    ),
+    ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2: (
+        ScientificCandleReplayDefinition(
+            ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2,
+            "h7-relative-volume-future-activity",
+            "2.0.0",
+            "activity_increase",
+            "any_liquid_session_phase",
+        )
+    ),
+}
+
+
+class ScientificCandleReplayArtifactAdapter:
+    """Map one report to immutable, reproducible evidence JSON."""
+
+    def __init__(self, root: str | Path) -> None:
+        self._root = Path(root)
+
+    def save(
+        self,
+        report: ScientificCandleResearchReport,
+        requested_hypotheses: Sequence[ScientificCandleHypothesis],
+        *,
+        cost_model_version: str,
+    ) -> ScientificCandleReplayArtifact:
+        selected = tuple(sorted(set(requested_hypotheses), key=lambda item: item.value))
+        if not selected:
+            raise ValueError("at least one scientific candle hypothesis is required")
+        if not cost_model_version.strip():
+            raise ValueError("cost model version must not be empty")
+        unavailable = set(selected) - set(report.selected_hypotheses)
+        if unavailable:
+            raise ValueError("requested hypothesis is absent from research report")
+
+        artifact_fingerprint = _fingerprint(
+            {
+                "cost_model_version": cost_model_version,
+                "report_fingerprint": report.report_fingerprint,
+                "selected_hypotheses": [item.value for item in selected],
+            }
+        )
+        generated_at = _deterministic_generated_at(report)
+        evidence = tuple(
+            _evidence_row(
+                report,
+                hypothesis,
+                artifact_fingerprint=artifact_fingerprint,
+                generated_at=generated_at,
+                cost_model_version=cost_model_version,
+            )
+            for hypothesis in selected
+        )
+        run_dir = self._root / artifact_fingerprint.removeprefix("sha256:")
+        manifest = {
+            "dataset_fingerprint": report.dataset_fingerprint,
+            "report_fingerprint": report.report_fingerprint,
+            "policy": asdict(report.policy),
+            "selected_hypotheses": [item.value for item in selected],
+            "cost_model_version": cost_model_version,
+        }
+        _write_once_or_verify(run_dir / "manifest.json", _json_bytes(manifest))
+        _write_once_or_verify(run_dir / "evidence.json", _json_bytes(evidence))
+        return ScientificCandleReplayArtifact(
+            artifact_uri=str(run_dir.resolve()),
+            artifact_fingerprint=artifact_fingerprint,
+            evidence=evidence,
+        )
+
+
+def _evidence_row(
+    report: ScientificCandleResearchReport,
+    hypothesis: ScientificCandleHypothesis,
+    *,
+    artifact_fingerprint: str,
+    generated_at: str,
+    cost_model_version: str,
+) -> Mapping[str, Any]:
+    definition = _DEFINITIONS[hypothesis]
+    pairs = tuple(
+        (feature, outcome)
+        for feature, outcome in zip(report.features, report.outcomes, strict=True)
+        if feature.hypothesis is hypothesis
+        and report.split.partition_for(feature.trading_day) is DatasetPartition.HOLDOUT
+    )
+    matched = tuple(
+        pair for pair in pairs if pair[0].decision is FeatureDecision.MATCHED
+    )
+    available = tuple(pair for pair in matched if pair[1].available)
+    source_state = "ready" if available else "insufficient_history"
+    decision = "inconclusive" if available else "blocked_by_data"
+    primary = _primary_metric(hypothesis, tuple(item[1] for item in available))
+    sample_count = len(available)
+    return {
+        "hypothesis_id": hypothesis.value,
+        "catalog_hypothesis_id": definition.catalog_hypothesis_id,
+        "expected_direction": definition.expected_direction,
+        "market_phase": definition.market_phase,
+        "source_data_state": source_state,
+        "decision": decision,
+        "independent_validation": bool(report.split.holdout_days),
+        "cost_adjusted": hypothesis
+        in {
+            ScientificCandleHypothesis.OPENING_GAP_REVERSION,
+            ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,
+        },
+        "sample_count": sample_count,
+        "trading_days": len({item[0].trading_day for item in available}),
+        "generated_at": generated_at,
+        "artifact_fingerprint": artifact_fingerprint,
+        "dataset_fingerprint": report.dataset_fingerprint,
+        "formula_fingerprint": _formula_fingerprint(report, hypothesis),
+        "cost_model_version": cost_model_version,
+        "primary_metric_value": primary,
+        "matched_control_lift_ci95_lower": None,
+        "matched_control_lift_ci95_upper": None,
+        "matched_controls": 0,
+        "controls_per_event": 5,
+        "adjusted_p_value": None,
+        "stable_blocks": 0,
+        "total_blocks": 0,
+        "maximum_ticker_share": _maximum_ticker_share(available),
+        "maximum_period_share": None,
+        "abstention_rate": (1.0 - len(matched) / len(pairs) if pairs else None),
+        "horizons": (
+            {
+                "horizon_seconds": _horizon_seconds(report, hypothesis),
+                "evidence_scope": "descriptive_only",
+                "source_data_state": source_state,
+                "decision": decision,
+                "sample_count": sample_count,
+                "primary_metric_value": primary,
+            },
+        ),
+    }
+
+
+def _primary_metric(
+    hypothesis: ScientificCandleHypothesis,
+    outcomes: Sequence[ScientificModelOutcome],
+) -> float | None:
+    if not outcomes:
+        return None
+    if hypothesis in {
+        ScientificCandleHypothesis.OPENING_GAP_REVERSION,
+        ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,
+    }:
+        values = tuple(
+            item.cost_adjusted_value
+            for item in outcomes
+            if item.cost_adjusted_value is not None
+        )
+    elif hypothesis is ScientificCandleHypothesis.HAR_VOLATILITY:
+        values = tuple(
+            item.benchmark_loss - item.model_loss
+            for item in outcomes
+            if item.benchmark_loss is not None and item.model_loss is not None
+        )
+    else:
+        values = tuple(
+            item.actual_value for item in outcomes if item.actual_value is not None
+        )
+    return fmean(values) if values else None
+
+
+def _horizon_seconds(
+    report: ScientificCandleResearchReport,
+    hypothesis: ScientificCandleHypothesis,
+) -> int:
+    policy = report.policy
+    if hypothesis is ScientificCandleHypothesis.OPENING_GAP_REVERSION:
+        return policy.opening_gap_horizon_seconds
+    if hypothesis is ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION:
+        return policy.residual_horizon_seconds
+    if hypothesis is ScientificCandleHypothesis.HAR_VOLATILITY:
+        return policy.har_horizon_seconds
+    return policy.activity_horizon_seconds
+
+
+def _maximum_ticker_share(
+    pairs: Sequence[tuple[CausalFeatureVector, ScientificModelOutcome]],
+) -> float | None:
+    if not pairs:
+        return None
+    counts: dict[str, int] = {}
+    for feature, _ in pairs:
+        counts[feature.ticker] = counts.get(feature.ticker, 0) + 1
+    return max(counts.values()) / len(pairs)
+
+
+def _formula_fingerprint(
+    report: ScientificCandleResearchReport,
+    hypothesis: ScientificCandleHypothesis,
+) -> str:
+    payload = {
+        "hypothesis": hypothesis.value,
+        "hypothesis_version": _DEFINITIONS[hypothesis].hypothesis_version,
+        "policy": asdict(report.policy),
+    }
+    return _fingerprint(payload)
+
+
+def _deterministic_generated_at(report: ScientificCandleResearchReport) -> str:
+    if report.outcomes:
+        return max(item.target_at for item in report.outcomes).isoformat()
+    last_day = max(report.split.holdout_days)
+    return datetime.combine(last_day, time.min, tzinfo=timezone.utc).isoformat()
+
+
+def _fingerprint(payload: object) -> str:
+    return (
+        "sha256:"
+        + sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+def _json_bytes(payload: object) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_once_or_verify(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() != content:
+            raise ValueError(
+                f"immutable scientific replay artifact differs: {path.name}"
+            )
+        return
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_bytes(content)
+    os.replace(temporary, path)
