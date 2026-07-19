@@ -250,6 +250,10 @@ def _residual_reversal_rows(
     market_universe: tuple[str, ...],
 ) -> list[tuple[CausalFeatureVector, ScientificModelOutcome]]:
     returns_by_time: defaultdict[datetime, list[_WindowReturn]] = defaultdict(list)
+    observed_candles = {
+        ticker: {_observed_at(candle): candle for candle in rows}
+        for ticker, rows in by_ticker.items()
+    }
     universe = set(market_universe)
     for ticker, rows in by_ticker.items():
         for index in range(len(rows)):
@@ -290,7 +294,7 @@ def _residual_reversal_rows(
                 policy=policy,
             )
             target_at = observed_at + timedelta(seconds=feature.horizon_seconds)
-            target = _candle_observed_at(item.rows, target_at)
+            target = observed_candles[item.ticker].get(target_at)
             forward = (
                 (target.close / item.anchor_price - 1.0) * 10_000.0
                 if target is not None
