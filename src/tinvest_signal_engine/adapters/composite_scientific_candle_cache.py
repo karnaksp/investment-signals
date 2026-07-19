@@ -135,7 +135,7 @@ class CompositeScientificCandleCache:
         self._live = live
         self._as_of = _aware_utc(as_of, "as_of")
         self._live_snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
-        self._snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
+        self._snapshot: tuple[HistoricalCandle, ...] | None = None
         self._descriptor: CandleCacheDescriptor | None = None
 
     def describe(self) -> CandleCacheDescriptor:
@@ -150,18 +150,44 @@ class CompositeScientificCandleCache:
         return self._descriptor
 
     def load(self) -> tuple[HistoricalCandle, ...]:
-        snapshot = self._seal()
-        return tuple(item.candle for item in snapshot)
+        return self._seal()
 
-    def _seal(self) -> tuple[VersionedHistoricalCandle, ...]:
+    def _seal(self) -> tuple[HistoricalCandle, ...]:
         if self._snapshot is not None:
             return self._snapshot
         historical = tuple(
-            VersionedHistoricalCandle(candle=item, record_version=0)
+            item
             for item in self._historical.load()
             if item.at.astimezone(timezone.utc) <= self._as_of
         )
-        snapshot = _deduplicate((*historical, *self._load_live()))
+        live = self._load_live()
+        if not live:
+            snapshot = historical
+        else:
+            live_by_key = {
+                (item.candle.ticker, item.candle.at.astimezone(timezone.utc)): item
+                for item in live
+            }
+            snapshot = tuple(
+                sorted(
+                    (
+                        *(
+                            item
+                            for item in historical
+                            if (
+                                item.ticker,
+                                item.at.astimezone(timezone.utc),
+                            )
+                            not in live_by_key
+                        ),
+                        *(item.candle for item in live_by_key.values()),
+                    ),
+                    key=lambda item: (
+                        item.ticker,
+                        item.at.astimezone(timezone.utc),
+                    ),
+                )
+            )
         if not snapshot:
             raise ValueError("composite candle cache contains no causal candles")
         self._snapshot = snapshot
