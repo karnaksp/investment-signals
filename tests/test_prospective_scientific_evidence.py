@@ -198,7 +198,7 @@ def test_adapter_is_deterministic_typed_and_immutable(tmp_path: Path) -> None:
 
     assert first == second
     by_id = {str(row["hypothesis_id"]): row for row in first.evidence}
-    assert by_id["H7V3"]["claim_family"] == "volatility_risk"
+    assert by_id["H7V3"]["claim_family"] == "activity"
     assert by_id["H7V3"]["effect_unit"] == "variance_uplift_ratio_x_10000"
     assert by_id["H7V3"]["target_metric"] == "future_variance_uplift"
     assert by_id["H7V3"]["claim_scope"] == ("independent_holdout_matched_controls")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import sys
 from threading import Event
@@ -31,7 +32,7 @@ class FakeReplayRunner:
         self.calls: list[tuple[StartReplayRequest, str]] = []
         self.fingerprint = "sha256:" + "a" * 64
 
-    def dataset_fingerprint(self) -> str:
+    def dataset_fingerprint(self, *, as_of: datetime | None = None) -> str:
         return self.fingerprint
 
     def readiness(self) -> tuple[bool, str | None]:
@@ -42,6 +43,7 @@ class FakeReplayRunner:
         request: StartReplayRequest,
         *,
         run_fingerprint: str,
+        dataset_as_of: datetime | None = None,
     ) -> Mapping[str, Any]:
         self.calls.append((request, run_fingerprint))
         if self.blocker is not None:

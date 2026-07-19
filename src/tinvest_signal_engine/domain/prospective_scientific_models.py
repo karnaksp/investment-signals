@@ -87,7 +87,7 @@ class ProspectiveScientificPolicy:
     jump_high_volume_percentile: float = 0.90
     jump_high_range_percentile: float = 0.90
     jump_high_illiquidity_percentile: float = 0.90
-    jump_horizons_seconds: tuple[int, ...] = (300, 900, 1800)
+    jump_horizons_seconds: tuple[int, ...] = (300, 900)
     volume_window_minutes: int = 15
     volume_history_days: int = 40
     volume_percentile: float = 0.90

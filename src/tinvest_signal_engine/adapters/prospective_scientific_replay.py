@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from hashlib import sha256
 import json
 import os
@@ -38,6 +38,10 @@ PROSPECTIVE_SCIENTIFIC_EVIDENCE_POLICY = EvidenceGatePolicy(
     minimum_coverage=0.10,
 )
 
+# All six formulas were sealed on 2026-07-19.  Day-partitioned evidence can
+# therefore become genuinely prospective only from the next trading day.
+PROSPECTIVE_PRIMARY_HOLDOUT_START = date(2026, 7, 20)
+
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveScientificReplayArtifact:
@@ -54,10 +58,12 @@ class ProspectiveScientificReplayArtifactAdapter:
         root: str | Path,
         *,
         evidence_policy: EvidenceGatePolicy = PROSPECTIVE_SCIENTIFIC_EVIDENCE_POLICY,
+        primary_holdout_start: date = PROSPECTIVE_PRIMARY_HOLDOUT_START,
     ) -> None:
         self._root = Path(root)
         self._evidence_policy = evidence_policy
         self._evidence_gate = AssessProspectiveScientificEvidence(evidence_policy)
+        self._primary_holdout_start = primary_holdout_start
 
     def save(
         self,
@@ -119,6 +125,10 @@ class ProspectiveScientificReplayArtifactAdapter:
                 artifact_fingerprint=artifact_fingerprint,
                 generated_at=generated_at,
                 cost_model_version=cost_model_version,
+                independent_validation=_has_primary_holdout(
+                    report,
+                    starts_on=self._primary_holdout_start,
+                ),
             )
             for hypothesis in selected
         )
@@ -155,6 +165,7 @@ def _evidence_row(
     artifact_fingerprint: str,
     generated_at: str,
     cost_model_version: str,
+    independent_validation: bool,
 ) -> Mapping[str, Any]:
     definition = PROSPECTIVE_EVIDENCE_DEFINITIONS[hypothesis]
     source_state = (
@@ -182,7 +193,7 @@ def _evidence_row(
         "market_phase": "eligible_moex_equity_session",
         "source_data_state": source_state,
         "decision": bundle.decision.value,
-        "independent_validation": bool(report.split.holdout_days),
+        "independent_validation": independent_validation,
         "cost_adjusted": hypothesis
         in {
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
@@ -228,6 +239,14 @@ def _evidence_row(
         "claim_scope": definition.claim_scope,
         "target_metric": definition.target_metric.value,
     }
+
+
+def _has_primary_holdout(
+    report: ProspectiveScientificReport,
+    *,
+    starts_on: date,
+) -> bool:
+    return bool(report.split.holdout_days) and min(report.split.holdout_days) >= starts_on
 
 
 def _coverage_manifest(

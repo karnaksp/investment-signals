@@ -26,6 +26,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tinvest_signal_engine.adapters.hypothesis_replay_evidence import (
     LocalReplayEvidenceReader,
 )
+from tinvest_signal_engine.adapters.composite_scientific_candle_cache import (
+    ClickHouseScientificCandleSource,
+    CompositeScientificCandleCache,
+    VersionedScientificCandleSource,
+)
 from tinvest_signal_engine.adapters.jump_activity_replay import (
     JsonJumpReplayArtifactAdapter,
     ParquetCandleCacheAdapter,
@@ -36,6 +41,9 @@ from tinvest_signal_engine.adapters.local_hypothesis_replay import (
 )
 from tinvest_signal_engine.adapters.scientific_candle_replay import (
     ScientificCandleReplayArtifactAdapter,
+)
+from tinvest_signal_engine.adapters.prospective_scientific_replay import (
+    ProspectiveScientificReplayArtifactAdapter,
 )
 from tinvest_signal_engine.application.historical_hypothesis_replay import (
     DEFAULT_LIQUID_UNIVERSE,
@@ -49,12 +57,23 @@ from tinvest_signal_engine.application.scientific_candle_models import (
     BuildScientificCandleModelResearch,
     ScientificCandleResearchRequest,
 )
+from tinvest_signal_engine.application.prospective_scientific_models import (
+    ProspectiveScientificRequest,
+    build_prospective_scientific_research,
+)
+from tinvest_signal_engine.application.historical_hypothesis_replay import (
+    HistoricalCandleCachePort,
+)
 from tinvest_signal_engine.domain.historical_hypothesis_replay import ReplayCostModel
 from tinvest_signal_engine.domain.hypothesis_formulas import HypothesisId
 from tinvest_signal_engine.domain.jump_activity_replay import CostModel, JumpReplayPolicy
 from tinvest_signal_engine.domain.scientific_candle_models import (
     ScientificCandleHypothesis,
     ScientificCandlePolicy,
+)
+from tinvest_signal_engine.domain.prospective_scientific_models import (
+    ProspectiveHypothesis,
+    ProspectiveScientificPolicy,
 )
 from tinvest_signal_engine.domain.scientific_replay_contract import (
     ReplaySourceDataState,
@@ -67,14 +86,21 @@ from tinvest_signal_engine.domain.scientific_replay_contract import (
 JobState = Literal["queued", "running", "completed", "failed"]
 ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H10", "H11", "H15", "H7V2"})
-SUPPORTED_HYPOTHESES = frozenset(ALL_HYPOTHESES) | SCIENTIFIC_CANDLE_HYPOTHESES
+PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
+    {"H3V2", "H4V2", "H7V3", "H15V2", "H16", "H17"}
+)
+SUPPORTED_HYPOTHESES = (
+    frozenset(ALL_HYPOTHESES)
+    | SCIENTIFIC_CANDLE_HYPOTHESES
+    | PROSPECTIVE_SCIENTIFIC_HYPOTHESES
+)
 LEGACY_DEFAULT_HYPOTHESES = tuple(
     item for item in ALL_HYPOTHESES if item not in SCIENTIFIC_CANDLE_HYPOTHESES
 )
 GENERAL_HYPOTHESES = frozenset({"H1", "H2", "H5", "H6", "H7"})
 JUMP_HYPOTHESES = frozenset({"H3", "H4"})
 ORDERBOOK_HYPOTHESES = frozenset({"H8", "H9"})
-JOB_SCHEMA_VERSION = 1
+JOB_SCHEMA_VERSION = 2
 
 
 class ReplayCostModelRequest(BaseModel):
@@ -168,7 +194,7 @@ class ReplayEvidenceResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    hypothesis_id: str = Field(pattern=r"^H(?:[1-9]|10|11|15|7V2)$")
+    hypothesis_id: str = Field(pattern=r"^H(?:[1-9]|1[0-7])(?:V[1-9][0-9]*)?$")
     catalog_hypothesis_id: str = Field(min_length=1)
     expected_direction: str = Field(min_length=1)
     market_phase: str = Field(min_length=1)
@@ -203,6 +229,12 @@ class ReplayEvidenceResponse(BaseModel):
     maximum_period_share: float | None = Field(default=None, ge=0.0, le=1.0)
     abstention_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     horizons: tuple["ReplayHorizonEvidenceResponse", ...]
+    claim_family: str = Field(default="directional", min_length=1)
+    effect_unit: str = Field(
+        default="cost_adjusted_signed_return_bps", min_length=1
+    )
+    claim_scope: str = Field(default="price_direction", min_length=1)
+    target_metric: str = Field(default="forward_return", min_length=1)
 
 
 class ReplayHorizonEvidenceResponse(BaseModel):
@@ -227,13 +259,14 @@ class ReplayHorizonEvidenceResponse(BaseModel):
 
 
 class ReplayRunner(Protocol):
-    def dataset_fingerprint(self) -> str: ...
+    def dataset_fingerprint(self, *, as_of: datetime | None = None) -> str: ...
 
     def execute(
         self,
         request: StartReplayRequest,
         *,
         run_fingerprint: str,
+        dataset_as_of: datetime | None = None,
     ) -> Mapping[str, Any]: ...
 
     def readiness(self) -> tuple[bool, str | None]: ...
@@ -363,10 +396,12 @@ class ReplayJobManager:
                 if existing.get("request") != request_payload:
                     raise IdempotencyConflict
                 return _Submission(existing, reused=True)
-            dataset_fingerprint = self._runner.dataset_fingerprint()
+            dataset_as_of = datetime.now(timezone.utc)
+            dataset_fingerprint = self._runner.dataset_fingerprint(as_of=dataset_as_of)
             run_fingerprint = _fingerprint({
                 "schema_version": JOB_SCHEMA_VERSION,
                 "dataset_fingerprint": dataset_fingerprint,
+                "dataset_as_of": dataset_as_of.isoformat(),
                 "request": request_payload,
             })
             job_id = "job-" + sha256(f"{key_hash}:{run_fingerprint}".encode()).hexdigest()[:32]
@@ -378,6 +413,7 @@ class ReplayJobManager:
                 "idempotency_key_hash": key_hash,
                 "run_fingerprint": run_fingerprint,
                 "dataset_fingerprint": dataset_fingerprint,
+                "dataset_as_of": dataset_as_of.isoformat(),
                 "request": request_payload,
                 "created_at": now,
                 "updated_at": now,
@@ -422,6 +458,9 @@ class ReplayJobManager:
             result = self._runner.execute(
                 request,
                 run_fingerprint=str(record["run_fingerprint"]),
+                dataset_as_of=datetime.fromisoformat(
+                    str(record.get("dataset_as_of", record["created_at"]))
+                ),
             )
             completed = {
                 "job_id": job_id,
@@ -467,19 +506,36 @@ class LocalHypothesisPortfolioRunner:
         artifact_root: str | Path,
         evidence_reader: ReplayEvidenceReader | None = None,
         scientific_artifacts: ScientificCandleReplayArtifactAdapter | None = None,
+        prospective_artifacts: ProspectiveScientificReplayArtifactAdapter | None = None,
+        live_candles: VersionedScientificCandleSource | None = None,
     ) -> None:
         self._cache_dir = Path(cache_dir)
         self._artifact_root = Path(artifact_root)
         self._descriptor_cache = LocalCandleCache(self._cache_dir)
+        self._live_candles = live_candles
         self._evidence_reader = evidence_reader or LocalReplayEvidenceReader()
         self._scientific_artifacts = scientific_artifacts or (
             ScientificCandleReplayArtifactAdapter(
                 self._artifact_root / "h10-h11-h15-h7v2"
             )
         )
+        self._prospective_artifacts = prospective_artifacts or (
+            ProspectiveScientificReplayArtifactAdapter(
+                self._artifact_root / "h3v2-h4v2-h7v3-h15v2-h16-h17"
+            )
+        )
 
-    def dataset_fingerprint(self) -> str:
-        return self._descriptor_cache.describe().dataset_fingerprint
+    def _candle_cache(self, as_of: datetime | None = None) -> HistoricalCandleCachePort:
+        if self._live_candles is None:
+            return self._descriptor_cache
+        return CompositeScientificCandleCache(
+            historical=LocalCandleCache(self._cache_dir),
+            live=self._live_candles,
+            as_of=as_of or datetime.now(timezone.utc),
+        )
+
+    def dataset_fingerprint(self, *, as_of: datetime | None = None) -> str:
+        return self._candle_cache(as_of).describe().dataset_fingerprint
 
     def readiness(self) -> tuple[bool, str | None]:
         try:
@@ -496,7 +552,9 @@ class LocalHypothesisPortfolioRunner:
         request: StartReplayRequest,
         *,
         run_fingerprint: str,
+        dataset_as_of: datetime | None = None,
     ) -> Mapping[str, Any]:
+        candle_cache = self._candle_cache(dataset_as_of)
         engines: list[Mapping[str, Any]] = []
         evidence: list[Mapping[str, Any]] = []
         generated_at = _now()
@@ -510,7 +568,7 @@ class LocalHypothesisPortfolioRunner:
                 HypothesisId(value) for value in sorted(GENERAL_HYPOTHESES)
             )
             execution = RunHistoricalHypothesisReplay(
-                cache=LocalCandleCache(self._cache_dir),
+                cache=candle_cache,
                 artifacts=ImmutableReplayArtifactStore(self._artifact_root / "h1-h2-h5-h6-h7"),
             ).execute(HistoricalReplayRequest(
                 selected_hypotheses=executed_general,
@@ -577,7 +635,7 @@ class LocalHypothesisPortfolioRunner:
         )
         if requested_scientific:
             report = BuildScientificCandleModelResearch(
-                LocalCandleCache(self._cache_dir)
+                candle_cache
             ).execute(
                 ScientificCandleResearchRequest(
                     selected_hypotheses=requested_scientific,
@@ -601,6 +659,37 @@ class LocalHypothesisPortfolioRunner:
                 "resumed": False,
             })
             evidence.extend(artifact.evidence)
+        requested_prospective = tuple(
+            ProspectiveHypothesis(item)
+            for item in request.hypothesis_ids
+            if item in PROSPECTIVE_SCIENTIFIC_HYPOTHESES
+        )
+        if requested_prospective:
+            descriptor = candle_cache.describe()
+            report = build_prospective_scientific_research(
+                candle_cache.load(),
+                dataset_fingerprint=descriptor.dataset_fingerprint,
+                request=ProspectiveScientificRequest(
+                    selected_hypotheses=requested_prospective,
+                    policy=ProspectiveScientificPolicy(
+                        round_trip_cost_bps=request.cost_model.round_trip_bps
+                    ),
+                ),
+            )
+            artifact = self._prospective_artifacts.save(
+                report,
+                requested_prospective,
+                cost_model_version=request.cost_model.version,
+            )
+            engines.append({
+                "engine": "prospective_scientific_replay",
+                "hypothesis_ids": tuple(item.value for item in requested_prospective),
+                "application_run_id": report.report_fingerprint,
+                "artifact_fingerprint": artifact.artifact_fingerprint,
+                "artifact_uri": artifact.artifact_uri,
+                "resumed": False,
+            })
+            evidence.extend(artifact.evidence)
         requested_orderbook = tuple(
             item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
         )
@@ -614,7 +703,7 @@ class LocalHypothesisPortfolioRunner:
             evidence.extend(
                 _blocked_orderbook_evidence(
                     hypothesis_id,
-                    dataset_fingerprint=self.dataset_fingerprint(),
+                    dataset_fingerprint=candle_cache.describe().dataset_fingerprint,
                     cost_model_version=request.cost_model.version,
                     generated_at=generated_at,
                 )
@@ -783,11 +872,33 @@ def create_app(
     return app
 
 
-def build_app(*, cache_dir: Path, state_dir: Path, artifact_dir: Path) -> FastAPI:
+def build_app(
+    *,
+    cache_dir: Path,
+    state_dir: Path,
+    artifact_dir: Path,
+    clickhouse_url: str | None = None,
+    clickhouse_database: str = "signal_engine",
+    clickhouse_username: str = "investment_signals",
+    clickhouse_password_file: Path | None = None,
+) -> FastAPI:
+    live_candles: VersionedScientificCandleSource | None = None
+    if clickhouse_url:
+        if clickhouse_password_file is None:
+            raise ValueError(
+                "clickhouse_password_file is required when ClickHouse live candles are enabled"
+            )
+        live_candles = ClickHouseScientificCandleSource(
+            base_url=clickhouse_url,
+            database=clickhouse_database,
+            username=clickhouse_username,
+            password=clickhouse_password_file.read_text(encoding="utf-8").strip(),
+        )
     manager = ReplayJobManager(
         runner=LocalHypothesisPortfolioRunner(
             cache_dir=cache_dir,
             artifact_root=artifact_dir,
+            live_candles=live_candles,
         ),
         store=LocalReplayJobStore(state_dir),
     )
@@ -819,6 +930,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="127.0.0.1",
     )
     parser.add_argument("--port", type=int, default=18181)
+    parser.add_argument("--clickhouse-url")
+    parser.add_argument("--clickhouse-database", default="signal_engine")
+    parser.add_argument("--clickhouse-username", default="investment_signals")
+    parser.add_argument("--clickhouse-password-file", type=Path)
     args = parser.parse_args(argv)
     import uvicorn
 
@@ -827,6 +942,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             cache_dir=args.cache_dir,
             state_dir=args.state_dir,
             artifact_dir=args.artifact_dir,
+            clickhouse_url=args.clickhouse_url,
+            clickhouse_database=args.clickhouse_database,
+            clickhouse_username=args.clickhouse_username,
+            clickhouse_password_file=args.clickhouse_password_file,
         ),
         host=args.host,
         port=args.port,

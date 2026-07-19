@@ -150,7 +150,7 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
-            (100, 101, 102, 103, 104, 105, 106, 107),
+            (100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110),
         ),
     }
     for engine, (directory, versions) in expected.items():
@@ -295,3 +295,45 @@ def test_clickhouse_reference_ticks_migration_supports_outcome_evaluation() -> N
     assert "has_valid_book UInt8" in sql
     assert "ORDER BY (instrument_id, toDate(event_at), event_at, event_id)" in sql
     assert "TTL toDateTime(event_at) + toIntervalDay(35)" in sql
+
+
+def test_scientific_candle_migration_supports_backfill_and_live_reconciliation() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "clickhouse"
+        / "migrations"
+        / "0108_create_scientific_candles_1m.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS signal_engine.scientific_candles_1m" in sql
+    assert "source_kind Enum8('backfill' = 1, 'stream' = 2)" in sql
+    assert "ENGINE = ReplacingMergeTree(record_version)" in sql
+    assert "ORDER BY (instrument_id, trading_day, candle_at)" in sql
+    assert "TTL toDateTime(candle_at) + toIntervalDay(365)" in sql
+
+
+def test_scientific_observation_migrations_preserve_decisions_and_outcomes() -> None:
+    root = Path(__file__).resolve().parents[1] / "sql" / "clickhouse" / "migrations"
+    observations = (
+        root / "0109_create_scientific_hypothesis_observations.up.sql"
+    ).read_text(encoding="utf-8")
+    outcomes = (
+        root / "0110_create_scientific_hypothesis_outcomes.up.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "'matched' = 1, 'not_matched' = 2, 'abstain' = 3" in observations
+    assert "feature_max_observed_at DateTime64(6, 'UTC')" in observations
+    assert "effect_unit LowCardinality(String)" in observations
+    assert "claim_scope LowCardinality(String)" in observations
+    assert "TTL toDateTime(observed_at) + toIntervalDay(365)" in observations
+    assert "observation_id String" in observations
+    assert "scientific_source_ids Array(String)" in observations
+    assert "source_kind Enum8('stream' = 1, 'historical_backfill' = 2)" in observations
+    assert "outcome_id String" in outcomes
+    assert "available UInt8" in outcomes
+    assert "outcome_policy_version LowCardinality(String)" in outcomes
+    assert "source_max_observed_at DateTime64(6, 'UTC')" in outcomes
+    assert "payload_fingerprint String" in outcomes
+    assert "TTL toDateTime(target_at) + toIntervalDay(365)" in outcomes

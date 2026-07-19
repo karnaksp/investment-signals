@@ -55,6 +55,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
         {"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}
     ),
     "reference_tick_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
+    "scientific_candle_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
     "signal_outcome_worker": frozenset(
         {"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}
     ),

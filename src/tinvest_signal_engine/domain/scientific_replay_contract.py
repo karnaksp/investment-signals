@@ -39,6 +39,9 @@ class ScientificReplayDefinition:
     horizons_seconds: tuple[int, ...]
     data_requirement: ReplayDataRequirement
     allowed_source_data_states: tuple[ReplaySourceDataState, ...]
+    claim_family: str = "directional"
+    effect_unit: str = "cost_adjusted_signed_return_bps"
+    claim_scope: str = "price_direction"
 
 
 _CANDLE_STATES = (
@@ -89,11 +92,19 @@ SCIENTIFIC_REPLAY_CONTRACT_V1 = (
         "H7", "h7-relative-volume-future-activity", "1.0.0", "activity_increase",
         "any_liquid_session_phase", (900, 1800, 3600),
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "relative_activity_uplift", "activity_only",
     ),
     ScientificReplayDefinition(
         "H7V2", "h7-relative-volume-future-activity", "2.0.0", "activity_increase",
         "any_liquid_session_phase", (900, 1800),
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "relative_variance_uplift", "volatility_only",
+    ),
+    ScientificReplayDefinition(
+        "H7V3", "h7-relative-volume-future-activity", "3.0.0",
+        "volatility_increase", "any_liquid_session_phase", (1800,),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "variance_uplift_ratio_x_10000", "volatility_only",
     ),
     ScientificReplayDefinition(
         "H10", "h10-positive-main-open-gap-reversion", "1.0.0",
@@ -106,9 +117,38 @@ SCIENTIFIC_REPLAY_CONTRACT_V1 = (
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
     ),
     ScientificReplayDefinition(
+        "H3V2", "h3-jump-low-activity-reversal", "2.0.0", "reversal",
+        "main_session", (300, 900),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
+        "H4V2", "h4-jump-high-activity-continuation", "2.0.0", "continuation",
+        "main_session", (300, 900),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
         "H15", "h15-multi-window-volatility-forecast", "1.0.0",
         "volatility_increase", "any_liquid_session_phase", (1800, 3600),
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "qlike_improvement", "volatility_only",
+    ),
+    ScientificReplayDefinition(
+        "H15V2", "h15-multi-window-volatility-forecast", "2.0.0",
+        "volatility_increase", "any_liquid_session_phase", (1800,),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "qlike_improvement_x_10000", "volatility_only",
+    ),
+    ScientificReplayDefinition(
+        "H16", "h16-negative-semivariance-future-risk", "1.0.0",
+        "volatility_increase", "any_liquid_session_phase", (1800,),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "variance_uplift_ratio_x_10000", "volatility_only",
+    ),
+    ScientificReplayDefinition(
+        "H17", "h17-volatility-jump-persistence", "1.0.0",
+        "volatility_increase", "any_liquid_session_phase", (1800,),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "variance_uplift_ratio_x_10000", "volatility_only",
     ),
     ScientificReplayDefinition(
         "H8", "h8-best-queue-imbalance", "1.0.0", "same_as_queue_imbalance",
@@ -143,6 +183,9 @@ def scientific_replay_formula_fingerprint(short_id: str) -> str:
         "expected_direction": definition.expected_direction,
         "horizons_seconds": definition.horizons_seconds,
         "market_phase": definition.market_phase,
+        "claim_family": definition.claim_family,
+        "effect_unit": definition.effect_unit,
+        "claim_scope": definition.claim_scope,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + sha256(encoded).hexdigest()

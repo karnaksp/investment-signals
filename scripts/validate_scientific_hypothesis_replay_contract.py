@@ -99,6 +99,9 @@ def validate_contract(
             "allowed_source_data_states": [
                 item.value for item in definition.allowed_source_data_states
             ],
+            "claim_family": definition.claim_family,
+            "effect_unit": definition.effect_unit,
+            "claim_scope": definition.claim_scope,
         }
         if row != expected:
             errors.append(f"fixture definition drifted for {definition.short_id}")

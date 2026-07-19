@@ -42,8 +42,7 @@ from tinvest_signal_engine.domain.trading_phases import (
 
 class ProspectiveClaimFamily(str, Enum):
     DIRECTIONAL = "directional"
-    VOLATILITY_RISK = "volatility_risk"
-    FORECAST_QUALITY = "forecast_quality"
+    ACTIVITY = "activity"
 
 
 class ProspectiveEffectUnit(str, Enum):
@@ -89,8 +88,8 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
     ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: (
         ProspectiveEvidenceDefinition(
             ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
-            "h7-relative-volume-future-volatility",
-            ProspectiveClaimFamily.VOLATILITY_RISK,
+            "h7-relative-volume-future-activity",
+            ProspectiveClaimFamily.ACTIVITY,
             ProspectiveEffectUnit.VARIANCE_UPLIFT_RATIO_X_10000,
             "independent_holdout_matched_controls",
             TargetMetric.FUTURE_VARIANCE_UPLIFT,
@@ -100,7 +99,7 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
     ProspectiveHypothesis.HAR_VOLATILITY_V2: ProspectiveEvidenceDefinition(
         ProspectiveHypothesis.HAR_VOLATILITY_V2,
         "h15-har-volatility-forecast-v2",
-        ProspectiveClaimFamily.FORECAST_QUALITY,
+        ProspectiveClaimFamily.ACTIVITY,
         ProspectiveEffectUnit.QLIKE_IMPROVEMENT_X_10000,
         "independent_holdout_vs_best_and_mean_ewma_phase_qlike",
         TargetMetric.FUTURE_REALIZED_VARIANCE,
@@ -109,8 +108,8 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
     ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: (
         ProspectiveEvidenceDefinition(
             ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
-            "h16-downside-semivariance-future-volatility",
-            ProspectiveClaimFamily.VOLATILITY_RISK,
+            "h16-negative-semivariance-future-risk",
+            ProspectiveClaimFamily.ACTIVITY,
             ProspectiveEffectUnit.VARIANCE_UPLIFT_RATIO_X_10000,
             "independent_holdout_matched_controls",
             TargetMetric.FUTURE_VARIANCE_UPLIFT,
@@ -121,7 +120,7 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
         ProspectiveEvidenceDefinition(
             ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
             "h17-volatility-jump-persistence",
-            ProspectiveClaimFamily.VOLATILITY_RISK,
+            ProspectiveClaimFamily.ACTIVITY,
             ProspectiveEffectUnit.VARIANCE_UPLIFT_RATIO_X_10000,
             "independent_holdout_matched_controls",
             TargetMetric.FUTURE_VARIANCE_UPLIFT,

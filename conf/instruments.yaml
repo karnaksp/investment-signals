@@ -29,7 +29,7 @@ instruments:
       # Глубина стакана: число уровней с каждой стороны; пусто/null — не подписываться на стакан.
       order_book_depth: 50
       # Свечи (если true — указать candle_interval).
-      candles: false
+      candles: true
       candle_interval: 1m
 
   - ticker: GAZP
@@ -40,7 +40,7 @@ instruments:
       last_price: true
       info: false
       order_book_depth: 10
-      candles: false
+      candles: true
       candle_interval: 1m
 
   - ticker: LKOH
@@ -51,7 +51,7 @@ instruments:
       last_price: true
       info: false
       order_book_depth: 10
-      candles: false
+      candles: true
       candle_interval: 1m
 
   # --- RU equities: liquid / high-attention core (TQBR) ---
@@ -64,7 +64,7 @@ instruments:
       last_price: true
       info: false
       order_book_depth: 10
-      candles: false
+      candles: true
       candle_interval: 1m
 
   - ticker: VTBR

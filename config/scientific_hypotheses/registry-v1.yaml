@@ -1,4 +1,4 @@
-schema_version: "1.1.0"
+schema_version: "1.2.0"
 
 # This registry records research leads. A publication is never, by itself,
 # evidence that the effect works on MOEX. Applied hypotheses additionally need
@@ -191,6 +191,40 @@ sources:
       - A MOEX activity warning must be allowed to fail by instrument and phase rather than assume a universal effect.
     original_result: Significant volume-volatility lead-lag relations appeared for many, but not all, DJIA stocks.
 
+  - source_id: patton-sheppard-2015
+    title: "Good Volatility, Bad Volatility: Signed Jumps and the Persistence of Volatility"
+    authors: [Andrew J. Patton, Kevin Sheppard]
+    publication_year: 2015
+    identifier: doi:10.1162/REST_a_00503
+    url: https://doi.org/10.1162/REST_a_00503
+    primary_publication: true
+    market: United States equities
+    sample_period: Historical S&P 500 index and 105-stock sample documented in the publication
+    sample_description: High-frequency equity returns decomposed into positive and negative realized semivariances and signed jumps
+    data_frequency: High-frequency returns aggregated to realized semivariance and future volatility
+    economic_mechanism: Negative price variation can carry more persistent information about uncertainty and leverage-related risk than positive variation.
+    limitations:
+      - The source studies daily volatility persistence, not a ready-made 30-minute MOEX alert.
+      - A candle-only intraday adaptation cannot identify investor type or news and must be validated prospectively by phase.
+    original_result: Future volatility was more strongly related to past negative realized semivariance than to positive semivariance, and negative jumps were followed by higher volatility.
+
+  - source_id: corsi-pirino-reno-2010
+    title: Threshold Bipower Variation and the Impact of Jumps on Volatility Forecasting
+    authors: [Fulvio Corsi, Davide Pirino, Roberto Renò]
+    publication_year: 2010
+    identifier: doi:10.1016/j.jeconom.2010.07.008
+    url: https://doi.org/10.1016/j.jeconom.2010.07.008
+    primary_publication: true
+    market: United States equities, S&P 500 index, and United States bond yields
+    sample_period: Historical high-frequency samples documented in the publication
+    sample_description: Realized variation decomposed into continuous and jump components using threshold bipower variation
+    data_frequency: High-frequency returns aggregated to realized and bipower variation
+    economic_mechanism: Discontinuous price moves can reveal a regime of elevated uncertainty whose effect persists into future volatility.
+    limitations:
+      - Minute candles are coarser and noisier than the source estimators and require a separately sealed approximation.
+      - A detected jump predicts volatility risk, not the sign of the next price move.
+    original_result: Separating jumps from continuous variation improved volatility forecasts, especially after a detected jump.
+
 hypotheses:
   - hypothesis_id: h1-morning-low-volume-reversion
     version: "1.0.0"
@@ -291,6 +325,39 @@ hypotheses:
       data_split_policy: 60/20/20 chronological trading days
       multiple_testing_policy: Benjamini-Hochberg within jump-regime family at q<=0.05
 
+  - hypothesis_id: h3-jump-low-activity-reversal
+    version: "2.0.0"
+    title: Разворот экстремального движения при слабой активности — причинная версия
+    origin: research_extension
+    source_ids: [jegadeesh-titman-1995, butt-hogholm-sadaqat-2021, chiang-kirby-nie-2021]
+    testable_statement: Экстремальное пятиминутное движение при относительном объёме ниже медианы и повышенной прошлой неликвидности разворачивается на горизонте 5 или 15 минут сильнее сопоставимых событий после издержек.
+    economic_mechanism: Слабая подтверждающая активность и высокая неликвидность соответствуют временному ценовому давлению, которое может поглощаться поставщиками ликвидности.
+    market_phase: main_session
+    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume_percentile < 0.50, lagged_illiquidity_percentile >= 0.75]
+    expected_direction: reversal
+    horizon_seconds: [300, 900]
+    abstention_conditions: [market_wide_move_same_direction, trading_gap, missing_prior_phase_history, missing_liquidity_proxy, h4_high_activity_regime]
+    falsification_criterion: Доходность разворота после версионированных издержек не превосходит сопоставленные контроли на будущей выборке либо знак не устойчив в четырёх из пяти блоков.
+    original_market_result: На исходных рынках часть краткосрочных разворотов связывалась с временным давлением ликвидности; точное внутридневное разделение режима является новой MOEX-версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h3-v2
+      hypothesis_id: h3-jump-low-activity-reversal
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-19T13:50:17+03:00"
+      expected_direction: reversal
+      feature_definitions: [five-minute return ends at observation time, phase percentiles use exactly 40 completed prior trading days, lagged illiquidity uses only windows ending before the event, H3V2 and H4V2 regimes are mutually exclusive]
+      thresholds: {return_5m_percentile_min: 0.99, relative_volume_percentile_max_exclusive: 0.50, lagged_illiquidity_percentile_min: 0.75, prior_phase_days: 40, primary_horizon_seconds: 900, minimum_shadow_events: 200, minimum_shadow_days: 20, minimum_release_events: 300, minimum_release_days: 30, minimum_coverage: 0.10}
+      market_phase: main_session
+      horizon_seconds: [300, 900]
+      success_criterion: Future cost-adjusted reversal lift to five matched controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, at least 10 instruments, maximum ticker share<=0.25, and 4/5 block stability for an applied claim.
+      abstention_conditions: [market_wide_move_same_direction, trading_gap, missing_prior_phase_history, missing_liquidity_proxy, h4_high_activity_regime]
+      cost_model_version: "1.0.0"
+      data_split_policy: existing 180-day cache is development-only; primary holdout starts strictly after sealed_at with a 900-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within jump-regime research at q<=0.05; Holm across future primary H3V2 and H4V2 release tests
+
   - hypothesis_id: h4-jump-high-activity-continuation
     version: "1.0.0"
     title: Продолжение резкого движения при высокой активности
@@ -323,6 +390,39 @@ hypotheses:
       cost_model_version: "1.0.0"
       data_split_policy: 60/20/20 chronological trading days
       multiple_testing_policy: Benjamini-Hochberg within jump-regime family at q<=0.05
+
+  - hypothesis_id: h4-jump-high-activity-continuation
+    version: "2.0.0"
+    title: Продолжение экстремального движения при высокой активности — причинная версия
+    origin: research_extension
+    source_ids: [chiang-kirby-nie-2021]
+    testable_statement: Экстремальное пятиминутное движение при относительном объёме и диапазоне не ниже 90-го процентиля продолжается на горизонте 5 или 15 минут сильнее сопоставимых событий после издержек.
+    economic_mechanism: Согласованные цена, объём и диапазон чаще соответствуют поступлению информации и продолжению её включения в цену, чем временному недостатку ликвидности.
+    market_phase: main_session
+    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume_percentile >= 0.90, range_percentile >= 0.90]
+    expected_direction: continuation
+    horizon_seconds: [300, 900]
+    abstention_conditions: [trading_gap, missing_prior_phase_history, relative_volume_unavailable, range_norm_unavailable, h3_low_activity_regime]
+    falsification_criterion: Доходность продолжения после версионированных издержек не превосходит сопоставленные контроли на будущей выборке либо знак не устойчив в четырёх из пяти блоков.
+    original_market_result: В исходном исследовании высокая торговая активность отделяла режим краткосрочного продолжения от разворота; минутная MOEX-формула является новой версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h4-v2
+      hypothesis_id: h4-jump-high-activity-continuation
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-19T13:50:17+03:00"
+      expected_direction: continuation
+      feature_definitions: [five-minute return range and volume end at observation time, phase percentiles use exactly 40 completed prior trading days, H3V2 and H4V2 regimes are mutually exclusive]
+      thresholds: {return_5m_percentile_min: 0.99, relative_volume_percentile_min: 0.90, range_percentile_min: 0.90, prior_phase_days: 40, primary_horizon_seconds: 900, minimum_shadow_events: 200, minimum_shadow_days: 20, minimum_release_events: 300, minimum_release_days: 30, minimum_coverage: 0.10}
+      market_phase: main_session
+      horizon_seconds: [300, 900]
+      success_criterion: Future cost-adjusted continuation lift to five matched controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, at least 10 instruments, maximum ticker share<=0.25, and 4/5 block stability for an applied claim.
+      abstention_conditions: [trading_gap, missing_prior_phase_history, relative_volume_unavailable, range_norm_unavailable, h3_low_activity_regime]
+      cost_model_version: "1.0.0"
+      data_split_policy: existing 180-day cache is development-only; primary holdout starts strictly after sealed_at with a 900-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within jump-regime research at q<=0.05; Holm across future primary H3V2 and H4V2 release tests
 
   - hypothesis_id: h5-same-phase-return-recurrence
     version: "1.0.0"
@@ -456,6 +556,39 @@ hypotheses:
       data_split_policy: 60/20/20 chronological trading days with an embargo of at least 1800 seconds
       multiple_testing_policy: Benjamini-Hochberg within activity family at q<=0.05 for research; Holm on future primary release tests
 
+  - hypothesis_id: h7-relative-volume-future-activity
+    version: "3.0.0"
+    title: Аномальный относительный объём и будущая реализованная изменчивость
+    origin: research_extension
+    source_ids: [graczyk-queiros-2018, darrat-rahman-zhong-2003]
+    testable_statement: Объём завершённого 15-минутного окна не ниже 90-го процентиля последних 40 дней той же фазы предшествует повышенной реализованной изменчивости следующих 30 минут относительно сопоставленных контрольных окон.
+    economic_mechanism: Необычная фазово-нормированная торговая активность может отражать поступление информации и последовательное включение её в изменчивость цены.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [completed_contiguous_1m_candles == 15, prior_same_phase_windows == 40, relative_volume_15m_percentile >= 0.90, prior_phase_median_future_variance > 0]
+    expected_direction: volatility_increase
+    horizon_seconds: [1800]
+    abstention_conditions: [fewer_than_40_prior_phase_windows, incomplete_or_non_contiguous_window, missing_or_negative_volume, zero_phase_variance_baseline, outcome_crosses_session_break, shortened_session, future_prices_unavailable]
+    falsification_criterion: Нижняя граница 95%-интервала прироста нормированной будущей изменчивости к контролю не выше нуля, поправка Холма выше 0,05 либо положительный знак отсутствует хотя бы в четырёх из пяти будущих блоков.
+    original_market_result: Публикации обосновывают фазовую норму объёма и возможную связь объёма с последующей изменчивостью; точная 15/30-минутная формула является новой MOEX-версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h7-v3
+      hypothesis_id: h7-relative-volume-future-activity
+      hypothesis_version: "3.0.0"
+      sealed_at: "2026-07-19T13:50:17+03:00"
+      expected_direction: volatility_increase
+      feature_definitions: [V15 is the sum of volume in 15 completed contiguous one-minute candles ending at observation time, relative-volume percentile uses exactly 40 prior valid trading days in the same ticker and 15-minute clock bucket, RV30 is the sum of squared log returns strictly after observation time, normalized uplift equals RV30 divided by the prior 40-day same-phase median RV30 minus one]
+      thresholds: {event_window_minutes: 15, outcome_window_minutes: 30, prior_phase_days: 40, relative_volume_percentile_min: 0.90, controls_per_event: 5, minimum_shadow_events: 200, minimum_shadow_days: 20, minimum_release_events: 300, minimum_release_days: 30, minimum_release_instruments: 10, minimum_coverage: 0.10}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [1800]
+      success_criterion: Future normalized realized-variance lift to five non-reused matched controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, maximum ticker share<=0.25, and 4/5 block stability for an applied volatility-only claim.
+      abstention_conditions: [fewer_than_40_prior_phase_windows, incomplete_or_non_contiguous_window, missing_or_negative_volume, zero_phase_variance_baseline, outcome_crosses_session_break, shortened_session, future_prices_unavailable]
+      cost_model_version: "not-applicable-nondirectional-v1"
+      data_split_policy: existing 180-day cache is descriptive development data; primary holdout starts strictly after sealed_at with a 1800-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within volatility-activity research at q<=0.05; Holm across future primary release tests
+
   - hypothesis_id: h10-positive-main-open-gap-reversion
     version: "1.0.0"
     title: Возврат положительного разрыва на открытии основной сессии
@@ -554,6 +687,105 @@ hypotheses:
       cost_model_version: "1.0.0"
       data_split_policy: expanding chronological walk-forward with an embargo of at least 3600 seconds; current cache is research-only
       multiple_testing_policy: Benjamini-Hochberg within volatility family at q<=0.05 for research; Holm on future primary release tests
+
+  - hypothesis_id: h15-multi-window-volatility-forecast
+    version: "2.0.0"
+    title: Причинный многооконный прогноз будущей изменчивости
+    origin: research_extension
+    source_ids: [corsi-2009]
+    testable_statement: Регуляризованная HAR-модель на завершённых прошлых окнах 5, 30 и 120 минут улучшает прогноз изменчивости следующих 30 минут одновременно относительно экспоненциального среднего и медианы той же фазы дня.
+    economic_mechanism: Участники с разными горизонтами создают устойчивый каскад компонентов изменчивости, который можно оценивать без будущих данных.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [completed_contiguous_return_windows_5m_30m_120m, model_fitted_on_prior_days_only, predicted_volatility_percentile >= 0.90]
+    expected_direction: volatility_increase
+    horizon_seconds: [1800]
+    abstention_conditions: [insufficient_120m_history, trading_gap, shortened_session, sparse_prices, prior_day_training_sample_too_small, benchmark_unavailable]
+    falsification_criterion: Нижняя граница дневного 95%-интервала улучшения QLIKE относительно любого из двух эталонов не выше нуля либо средняя абсолютная ошибка не улучшается на будущей выборке.
+    original_market_result: Исходная HAR-RV модель давала экономный прогноз долгой памяти изменчивости; точные внутридневные окна и два эталона являются новой MOEX-версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h15-v2
+      hypothesis_id: h15-multi-window-volatility-forecast
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-19T13:50:17+03:00"
+      expected_direction: volatility_increase
+      feature_definitions: [features are log1p realized variance in completed 5m 30m and 120m windows ending no later than observation time, regularized HAR coefficients use completed prior trading days only, benchmarks are causal EWMA and prior-day same-phase median, target is realized variance strictly in the next 30 minutes]
+      thresholds: {forecast_percentile_min: 0.90, short_window_seconds: 300, medium_window_seconds: 1800, long_window_seconds: 7200, outcome_window_seconds: 1800, minimum_training_events: 1000, minimum_shadow_days: 20, minimum_release_days: 30, minimum_release_instruments: 10}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [1800]
+      success_criterion: Future HAR improves QLIKE against both causal benchmarks with a positive daily-bootstrap 95% lower bound, also improves mean absolute error, has Holm-adjusted p<=0.05, maximum ticker share<=0.25, and 4/5 block stability.
+      abstention_conditions: [insufficient_120m_history, trading_gap, shortened_session, sparse_prices, prior_day_training_sample_too_small, benchmark_unavailable]
+      cost_model_version: "not-applicable-nondirectional-v1"
+      data_split_policy: existing 180-day cache is development-only; primary expanding walk-forward starts strictly after sealed_at with a 1800-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within volatility research at q<=0.05; Holm across future primary release tests
+
+  - hypothesis_id: h16-negative-semivariance-future-risk
+    version: "1.0.0"
+    title: Преобладание отрицательной полуизменчивости и будущий риск
+    origin: research_extension
+    source_ids: [patton-sheppard-2015]
+    testable_statement: Доля отрицательной реализованной полуизменчивости предыдущих 30 минут не ниже 90-го процентиля прошлой фазовой нормы предшествует повышенной изменчивости следующих 30 минут относительно контроля.
+    economic_mechanism: Отрицательные ценовые движения могут сильнее отражать рост неопределённости и эффект финансового рычага, поэтому их вариация более устойчива.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [completed_contiguous_30m_return_window, downside_semivariance_share_percentile >= 0.90, prior_same_phase_windows == 40]
+    expected_direction: volatility_increase
+    horizon_seconds: [1800]
+    abstention_conditions: [fewer_than_40_prior_phase_windows, zero_realized_variance, incomplete_or_non_contiguous_window, outcome_crosses_session_break, future_prices_unavailable]
+    falsification_criterion: Нижняя граница дневного 95%-интервала прироста будущей изменчивости к контролю не выше нуля либо знак не устойчив в четырёх из пяти будущих блоков.
+    original_market_result: В исходной работе отрицательная полуизменчивость сильнее положительной предсказывала будущую дневную изменчивость; 30-минутная MOEX-формула является новой версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h16-v1
+      hypothesis_id: h16-negative-semivariance-future-risk
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T13:50:17+03:00"
+      expected_direction: volatility_increase
+      feature_definitions: [downside semivariance share equals squared negative log returns divided by total realized variance in a completed prior 30-minute window, percentile uses exactly 40 prior valid trading days in the same phase, target is realized variance strictly in the following 30 minutes]
+      thresholds: {feature_window_minutes: 30, outcome_window_minutes: 30, prior_phase_days: 40, downside_share_percentile_min: 0.90, controls_per_event: 5, minimum_shadow_events: 200, minimum_shadow_days: 20, minimum_release_events: 300, minimum_release_days: 30, minimum_release_instruments: 10, minimum_coverage: 0.10}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [1800]
+      success_criterion: Future normalized realized-variance lift to five matched controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, maximum ticker share<=0.25, and 4/5 block stability.
+      abstention_conditions: [fewer_than_40_prior_phase_windows, zero_realized_variance, incomplete_or_non_contiguous_window, outcome_crosses_session_break, future_prices_unavailable]
+      cost_model_version: "not-applicable-nondirectional-v1"
+      data_split_policy: existing 180-day cache is development-only; primary holdout starts strictly after sealed_at with a 1800-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within volatility-risk research at q<=0.05; Holm across future primary release tests
+
+  - hypothesis_id: h17-volatility-jump-persistence
+    version: "1.0.0"
+    title: Скачок изменчивости и последующее сохранение риска
+    origin: research_extension
+    source_ids: [corsi-pirino-reno-2010]
+    testable_statement: Оценочная доля скачка в изменчивости предыдущих 30 минут не ниже 95-го процентиля прошлой фазовой нормы предшествует повышенной изменчивости следующих 30 минут относительно контроля.
+    economic_mechanism: Дискретный ценовой скачок может обозначать новый режим неопределённости, который сохраняется после самого движения.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [completed_contiguous_30m_return_window, jump_share_percentile >= 0.95, prior_same_phase_windows == 60]
+    expected_direction: volatility_increase
+    horizon_seconds: [1800]
+    abstention_conditions: [fewer_than_60_prior_phase_windows, zero_realized_variance, incomplete_or_non_contiguous_window, bipower_variation_unavailable, outcome_crosses_session_break, future_prices_unavailable]
+    falsification_criterion: Нижняя граница дневного 95%-интервала прироста будущей изменчивости к контролю не выше нуля либо знак не устойчив в четырёх из пяти будущих блоков.
+    original_market_result: В исходной работе выделение скачков улучшало прогноз изменчивости, особенно после скачка; минутная оценка доли скачка является новой MOEX-версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h17-v1
+      hypothesis_id: h17-volatility-jump-persistence
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-19T13:50:17+03:00"
+      expected_direction: volatility_increase
+      feature_definitions: [realized variance is the sum of squared log returns in the completed prior 30-minute window, bipower variation is pi over two times adjacent absolute-return products, jump share is max realized variance minus bipower variation divided by realized variance, percentile uses exactly 60 prior valid trading days in the same phase]
+      thresholds: {feature_window_minutes: 30, outcome_window_minutes: 30, prior_phase_days: 60, jump_share_percentile_min: 0.95, controls_per_event: 5, minimum_shadow_events: 200, minimum_shadow_days: 20, minimum_release_events: 300, minimum_release_days: 30, minimum_release_instruments: 10, minimum_coverage: 0.10}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [1800]
+      success_criterion: Future normalized realized-variance lift to five matched controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, maximum ticker share<=0.25, and 4/5 block stability.
+      abstention_conditions: [fewer_than_60_prior_phase_windows, zero_realized_variance, incomplete_or_non_contiguous_window, bipower_variation_unavailable, outcome_crosses_session_break, future_prices_unavailable]
+      cost_model_version: "not-applicable-nondirectional-v1"
+      data_split_policy: existing 180-day cache is development-only; primary holdout starts strictly after sealed_at with a 1800-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within volatility-risk research at q<=0.05; Holm across future primary release tests
 
   - hypothesis_id: h8-best-queue-imbalance
     version: "1.0.0"

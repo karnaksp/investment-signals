@@ -30,7 +30,7 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
     )
 
     assert validate_contract(registry, fixture) == ()
-    assert fixture["contract_version"] == "1.2.0"
+    assert fixture["contract_version"] == "1.3.0"
     assert tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1) == (
         "H1",
         "H2",
@@ -40,9 +40,15 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
         "H6",
         "H7",
         "H7V2",
+        "H7V3",
         "H10",
         "H11",
+        "H3V2",
+        "H4V2",
         "H15",
+        "H15V2",
+        "H16",
+        "H17",
         "H8",
         "H9",
     )
@@ -61,11 +67,31 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
         "H6": "1.0.0",
         "H7": "1.0.0",
         "H7V2": "2.0.0",
+        "H7V3": "3.0.0",
         "H10": "1.0.0",
         "H11": "1.0.0",
+        "H3V2": "2.0.0",
+        "H4V2": "2.0.0",
         "H15": "1.0.0",
+        "H15V2": "2.0.0",
+        "H16": "1.0.0",
+        "H17": "1.0.0",
         "H8": "1.0.0",
         "H9": "1.0.0",
+    }
+    assert {
+        item.short_id: (item.claim_family, item.effect_unit, item.claim_scope)
+        for item in SCIENTIFIC_REPLAY_CONTRACT_V1
+        if item.short_id in {"H7V3", "H15V2", "H16", "H17"}
+    } == {
+        "H7V3": ("activity", "variance_uplift_ratio_x_10000", "volatility_only"),
+        "H15V2": (
+            "activity",
+            "qlike_improvement_x_10000",
+            "volatility_only",
+        ),
+        "H16": ("activity", "variance_uplift_ratio_x_10000", "volatility_only"),
+        "H17": ("activity", "variance_uplift_ratio_x_10000", "volatility_only"),
     }
 
 
