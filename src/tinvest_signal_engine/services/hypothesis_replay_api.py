@@ -189,6 +189,38 @@ class ReplayResultResponse(BaseModel):
     network_download_performed: Literal[False] = False
 
 
+class ReplayEvidenceReasonCountResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: str = Field(min_length=1)
+    count: int = Field(gt=0)
+
+
+class ReplayEvidenceConfidenceIntervalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    lower: float
+    estimate: float
+    upper: float
+    confidence_level: float = Field(gt=0.0, lt=1.0)
+
+
+class ReplayEvidenceDiagnosticsV2Response(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    version: Literal["evidence-diagnostics-v2"]
+    event_prevalence: float | None = Field(default=None, ge=0.0, le=1.0)
+    eligible_event_count: int = Field(ge=0)
+    matched_event_count: int = Field(ge=0)
+    match_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    data_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    reasons_histogram: tuple[ReplayEvidenceReasonCountResponse, ...]
+    primary_effect_estimate: float | None = None
+    primary_effect_interval: ReplayEvidenceConfidenceIntervalResponse | None = None
+    primary_p_value: float | None = Field(default=None, ge=0.0, le=1.0)
+    descriptive_only: bool
+
+
 class ReplayEvidenceResponse(BaseModel):
     """Strict product-facing aggregate for one requested hypothesis."""
 
@@ -228,6 +260,7 @@ class ReplayEvidenceResponse(BaseModel):
     maximum_ticker_share: float | None = Field(default=None, ge=0.0, le=1.0)
     maximum_period_share: float | None = Field(default=None, ge=0.0, le=1.0)
     abstention_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    diagnostics_v2: ReplayEvidenceDiagnosticsV2Response | None = None
     horizons: tuple["ReplayHorizonEvidenceResponse", ...]
     claim_family: str = Field(default="directional", min_length=1)
     effect_unit: str = Field(

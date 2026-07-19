@@ -24,6 +24,7 @@ from tinvest_signal_engine.domain.hypothesis_evidence import (
     ChronologicalSplit,
     EvidenceBundle,
     EvidenceDecision,
+    EvidenceDiagnosticsV2,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveHypothesis,
@@ -44,6 +45,9 @@ PROSPECTIVE_SCIENTIFIC_EVIDENCE_POLICY = EvidenceGatePolicy(
 # All six formulas were sealed on 2026-07-19.  Day-partitioned evidence can
 # therefore become genuinely prospective only from the next trading day.
 PROSPECTIVE_PRIMARY_HOLDOUT_START = date(2026, 7, 20)
+PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA = (
+    "prospective-scientific-evidence-v1.1.0"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +182,7 @@ class ProspectiveScientificReplayArtifactAdapter:
 
         artifact_fingerprint = _fingerprint(
             {
-                "artifact_schema": "prospective-scientific-evidence-v1.0.0",
+                "artifact_schema": PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA,
                 "cost_model_version": cost_model_version,
                 "evidence_policy": asdict(self._evidence_policy),
                 "report_fingerprint": portfolio_report_fingerprint,
@@ -225,7 +229,7 @@ class ProspectiveScientificReplayArtifactAdapter:
         )
         run_dir = self._root / artifact_fingerprint.removeprefix("sha256:")
         manifest = {
-            "artifact_schema": "prospective-scientific-evidence-v1.0.0",
+            "artifact_schema": PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA,
             "dataset_fingerprint": portfolio_dataset_fingerprint,
             "evidence_policy": asdict(self._evidence_policy),
             "report_fingerprint": portfolio_report_fingerprint,
@@ -311,6 +315,7 @@ def _evidence_row(
         "total_blocks": len(bundle.stability.blocks),
         "maximum_ticker_share": bundle.maximum_instrument_share,
         "maximum_period_share": maximum_period_share,
+        "diagnostics_v2": _diagnostics_v2_payload(bundle.diagnostics_v2),
         "abstention_rate": (
             1.0
             - coverage.eligible_common_support_events
@@ -333,6 +338,42 @@ def _evidence_row(
         "effect_unit": definition.effect_unit.value,
         "claim_scope": definition.claim_scope,
         "target_metric": definition.target_metric.value,
+    }
+
+
+def _diagnostics_v2_payload(
+    diagnostics: EvidenceDiagnosticsV2 | None,
+) -> Mapping[str, Any] | None:
+    if diagnostics is None:
+        return None
+    interval = diagnostics.primary_effect_interval
+    return {
+        "version": diagnostics.version,
+        "event_prevalence": diagnostics.event_prevalence,
+        "eligible_event_count": diagnostics.eligible_event_count,
+        "matched_event_count": diagnostics.matched_event_count,
+        "match_coverage": diagnostics.match_coverage,
+        "data_coverage": diagnostics.data_coverage,
+        "reasons_histogram": tuple(
+            {
+                "reason_code": item.reason_code,
+                "count": item.count,
+            }
+            for item in diagnostics.reasons_histogram
+        ),
+        "primary_effect_estimate": diagnostics.primary_effect_estimate,
+        "primary_effect_interval": (
+            {
+                "lower": interval.lower,
+                "estimate": interval.estimate,
+                "upper": interval.upper,
+                "confidence_level": interval.confidence_level,
+            }
+            if interval is not None
+            else None
+        ),
+        "primary_p_value": diagnostics.primary_p_value,
+        "descriptive_only": diagnostics.descriptive_only,
     }
 
 

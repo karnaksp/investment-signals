@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from tinvest_signal_engine.services.hypothesis_replay_api import (
     LocalHypothesisPortfolioRunner,
     LocalReplayJobStore,
+    ReplayEvidenceResponse,
     ReplayJobManager,
     StartReplayRequest,
     create_app,
@@ -154,6 +155,58 @@ def test_health_readiness_and_completed_result(tmp_path: Path) -> None:
         ]
 
     assert len(runner.calls) == 1
+
+
+def test_replay_evidence_contract_preserves_v2_diagnostics_and_legacy_rows() -> None:
+    legacy = ReplayEvidenceResponse.model_validate(_fake_evidence("H1"))
+    assert legacy.diagnostics_v2 is None
+
+    row = dict(_fake_evidence("H7V3"))
+    row["diagnostics_v2"] = {
+        "version": "evidence-diagnostics-v2",
+        "event_prevalence": 0.25,
+        "eligible_event_count": 4,
+        "matched_event_count": 3,
+        "match_coverage": 0.75,
+        "data_coverage": 0.8,
+        "reasons_histogram": (
+            {"reason_code": "event_condition_not_met", "count": 12},
+            {"reason_code": "matched_controls_unavailable", "count": 1},
+        ),
+        "primary_effect_estimate": 6.5,
+        "primary_effect_interval": {
+            "lower": 1.0,
+            "estimate": 6.5,
+            "upper": 12.0,
+            "confidence_level": 0.95,
+        },
+        "primary_p_value": 0.03125,
+        "descriptive_only": True,
+    }
+
+    encoded = ReplayEvidenceResponse.model_validate(row).model_dump(mode="json")
+
+    assert encoded["diagnostics_v2"] == {
+        "version": "evidence-diagnostics-v2",
+        "event_prevalence": 0.25,
+        "eligible_event_count": 4,
+        "matched_event_count": 3,
+        "match_coverage": 0.75,
+        "data_coverage": 0.8,
+        "reasons_histogram": [
+            {"reason_code": "event_condition_not_met", "count": 12},
+            {"reason_code": "matched_controls_unavailable", "count": 1},
+        ],
+        "primary_effect_estimate": 6.5,
+        "primary_effect_interval": {
+            "lower": 1.0,
+            "estimate": 6.5,
+            "upper": 12.0,
+            "confidence_level": 0.95,
+        },
+        "primary_p_value": 0.03125,
+        "descriptive_only": True,
+    }
 
 
 def test_pending_result_returns_202_and_same_key_reuses_job(tmp_path: Path) -> None:

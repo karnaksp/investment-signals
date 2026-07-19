@@ -254,9 +254,63 @@ def test_adapter_is_deterministic_typed_and_immutable(tmp_path: Path) -> None:
     assert by_id["H7V3"]["target_metric"] == "future_variance_uplift"
     assert by_id["H7V3"]["claim_scope"] == ("independent_holdout_matched_controls")
     assert by_id["H17"]["decision"] == "blocked_by_data"
+    complete_diagnostics = by_id["H7V3"]["diagnostics_v2"]
+    assert complete_diagnostics == {
+        "version": "evidence-diagnostics-v2",
+        "event_prevalence": 8 / 48,
+        "eligible_event_count": 8,
+        "matched_event_count": 8,
+        "match_coverage": 1.0,
+        "data_coverage": 1.0,
+        "reasons_histogram": (
+            {"reason_code": "event_condition_not_met", "count": 40},
+        ),
+        "primary_effect_estimate": 10_000.0,
+        "primary_effect_interval": {
+            "lower": 10_000.0,
+            "estimate": 10_000.0,
+            "upper": 10_000.0,
+            "confidence_level": 0.95,
+        },
+        "primary_p_value": 0.00390625,
+        "descriptive_only": False,
+    }
+    blocked_diagnostics = by_id["H17"]["diagnostics_v2"]
+    assert blocked_diagnostics["version"] == "evidence-diagnostics-v2"
+    assert blocked_diagnostics["event_prevalence"] == 0.2
+    assert blocked_diagnostics["eligible_event_count"] == 1
+    assert blocked_diagnostics["matched_event_count"] == 0
+    assert blocked_diagnostics["match_coverage"] == 0.0
+    assert blocked_diagnostics["data_coverage"] == 1.0
+    assert blocked_diagnostics["primary_effect_estimate"] is None
+    assert blocked_diagnostics["primary_effect_interval"] is None
+    assert blocked_diagnostics["primary_p_value"] is None
+    assert blocked_diagnostics["descriptive_only"] is True
+    assert tuple(
+        item["reason_code"] for item in blocked_diagnostics["reasons_histogram"]
+    ) == tuple(
+        sorted(
+            item["reason_code"]
+            for item in blocked_diagnostics["reasons_histogram"]
+        )
+    )
     evidence_path = Path(first.artifact_uri) / "evidence.json"
+    expected_bytes = (
+        json.dumps(
+            first.evidence,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    assert evidence_path.read_bytes() == expected_bytes
     stored = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert stored == json.loads(json.dumps(first.evidence))
+    manifest = json.loads(
+        (Path(first.artifact_uri) / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["artifact_schema"] == "prospective-scientific-evidence-v1.1.0"
 
     evidence_path.write_text("[]\n", encoding="utf-8")
     with pytest.raises(ValueError, match="immutable prospective replay artifact"):
