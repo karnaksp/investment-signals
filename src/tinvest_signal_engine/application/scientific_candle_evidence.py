@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import Sequence
+from collections import defaultdict
+from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.application.hypothesis_evidence import (
@@ -33,6 +34,9 @@ from tinvest_signal_engine.domain.scientific_candle_models import (
     ScientificCandleHypothesis,
     ScientificModelOutcome,
 )
+from tinvest_signal_engine.domain.trading_phases import (
+    MOEX_EQUITY_PHASE_SCHEDULE_V1,
+)
 
 
 _VERSIONS = {
@@ -41,7 +45,23 @@ _VERSIONS = {
     ScientificCandleHypothesis.HAR_VOLATILITY: "1.0.0",
     ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2: "2.0.0",
 }
-_MOSCOW = ZoneInfo("Europe/Moscow")
+
+
+@dataclass(frozen=True, slots=True)
+class ScientificCandleEvidenceCoverage:
+    hypothesis_id: str
+    available_holdout_observations: int
+    triggered_events: int
+    eligible_common_support_events: int
+    unmatched_events: int
+    control_candidates: int
+    matched_event_ids: tuple[str, ...]
+
+    @property
+    def common_support_rate(self) -> float | None:
+        if self.triggered_events == 0:
+            return None
+        return self.eligible_common_support_events / self.triggered_events
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +69,7 @@ class ScientificCandleEvidenceAssessment:
     """One multiple-testing family evaluated on the sealed holdout."""
 
     bundles: tuple[EvidenceBundle, ...]
+    coverage: tuple[ScientificCandleEvidenceCoverage, ...]
 
     def for_hypothesis(
         self,
@@ -56,6 +77,14 @@ class ScientificCandleEvidenceAssessment:
     ) -> EvidenceBundle:
         return next(
             item for item in self.bundles if item.hypothesis_id == hypothesis.value
+        )
+
+    def coverage_for(
+        self,
+        hypothesis: ScientificCandleHypothesis,
+    ) -> ScientificCandleEvidenceCoverage:
+        return next(
+            item for item in self.coverage if item.hypothesis_id == hypothesis.value
         )
 
 
@@ -87,7 +116,7 @@ class AssessScientificCandleHoldoutEvidence:
             raise ValueError("cost_model_version must not be empty")
 
         paired = tuple(zip(report.features, report.outcomes, strict=True))
-        requests = tuple(
+        prepared = tuple(
             self._request(
                 report,
                 hypothesis,
@@ -97,7 +126,8 @@ class AssessScientificCandleHoldoutEvidence:
             for hypothesis in selected
         )
         return ScientificCandleEvidenceAssessment(
-            bundles=self._portfolio.execute(requests)
+            bundles=self._portfolio.execute(tuple(item[0] for item in prepared)),
+            coverage=tuple(item[1] for item in prepared),
         )
 
     def _request(
@@ -107,7 +137,7 @@ class AssessScientificCandleHoldoutEvidence:
         paired: Sequence[tuple[CausalFeatureVector, ScientificModelOutcome]],
         *,
         cost_model_version: str,
-    ) -> EvidenceRequest:
+    ) -> tuple[EvidenceRequest, ScientificCandleEvidenceCoverage]:
         hypothesis_pairs = tuple(
             pair for pair in paired if pair[0].hypothesis is hypothesis
         )
@@ -125,15 +155,16 @@ class AssessScientificCandleHoldoutEvidence:
             is DatasetPartition.HOLDOUT
             and pair[1].available
         )
-        event_threshold = _event_threshold(hypothesis, validation)
-        volatility_cutoffs = _tertile_cutoffs(
-            tuple(_volatility_proxy(feature) for feature, _ in validation)
+        event_thresholds = _event_thresholds(hypothesis, validation)
+        volatility_cutoffs = _volatility_cutoffs(
+            hypothesis,
+            validation,
         )
 
         events: list[StudyPoint] = []
         candidates: list[StudyPoint] = []
         for feature, outcome in holdout:
-            treated = _is_event(feature, event_threshold=event_threshold)
+            treated = _is_event(feature, event_thresholds=event_thresholds)
             effect = _net_effect(
                 feature,
                 outcome,
@@ -168,36 +199,54 @@ class AssessScientificCandleHoldoutEvidence:
             for candidate in candidates
         )
         matched = self._controls.execute(events, candidates_with_exclusions)
-        return EvidenceRequest(
+        coverage = ScientificCandleEvidenceCoverage(
             hypothesis_id=hypothesis.value,
-            hypothesis_version=_VERSIONS[hypothesis],
-            dataset_fingerprint=report.dataset_fingerprint,
-            groups=matched.groups,
-            expected_eligible_events=len(events),
-            unmatched_event_ids=matched.unmatched_event_ids,
+            available_holdout_observations=len(holdout),
+            triggered_events=len(events),
+            eligible_common_support_events=len(matched.groups),
+            unmatched_events=len(matched.unmatched_event_ids),
+            control_candidates=len(candidates_with_exclusions),
+            matched_event_ids=tuple(group.event.point_id for group in matched.groups),
+        )
+        # Common-support eligibility is fixed solely by pre-outcome strata and
+        # deterministic control availability. Discarded triggers remain in the
+        # coverage record; they are not silently counted as evaluated events.
+        return (
+            EvidenceRequest(
+                hypothesis_id=hypothesis.value,
+                hypothesis_version=_VERSIONS[hypothesis],
+                dataset_fingerprint=report.dataset_fingerprint,
+                groups=matched.groups,
+                expected_eligible_events=len(matched.groups),
+                unmatched_event_ids=(),
+            ),
+            coverage,
         )
 
 
-def _event_threshold(
+def _event_thresholds(
     hypothesis: ScientificCandleHypothesis,
     validation: Sequence[tuple[CausalFeatureVector, ScientificModelOutcome]],
-) -> float | None:
+) -> Mapping[tuple[str, str], float]:
     if hypothesis is not ScientificCandleHypothesis.HAR_VOLATILITY:
-        return None
-    forecasts = tuple(
-        feature.forecast_value
-        for feature, _ in validation
-        if feature.forecast_value is not None
-    )
-    return _quantile(forecasts, 0.90) if forecasts else None
+        return {}
+    forecasts: defaultdict[tuple[str, str], list[float]] = defaultdict(list)
+    for feature, _ in validation:
+        if feature.forecast_value is not None:
+            forecasts[_stratum_key(feature)].append(feature.forecast_value)
+    return {
+        key: _quantile(values, 0.90)
+        for key, values in sorted(forecasts.items())
+    }
 
 
 def _is_event(
     feature: CausalFeatureVector,
     *,
-    event_threshold: float | None,
+    event_thresholds: Mapping[tuple[str, str], float],
 ) -> bool:
     if feature.hypothesis is ScientificCandleHypothesis.HAR_VOLATILITY:
+        event_threshold = event_thresholds.get(_stratum_key(feature))
         return (
             event_threshold is not None
             and feature.forecast_value is not None
@@ -245,7 +294,6 @@ def _study_point(
     volatility_cutoffs: tuple[float, float] | None,
     treated: bool,
 ) -> StudyPoint:
-    local = feature.observed_at.astimezone(_MOSCOW)
     direction = _direction(feature) if feature.hypothesis in {
         ScientificCandleHypothesis.OPENING_GAP_REVERSION,
         ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION,
@@ -256,9 +304,10 @@ def _study_point(
         instrument_id=feature.ticker,
         occurred_at=feature.observed_at,
         trading_day=feature.trading_day,
-        session_bucket=f"{local.hour:02d}:{(local.minute // 15) * 15:02d}",
+        session_bucket=_session_phase(feature),
         volatility_bucket=_bucket(
-            _volatility_proxy(feature), volatility_cutoffs
+            _volatility_proxy(feature),
+            volatility_cutoffs.get(_stratum_key(feature)),
         ),
         # The same instrument is an explicit liquidity fixed effect.  The
         # direction suffix prevents opposite residual moves from sharing a
@@ -273,7 +322,10 @@ def _study_point(
 
 def _volatility_proxy(feature: CausalFeatureVector) -> float:
     if feature.hypothesis is ScientificCandleHypothesis.HAR_VOLATILITY:
-        return feature.value("long_realized_variance")
+        # Every HAR variance window contributes to the forecast and therefore
+        # defines treatment. Matching on one of those windows destroys common
+        # support by construction, so H15 uses an explicit neutral stratum.
+        return 0.0
     if feature.hypothesis is ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2:
         return feature.value("baseline_future_variance")
     if feature.hypothesis is ScientificCandleHypothesis.MARKET_RESIDUAL_REVERSION:
@@ -281,10 +333,38 @@ def _volatility_proxy(feature: CausalFeatureVector) -> float:
     return 0.0
 
 
-def _tertile_cutoffs(values: Sequence[float]) -> tuple[float, float] | None:
-    if not values:
-        return None
-    return (_quantile(values, 1.0 / 3.0), _quantile(values, 2.0 / 3.0))
+def _volatility_cutoffs(
+    hypothesis: ScientificCandleHypothesis,
+    validation: Sequence[tuple[CausalFeatureVector, ScientificModelOutcome]],
+) -> Mapping[tuple[str, str], tuple[float, float]]:
+    if hypothesis is ScientificCandleHypothesis.HAR_VOLATILITY:
+        return {}
+    values: defaultdict[tuple[str, str], list[float]] = defaultdict(list)
+    for feature, _ in validation:
+        values[_stratum_key(feature)].append(_volatility_proxy(feature))
+    return {
+        key: (
+            _quantile(group, 1.0 / 3.0),
+            _quantile(group, 2.0 / 3.0),
+        )
+        for key, group in sorted(values.items())
+    }
+
+
+def _stratum_key(feature: CausalFeatureVector) -> tuple[str, str]:
+    return (feature.ticker, _session_phase(feature))
+
+
+def _session_phase(feature: CausalFeatureVector) -> str:
+    if feature.hypothesis in {
+        ScientificCandleHypothesis.HAR_VOLATILITY,
+        ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2,
+    }:
+        return MOEX_EQUITY_PHASE_SCHEDULE_V1.phase_at(feature.observed_at).value
+    local = feature.observed_at.astimezone(
+        ZoneInfo(MOEX_EQUITY_PHASE_SCHEDULE_V1.timezone_name)
+    )
+    return f"{local.hour:02d}:{(local.minute // 15) * 15:02d}"
 
 
 def _quantile(values: Sequence[float], probability: float) -> float:

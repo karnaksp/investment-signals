@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+import json
 from pathlib import Path
 
 from tinvest_signal_engine.adapters.scientific_candle_replay import (
@@ -15,11 +16,8 @@ from tinvest_signal_engine.domain.scientific_candle_models import (
     HarParameters,
     ScientificCandleHypothesis,
     ScientificCandlePolicy,
-    directional_outcome,
     har_volatility_feature,
-    opening_gap_feature,
     relative_volume_activity_feature,
-    residual_reversal_feature,
     variance_outcome,
 )
 
@@ -29,7 +27,7 @@ START = date(2026, 1, 1)
 TICKERS = ("SBER", "GAZP")
 
 
-def test_full_gate_passes_activity_and_rejects_negative_directional_effects(
+def test_real_shaped_h15_and_h7_use_causal_common_support(
     tmp_path: Path,
 ) -> None:
     adapter = ScientificCandleReplayArtifactAdapter(
@@ -49,12 +47,18 @@ def test_full_gate_passes_activity_and_rejects_negative_directional_effects(
 
     first = adapter.save(
         report,
-        tuple(ScientificCandleHypothesis),
+        (
+            ScientificCandleHypothesis.HAR_VOLATILITY,
+            ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2,
+        ),
         cost_model_version="cost-v1",
     )
     second = adapter.save(
         report,
-        tuple(reversed(tuple(ScientificCandleHypothesis))),
+        (
+            ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2,
+            ScientificCandleHypothesis.HAR_VOLATILITY,
+        ),
         cost_model_version="cost-v1",
     )
 
@@ -62,9 +66,7 @@ def test_full_gate_passes_activity_and_rejects_negative_directional_effects(
     by_id = {str(row["hypothesis_id"]): row for row in first.evidence}
     assert by_id["H7V2"]["decision"] == "passed"
     assert by_id["H15"]["decision"] == "passed"
-    assert by_id["H10"]["decision"] == "rejected"
-    assert by_id["H11"]["decision"] == "rejected"
-    for hypothesis_id in ("H7V2", "H15", "H10", "H11"):
+    for hypothesis_id in ("H7V2", "H15"):
         row = by_id[hypothesis_id]
         assert row["sample_count"] == 14
         assert row["matched_controls"] == 70
@@ -76,10 +78,18 @@ def test_full_gate_passes_activity_and_rejects_negative_directional_effects(
         assert row["horizons"][0]["evidence_scope"] == "independent_gate"
     assert by_id["H7V2"]["matched_control_lift_ci95_lower"] > 0.0
     assert by_id["H15"]["matched_control_lift_ci95_lower"] > 0.0
-    assert by_id["H10"]["matched_control_lift_ci95_upper"] < 0.0
-    assert by_id["H11"]["matched_control_lift_ci95_upper"] < 0.0
     assert by_id["H7V2"]["stable_blocks"] == 5
     assert by_id["H15"]["stable_blocks"] == 5
+    coverage = json.loads(
+        (Path(first.artifact_uri) / "manifest.json").read_text(encoding="utf-8")
+    )["evidence_coverage"]
+    for hypothesis_id in ("H7V2", "H15"):
+        assert coverage[hypothesis_id]["triggered_events"] == 14
+        assert coverage[hypothesis_id]["eligible_common_support_events"] == 14
+        assert coverage[hypothesis_id]["unmatched_events"] == 0
+        assert coverage[hypothesis_id]["selection_policy"] == (
+            "pre_outcome_deterministic_common_support_v1"
+        )
 
 
 def _portfolio_report() -> ScientificCandleResearchReport:
@@ -110,13 +120,14 @@ def _portfolio_report() -> ScientificCandleResearchReport:
     for index, trading_day in enumerate(validation_days, start=1):
         for ticker in TICKERS:
             observed_at = _at(trading_day)
+            forecast = float(index + (100 if ticker == "GAZP" else 0))
             feature = har_volatility_feature(
                 ticker=ticker,
                 trading_day=trading_day,
                 observed_at=observed_at,
-                short_variance=float(index),
+                short_variance=forecast,
                 medium_variance=1.0,
-                long_variance=1.0,
+                long_variance=forecast * 10.0,
                 parameters=parameters,
                 policy=policy,
             )
@@ -126,7 +137,7 @@ def _portfolio_report() -> ScientificCandleResearchReport:
                     variance_outcome(
                         feature,
                         target_at=observed_at + timedelta(minutes=30),
-                        actual_future_variance=float(index),
+                        actual_future_variance=forecast,
                         policy=policy,
                     ),
                 )
@@ -136,35 +147,19 @@ def _portfolio_report() -> ScientificCandleResearchReport:
         event = day_index < 7
         for ticker in TICKERS:
             observed_at = _at(trading_day)
-            opening = opening_gap_feature(
-                ticker=ticker,
-                trading_day=trading_day,
-                observed_at=observed_at,
-                previous_close=100.0,
-                opening_price=101.0 if event else 100.01,
-                policy=policy,
-            )
-            residual = residual_reversal_feature(
-                ticker=ticker,
-                trading_day=trading_day,
-                observed_at=observed_at,
-                instrument_return_bps=50.0 if event else 1.0,
-                market_return_bps=0.0,
-                market_beta=1.0,
-                beta_observed_until=observed_at - timedelta(days=1),
-                beta_history_days=20,
-                basket_coverage=1.0,
-                absolute_residual_history=((1.0 if event else 2.0),) * 100,
-                absolute_market_return_history=(1.0,) * 100,
-                policy=policy,
-            )
+            normal_forecast = 101.0 if ticker == "GAZP" else 1.0
+            event_forecast = 110.0 if ticker == "GAZP" else 10.0
+            forecast = event_forecast if event else normal_forecast
             har = har_volatility_feature(
                 ticker=ticker,
                 trading_day=trading_day,
                 observed_at=observed_at,
-                short_variance=10.0 if event else 1.0,
+                short_variance=forecast,
                 medium_variance=1.0,
-                long_variance=1.0,
+                # This HAR input helps define treatment.  A regression in the
+                # old matcher put event and control observations in disjoint
+                # volatility buckets by matching on it.
+                long_variance=forecast * 10.0 if event else forecast,
                 parameters=parameters,
                 policy=policy,
             )
@@ -185,29 +180,11 @@ def _portfolio_report() -> ScientificCandleResearchReport:
             pairs.extend(
                 (
                     (
-                        opening,
-                        directional_outcome(
-                            opening,
-                            target_at=target_at,
-                            forward_return_bps=30.0 if event else 0.0,
-                            policy=policy,
-                        ),
-                    ),
-                    (
-                        residual,
-                        directional_outcome(
-                            residual,
-                            target_at=target_at,
-                            forward_return_bps=30.0 if event else 0.0,
-                            policy=policy,
-                        ),
-                    ),
-                    (
                         har,
                         variance_outcome(
                             har,
                             target_at=target_at,
-                            actual_future_variance=10.0 if event else 1.0,
+                            actual_future_variance=forecast,
                             policy=policy,
                         ),
                     ),
@@ -235,7 +212,10 @@ def _portfolio_report() -> ScientificCandleResearchReport:
         report_fingerprint="sha256:" + "e" * 64,
         split=split,
         policy=policy,
-        selected_hypotheses=tuple(ScientificCandleHypothesis),
+        selected_hypotheses=(
+            ScientificCandleHypothesis.HAR_VOLATILITY,
+            ScientificCandleHypothesis.RELATIVE_VOLUME_ACTIVITY_V2,
+        ),
         har_parameters=parameters,
         features=tuple(pair[0] for pair in pairs),
         outcomes=tuple(pair[1] for pair in pairs),

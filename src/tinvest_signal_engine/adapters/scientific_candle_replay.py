@@ -18,17 +18,13 @@ from typing import Any, Mapping, Sequence
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.application.scientific_candle_evidence import (
     AssessScientificCandleHoldoutEvidence,
+    ScientificCandleEvidenceCoverage,
 )
 from tinvest_signal_engine.application.scientific_candle_models import (
     ScientificCandleResearchReport,
 )
-from tinvest_signal_engine.domain.hypothesis_evidence import (
-    DatasetPartition,
-    EvidenceBundle,
-    EvidenceDecision,
-)
+from tinvest_signal_engine.domain.hypothesis_evidence import EvidenceBundle, EvidenceDecision
 from tinvest_signal_engine.domain.scientific_candle_models import (
-    FeatureDecision,
     ScientificCandleHypothesis,
 )
 
@@ -135,6 +131,7 @@ class ScientificCandleReplayArtifactAdapter:
                 report,
                 hypothesis,
                 bundle=assessment.for_hypothesis(hypothesis),
+                coverage=assessment.coverage_for(hypothesis),
                 controls_per_event=self._evidence_policy.controls_per_event,
                 artifact_fingerprint=artifact_fingerprint,
                 generated_at=generated_at,
@@ -150,6 +147,10 @@ class ScientificCandleReplayArtifactAdapter:
             "policy": asdict(report.policy),
             "selected_hypotheses": [item.value for item in selected],
             "cost_model_version": cost_model_version,
+            "evidence_coverage": {
+                item.hypothesis_id: _coverage_manifest(item)
+                for item in assessment.coverage
+            },
         }
         _write_once_or_verify(run_dir / "manifest.json", _json_bytes(manifest))
         _write_once_or_verify(run_dir / "evidence.json", _json_bytes(evidence))
@@ -165,21 +166,13 @@ def _evidence_row(
     hypothesis: ScientificCandleHypothesis,
     *,
     bundle: EvidenceBundle,
+    coverage: ScientificCandleEvidenceCoverage,
     controls_per_event: int,
     artifact_fingerprint: str,
     generated_at: str,
     cost_model_version: str,
 ) -> Mapping[str, Any]:
     definition = _DEFINITIONS[hypothesis]
-    pairs = tuple(
-        (feature, outcome)
-        for feature, outcome in zip(report.features, report.outcomes, strict=True)
-        if feature.hypothesis is hypothesis
-        and report.split.partition_for(feature.trading_day) is DatasetPartition.HOLDOUT
-    )
-    matched = tuple(
-        pair for pair in pairs if pair[0].decision is FeatureDecision.MATCHED
-    )
     source_state = (
         "insufficient_history"
         if bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
@@ -230,7 +223,13 @@ def _evidence_row(
         "total_blocks": len(bundle.stability.blocks),
         "maximum_ticker_share": bundle.maximum_instrument_share,
         "maximum_period_share": maximum_period_share,
-        "abstention_rate": (1.0 - len(matched) / len(pairs) if pairs else None),
+        "abstention_rate": (
+            1.0
+            - coverage.eligible_common_support_events
+            / coverage.available_holdout_observations
+            if coverage.available_holdout_observations
+            else None
+        ),
         "horizons": (
             {
                 "horizon_seconds": _horizon_seconds(report, hypothesis),
@@ -241,6 +240,20 @@ def _evidence_row(
                 "primary_metric_value": primary,
             },
         ),
+    }
+
+
+def _coverage_manifest(
+    coverage: ScientificCandleEvidenceCoverage,
+) -> Mapping[str, Any]:
+    return {
+        "available_holdout_observations": coverage.available_holdout_observations,
+        "triggered_events": coverage.triggered_events,
+        "eligible_common_support_events": coverage.eligible_common_support_events,
+        "unmatched_events": coverage.unmatched_events,
+        "control_candidates": coverage.control_candidates,
+        "common_support_rate": coverage.common_support_rate,
+        "selection_policy": "pre_outcome_deterministic_common_support_v1",
     }
 
 
