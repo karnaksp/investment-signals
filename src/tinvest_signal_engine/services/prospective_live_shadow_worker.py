@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import time
+from typing import Callable
 
 from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
     ClickHouseProspectiveLiveOutcomeSource,
@@ -161,9 +162,31 @@ def main() -> None:
     poll_seconds = _env_float("PROSPECTIVE_LIVE_POLL_SECONDS", 60.0)
     logger.info("Starting prospective live-shadow ClickHouse worker")
     try:
-        while True:
+        run_worker_loop(
+            runtime,
+            snapshot_limit=snapshot_limit,
+            outcome_limit=outcome_limit,
+            poll_seconds=poll_seconds,
+        )
+    except KeyboardInterrupt:
+        logger.info("Prospective live-shadow worker stopped by user")
+
+
+def run_worker_loop(
+    runtime: ClickHouseProspectiveLiveShadowRuntime,
+    *,
+    snapshot_limit: int,
+    outcome_limit: int,
+    poll_seconds: float,
+    now: Callable[[], datetime] = lambda: datetime.now(tz=timezone.utc),
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Keep the worker alive while its external data services recover."""
+
+    while True:
+        try:
             result = runtime.run_once(
-                now=datetime.now(tz=timezone.utc),
+                now=now(),
                 snapshot_limit=snapshot_limit,
                 outcome_limit=outcome_limit,
             )
@@ -186,9 +209,13 @@ def main() -> None:
                         "snapshots": result.snapshots,
                     },
                 )
-            time.sleep(poll_seconds)
-    except KeyboardInterrupt:
-        logger.info("Prospective live-shadow worker stopped by user")
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            logger.exception(
+                "Prospective live-shadow pass failed; retrying after dependency recovery"
+            )
+        sleep(poll_seconds)
 
 
 def _required_env(name: str) -> str:

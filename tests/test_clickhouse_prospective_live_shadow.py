@@ -50,6 +50,7 @@ from tinvest_signal_engine.services.prospective_live_shadow_worker import (
     PRODUCTION_LIVE_POLICY,
     _instrument_ids,
     build_clickhouse_prospective_live_shadow_runtime,
+    run_worker_loop,
 )
 
 
@@ -58,6 +59,17 @@ OBSERVED_AT = datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
 RECORDED_AT = OBSERVED_AT + timedelta(seconds=2)
 SHA_A = "sha256:" + "a" * 64
 SHA_B = "sha256:" + "b" * 64
+
+
+class _RecoveringRuntime:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_once(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise ConnectionError("clickhouse is starting")
+        raise KeyboardInterrupt
 
 
 class _Response:
@@ -95,6 +107,25 @@ def _clickhouse_store() -> ClickHouseProspectiveLiveShadowStore:
         password="secret",
         instrument_ids=("SBER_TQBR",),
     )
+
+
+def test_live_worker_retries_after_transient_dependency_failure(caplog) -> None:
+    runtime = _RecoveringRuntime()
+    sleeps: list[float] = []
+
+    with pytest.raises(KeyboardInterrupt):
+        run_worker_loop(
+            runtime,  # type: ignore[arg-type]
+            snapshot_limit=25,
+            outcome_limit=100,
+            poll_seconds=0.25,
+            now=lambda: OBSERVED_AT,
+            sleep=sleeps.append,
+        )
+
+    assert runtime.calls == 2
+    assert sleeps == [0.25]
+    assert "retrying after dependency recovery" in caplog.text
 
 
 def _snapshot() -> ProspectivePortfolioSnapshot:
