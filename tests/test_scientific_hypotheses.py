@@ -319,13 +319,13 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
     registry = VersionedScientificRegistry.from_file(REGISTRY)
 
     assert registry.schema_version == "1.2.0"
-    assert len(registry.sources) == 13
+    assert len(registry.sources) == 14
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 19
+    assert len(registry.hypotheses) == 20
     assert sum(
         item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
         for item in registry.hypotheses
-    ) == 17
+    ) == 18
     assert sum(
         item.lifecycle is HypothesisLifecycle.SHADOW
         for item in registry.hypotheses
@@ -342,6 +342,7 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
         "prereg-h15-v2",
         "prereg-h16-v1",
         "prereg-h17-v1",
+        "prereg-h12-v1",
     }
     assert registry.replication_evidence == ()
     assert registry.applied_catalog == ()
@@ -410,8 +411,8 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
-    assert payload["sources"] == 13
-    assert payload["hypotheses"] == 19
+    assert payload["sources"] == 14
+    assert payload["hypotheses"] == 20
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

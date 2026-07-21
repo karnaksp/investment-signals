@@ -18,6 +18,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     HarV2Parameters,
     JumpHistoryPoint,
     ProspectiveFeature,
+    ProspectiveHypothesis,
     ProspectiveScientificPolicy,
     TargetMetric,
     directional_outcome,
@@ -35,6 +36,16 @@ from tinvest_signal_engine.domain.prospective_scientific_observations import (
 
 
 DEFAULT_LIVE_OUTCOME_POLICY_VERSION = "prospective-live-outcomes-v1"
+LIVE_SHADOW_HYPOTHESES = frozenset(
+    {
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.HAR_VOLATILITY_V2,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+    }
+)
 
 
 class ProspectiveLiveShadowStore(Protocol):

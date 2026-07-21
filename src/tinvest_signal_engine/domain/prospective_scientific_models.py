@@ -16,9 +16,14 @@ from typing import Iterable
 
 
 class ProspectiveHypothesis(str, Enum):
+    MORNING_LOW_VOLUME_REVERSION = "H1"
+    MORNING_HIGH_VOLUME_CONTINUATION = "H2"
     JUMP_LOW_ACTIVITY_REVERSAL_V2 = "H3V2"
     JUMP_HIGH_ACTIVITY_CONTINUATION_V2 = "H4V2"
+    SAME_PHASE_RETURN_RECURRENCE = "H5"
+    OPEN_CLOSE_MARKET_CONTINUATION = "H6"
     RELATIVE_VOLUME_VOLATILITY_V3 = "H7V3"
+    PAIR_RESIDUAL_REVERSION = "H12"
     HAR_VOLATILITY_V2 = "H15V2"
     DOWNSIDE_SEMIVARIANCE_RISK = "H16"
     VOLATILITY_JUMP_PERSISTENCE = "H17"
@@ -26,9 +31,14 @@ class ProspectiveHypothesis(str, Enum):
     @property
     def version(self) -> str:
         return {
+            ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION: "1.0.0",
+            ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION: "1.0.0",
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2: "2.0.0",
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2: "2.0.0",
+            ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: "1.0.0",
+            ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: "1.0.0",
             ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: "3.0.0",
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: "1.0.0",
             ProspectiveHypothesis.HAR_VOLATILITY_V2: "2.0.0",
             ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: "1.0.0",
             ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: "1.0.0",
@@ -73,13 +83,27 @@ class ProspectiveReason(str, Enum):
     DIRECTION_UNAVAILABLE = "direction_unavailable"
     MODEL_NOT_TRAINED = "model_not_trained"
     OUTCOME_UNAVAILABLE = "outcome_unavailable"
+    MARKET_WIDE_MOVE_SAME_DIRECTION = "market_wide_move_same_direction"
+    BASKET_COVERAGE_BELOW_MINIMUM = "basket_coverage_below_minimum"
+    PAIR_MODEL_UNAVAILABLE = "pair_model_unavailable"
+    PAIR_RELATIONSHIP_UNSTABLE = "pair_relationship_unstable"
+    CORPORATE_ACTION_SUSPECTED = "corporate_action_suspected"
+    INSUFFICIENT_LIQUIDITY = "insufficient_liquidity"
 
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveScientificPolicy:
-    """Sealed thresholds for the six prospective model versions."""
+    """Sealed thresholds for the preregistered prospective model versions."""
 
     version: str = "prospective-scientific-models-v1.0.0"
+    morning_history_days: int = 40
+    morning_deviation_z_min: float = 2.0
+    morning_low_relative_volume_max: float = 0.50
+    morning_high_relative_volume_min: float = 1.50
+    morning_range_percentile_min: float = 0.90
+    morning_market_move_bps_min: float = 5.0
+    morning_reversion_horizons_seconds: tuple[int, ...] = (1800, 3600)
+    morning_continuation_horizons_seconds: tuple[int, ...] = (900, 1800, 3600)
     jump_window_minutes: int = 5
     jump_history_days: int = 40
     jump_percentile: float = 0.99
@@ -92,6 +116,15 @@ class ProspectiveScientificPolicy:
     volume_history_days: int = 40
     volume_percentile: float = 0.90
     volume_horizon_seconds: int = 1800
+    phase_recurrence_history_days: int = 20
+    phase_recurrence_horizon_seconds: int = 1800
+    open_close_basket_return_bps_min: float = 5.0
+    open_close_basket_coverage_min: float = 0.80
+    open_close_horizon_seconds: int = 1800
+    pair_entry_z: float = 2.0
+    pair_min_correlation: float = 0.70
+    pair_min_training_points: int = 500
+    pair_horizons_seconds: tuple[int, ...] = (900, 1800, 3600)
     har_windows_minutes: tuple[int, int, int] = (5, 30, 120)
     har_horizon_seconds: int = 1800
     har_minimum_training_points: int = 1000
@@ -111,12 +144,20 @@ class ProspectiveScientificPolicy:
         if not self.version.strip():
             raise ValueError("policy version must not be empty")
         positive = (
+            self.morning_history_days,
+            *self.morning_reversion_horizons_seconds,
+            *self.morning_continuation_horizons_seconds,
             self.jump_window_minutes,
             self.jump_history_days,
             *self.jump_horizons_seconds,
             self.volume_window_minutes,
             self.volume_history_days,
             self.volume_horizon_seconds,
+            self.phase_recurrence_history_days,
+            self.phase_recurrence_horizon_seconds,
+            self.open_close_horizon_seconds,
+            self.pair_min_training_points,
+            *self.pair_horizons_seconds,
             *self.har_windows_minutes,
             self.har_horizon_seconds,
             self.har_minimum_training_points,
@@ -130,6 +171,10 @@ class ProspectiveScientificPolicy:
         if any(value <= 0 for value in positive):
             raise ValueError("policy windows, histories, and horizons must be positive")
         probabilities = (
+            self.morning_low_relative_volume_max,
+            self.morning_range_percentile_min,
+            self.open_close_basket_coverage_min,
+            self.pair_min_correlation,
             self.jump_percentile,
             self.jump_low_volume_percentile,
             self.jump_high_volume_percentile,
@@ -144,6 +189,12 @@ class ProspectiveScientificPolicy:
             raise ValueError("policy percentiles and EWMA alpha must be in (0, 1)")
         if self.jump_low_volume_percentile >= self.jump_high_volume_percentile:
             raise ValueError("jump activity regimes must not overlap")
+        if self.morning_low_relative_volume_max >= self.morning_high_relative_volume_min:
+            raise ValueError("morning activity regimes must not overlap")
+        if self.morning_deviation_z_min <= 0.0 or self.morning_market_move_bps_min < 0.0:
+            raise ValueError("morning thresholds must be non-negative")
+        if self.open_close_basket_return_bps_min <= 0.0 or self.pair_entry_z <= 0.0:
+            raise ValueError("basket and pair thresholds must be positive")
         if tuple(sorted(self.har_windows_minutes)) != self.har_windows_minutes:
             raise ValueError("HAR windows must be strictly ordered")
         if len(set(self.har_windows_minutes)) != 3:
@@ -334,6 +385,50 @@ class HarV2Parameters:
         return max(exp(log_forecast) - 1.0, 1e-12)
 
 
+@dataclass(frozen=True, slots=True)
+class FrozenPairParameters:
+    """Pair relation estimated only on a sealed earlier training period."""
+
+    left_ticker: str
+    right_ticker: str
+    intercept: float
+    hedge_ratio: float
+    spread_mean: float
+    spread_std: float
+    correlation: float
+    training_points: int
+    trained_until: datetime
+
+    def __post_init__(self) -> None:
+        if not self.left_ticker.strip() or not self.right_ticker.strip():
+            raise ValueError("pair tickers are required")
+        if self.left_ticker == self.right_ticker:
+            raise ValueError("pair tickers must differ")
+        _require_aware(self.trained_until, "trained_until")
+        values = (
+            self.intercept,
+            self.hedge_ratio,
+            self.spread_mean,
+            self.spread_std,
+            self.correlation,
+        )
+        if any(not isfinite(value) for value in values):
+            raise ValueError("pair parameters must be finite")
+        if self.spread_std <= 0.0 or self.training_points <= 0:
+            raise ValueError("pair model requires positive dispersion and sample size")
+        if not -1.0 <= self.correlation <= 1.0:
+            raise ValueError("pair correlation must be in [-1, 1]")
+
+    @property
+    def pair_id(self) -> str:
+        return f"{self.left_ticker}/{self.right_ticker}"
+
+    def spread(self, left_price: float, right_price: float) -> float:
+        if left_price <= 0.0 or right_price <= 0.0:
+            raise ValueError("pair prices must be positive")
+        return log(left_price) - self.intercept - self.hedge_ratio * log(right_price)
+
+
 def fit_har_v2_parameters(
     points: Iterable[HarV2TrainingPoint],
     *,
@@ -456,6 +551,303 @@ def jump_regime_features(
             trading_gap=trading_gap,
             sufficient=sufficient,
             common=common,
+        ),
+    )
+
+
+def morning_regime_features(
+    *,
+    ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    feature_max_observed_at: datetime,
+    horizon_seconds: int,
+    morning_deviation_bps: float,
+    morning_deviation_z: float,
+    cumulative_relative_volume: float,
+    morning_range_percentile: float,
+    market_return_bps: float,
+    market_coverage: float,
+    history_count: int,
+    history_observed_until: datetime | None,
+    trading_gap: bool,
+    valid_baseline: bool,
+    policy: ProspectiveScientificPolicy,
+) -> tuple[ProspectiveFeature, ProspectiveFeature]:
+    """Classify mutually exclusive morning reversion and continuation regimes."""
+
+    numeric = (
+        morning_deviation_bps,
+        morning_deviation_z,
+        cumulative_relative_volume,
+        morning_range_percentile,
+        market_return_bps,
+        market_coverage,
+    )
+    if any(not isfinite(value) for value in numeric):
+        raise ValueError("morning features must be finite")
+    if cumulative_relative_volume < 0.0:
+        raise ValueError("morning relative volume must be non-negative")
+    if not 0.0 <= morning_range_percentile <= 1.0:
+        raise ValueError("morning range percentile must be in [0, 1]")
+    if not 0.0 <= market_coverage <= 1.0:
+        raise ValueError("market coverage must be in [0, 1]")
+    if feature_max_observed_at > observed_at:
+        raise ValueError("morning feature uses future market data")
+    direction = _direction(morning_deviation_bps)
+    sufficient = history_count == policy.morning_history_days
+    extreme = abs(morning_deviation_z) >= policy.morning_deviation_z_min
+    market_same_direction = (
+        direction != 0
+        and _direction(market_return_bps) == direction
+        and abs(market_return_bps) >= policy.morning_market_move_bps_min
+    )
+    reversion = (
+        extreme
+        and cumulative_relative_volume <= policy.morning_low_relative_volume_max
+        and not market_same_direction
+    )
+    continuation = (
+        extreme
+        and cumulative_relative_volume >= policy.morning_high_relative_volume_min
+        and morning_range_percentile >= policy.morning_range_percentile_min
+    )
+    if reversion and continuation:
+        raise AssertionError("H1 and H2 morning regimes must be mutually exclusive")
+    common = (
+        MetricValue("morning_deviation_bps", MetricUnit.BASIS_POINTS, morning_deviation_bps),
+        MetricValue("morning_deviation_z", MetricUnit.RATIO, morning_deviation_z),
+        MetricValue("cumulative_relative_volume", MetricUnit.RATIO, cumulative_relative_volume),
+        MetricValue("morning_range_percentile", MetricUnit.RATIO, morning_range_percentile),
+        MetricValue("market_return_bps", MetricUnit.BASIS_POINTS, market_return_bps),
+        MetricValue("market_coverage", MetricUnit.RATIO, market_coverage),
+        MetricValue("prior_day_count", MetricUnit.COUNT, float(history_count)),
+    )
+    reason_override = (
+        ProspectiveReason.MARKET_WIDE_MOVE_SAME_DIRECTION
+        if market_same_direction
+        else None
+    )
+    return (
+        _classified_directional_feature(
+            hypothesis=ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+            matched=reversion,
+            direction=-direction,
+            ticker=ticker,
+            trading_day=trading_day,
+            observed_at=observed_at,
+            horizon_seconds=horizon_seconds,
+            history_observed_until=history_observed_until,
+            trading_gap=trading_gap,
+            sufficient=sufficient,
+            common=common,
+            feature_max_observed_at=feature_max_observed_at,
+            valid_baseline=valid_baseline and market_coverage >= policy.open_close_basket_coverage_min,
+            reason_override=reason_override,
+        ),
+        _classified_directional_feature(
+            hypothesis=ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+            matched=continuation,
+            direction=direction,
+            ticker=ticker,
+            trading_day=trading_day,
+            observed_at=observed_at,
+            horizon_seconds=horizon_seconds,
+            history_observed_until=history_observed_until,
+            trading_gap=trading_gap,
+            sufficient=sufficient,
+            common=common,
+            feature_max_observed_at=feature_max_observed_at,
+            valid_baseline=valid_baseline,
+        ),
+    )
+
+
+def phase_recurrence_feature(
+    *,
+    ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    historical_same_phase_returns_bps: Iterable[float],
+    history_observed_until: datetime | None,
+    trading_gap: bool,
+    policy: ProspectiveScientificPolicy,
+) -> ProspectiveFeature:
+    history = tuple(historical_same_phase_returns_bps)
+    if any(not isfinite(value) for value in history):
+        raise ValueError("same-phase returns must be finite")
+    mean_return = sum(history) / len(history) if history else 0.0
+    direction = _direction(mean_return)
+    sufficient = len(history) == policy.phase_recurrence_history_days
+    return _classified_directional_feature(
+        hypothesis=ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
+        matched=sufficient and direction != 0,
+        direction=direction,
+        ticker=ticker,
+        trading_day=trading_day,
+        observed_at=observed_at,
+        horizon_seconds=policy.phase_recurrence_horizon_seconds,
+        history_observed_until=history_observed_until,
+        trading_gap=trading_gap,
+        sufficient=sufficient,
+        common=(
+            MetricValue("same_phase_mean_return_bps", MetricUnit.BASIS_POINTS, mean_return),
+            MetricValue("prior_day_count", MetricUnit.COUNT, float(len(history))),
+        ),
+    )
+
+
+def open_close_basket_feature(
+    *,
+    trading_day: date,
+    observed_at: datetime,
+    feature_max_observed_at: datetime,
+    opening_basket_return_bps: float,
+    basket_coverage: float,
+    shortened_session: bool,
+    policy: ProspectiveScientificPolicy,
+) -> ProspectiveFeature:
+    if not isfinite(opening_basket_return_bps):
+        raise ValueError("opening basket return must be finite")
+    if not 0.0 <= basket_coverage <= 1.0:
+        raise ValueError("basket coverage must be in [0, 1]")
+    direction = _direction(opening_basket_return_bps)
+    if shortened_session:
+        decision, reason = (
+            ProspectiveDecision.ABSTAIN,
+            ProspectiveReason.NON_CONTIGUOUS_WINDOW,
+        )
+    elif basket_coverage < policy.open_close_basket_coverage_min:
+        decision, reason = (
+            ProspectiveDecision.ABSTAIN,
+            ProspectiveReason.BASKET_COVERAGE_BELOW_MINIMUM,
+        )
+    elif direction == 0:
+        decision, reason = (
+            ProspectiveDecision.ABSTAIN,
+            ProspectiveReason.DIRECTION_UNAVAILABLE,
+        )
+    elif abs(opening_basket_return_bps) >= policy.open_close_basket_return_bps_min:
+        decision, reason = (
+            ProspectiveDecision.MATCHED,
+            ProspectiveReason.CONDITIONS_MATCHED,
+        )
+    else:
+        decision, reason = (
+            ProspectiveDecision.NOT_MATCHED,
+            ProspectiveReason.CONDITIONS_NOT_MET,
+        )
+    return _feature(
+        hypothesis=ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
+        ticker="MOEX_FIXED_BASKET",
+        trading_day=trading_day,
+        observed_at=observed_at,
+        feature_max_observed_at=feature_max_observed_at,
+        horizon_seconds=policy.open_close_horizon_seconds,
+        target=TargetMetric.FORWARD_RETURN,
+        decision=decision,
+        reason=reason,
+        expected_direction=direction,
+        forecast=None,
+        feature_values=(
+            MetricValue("opening_basket_return_bps", MetricUnit.BASIS_POINTS, opening_basket_return_bps),
+            MetricValue("basket_coverage", MetricUnit.RATIO, basket_coverage),
+        ),
+    )
+
+
+def pair_residual_reversion_feature(
+    *,
+    left_ticker: str,
+    right_ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    left_price: float,
+    right_price: float,
+    parameters: FrozenPairParameters | None,
+    corporate_action_suspected: bool,
+    liquid: bool,
+    policy: ProspectiveScientificPolicy,
+    horizon_seconds: int,
+) -> ProspectiveFeature:
+    if not left_ticker.strip() or not right_ticker.strip() or left_ticker == right_ticker:
+        raise ValueError("a pair requires two distinct tickers")
+    pair_id = f"{left_ticker}/{right_ticker}"
+    if parameters is None:
+        residual = residual_z = correlation = 0.0
+        decision, reason, direction = (
+            ProspectiveDecision.ABSTAIN,
+            ProspectiveReason.PAIR_MODEL_UNAVAILABLE,
+            0,
+        )
+        trained_until = None
+    else:
+        if (
+            parameters.left_ticker != left_ticker
+            or parameters.right_ticker != right_ticker
+        ):
+            raise ValueError("pair parameters belong to a different pair")
+        if parameters.trained_until >= observed_at:
+            raise ValueError("pair parameters must use completed earlier data only")
+        residual = parameters.spread(left_price, right_price) - parameters.spread_mean
+        residual_z = residual / parameters.spread_std
+        correlation = parameters.correlation
+        direction = -_direction(residual)
+        trained_until = parameters.trained_until
+        if corporate_action_suspected:
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.CORPORATE_ACTION_SUSPECTED,
+            )
+        elif not liquid:
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.INSUFFICIENT_LIQUIDITY,
+            )
+        elif (
+            parameters.training_points < policy.pair_min_training_points
+            or correlation < policy.pair_min_correlation
+        ):
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.PAIR_RELATIONSHIP_UNSTABLE,
+            )
+        elif direction == 0:
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.DIRECTION_UNAVAILABLE,
+            )
+        elif abs(residual_z) >= policy.pair_entry_z:
+            decision, reason = (
+                ProspectiveDecision.MATCHED,
+                ProspectiveReason.CONDITIONS_MATCHED,
+            )
+        else:
+            decision, reason = (
+                ProspectiveDecision.NOT_MATCHED,
+                ProspectiveReason.CONDITIONS_NOT_MET,
+            )
+    return _feature(
+        hypothesis=ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        ticker=pair_id,
+        trading_day=trading_day,
+        observed_at=observed_at,
+        model_trained_until=trained_until,
+        horizon_seconds=horizon_seconds,
+        target=TargetMetric.FORWARD_RETURN,
+        decision=decision,
+        reason=reason,
+        expected_direction=direction,
+        forecast=None,
+        feature_values=(
+            MetricValue("pair_residual_log", MetricUnit.RATIO, residual),
+            MetricValue("pair_residual_z", MetricUnit.RATIO, residual_z),
+            MetricValue("pair_correlation", MetricUnit.RATIO, correlation),
+            MetricValue(
+                "pair_training_points",
+                MetricUnit.COUNT,
+                float(parameters.training_points if parameters else 0),
+            ),
         ),
     )
 
@@ -859,6 +1251,9 @@ def _classified_directional_feature(
     trading_gap: bool,
     sufficient: bool,
     common: tuple[MetricValue, ...],
+    feature_max_observed_at: datetime | None = None,
+    valid_baseline: bool = True,
+    reason_override: ProspectiveReason | None = None,
 ) -> ProspectiveFeature:
     if trading_gap:
         decision, reason = (
@@ -870,11 +1265,18 @@ def _classified_directional_feature(
             ProspectiveDecision.ABSTAIN,
             ProspectiveReason.INSUFFICIENT_PRIOR_DAYS,
         )
+    elif not valid_baseline:
+        decision, reason = (
+            ProspectiveDecision.ABSTAIN,
+            ProspectiveReason.INVALID_BASELINE,
+        )
     elif direction == 0:
         decision, reason = (
             ProspectiveDecision.ABSTAIN,
             ProspectiveReason.DIRECTION_UNAVAILABLE,
         )
+    elif reason_override is not None:
+        decision, reason = ProspectiveDecision.ABSTAIN, reason_override
     elif matched:
         decision, reason = (
             ProspectiveDecision.MATCHED,
@@ -890,6 +1292,7 @@ def _classified_directional_feature(
         ticker=ticker,
         trading_day=trading_day,
         observed_at=observed_at,
+        feature_max_observed_at=feature_max_observed_at,
         history_observed_until=history_observed_until,
         horizon_seconds=horizon_seconds,
         target=TargetMetric.FORWARD_RETURN,
@@ -933,6 +1336,7 @@ def _feature(
     expected_direction: int,
     forecast: MetricValue | None,
     feature_values: tuple[MetricValue, ...],
+    feature_max_observed_at: datetime | None = None,
     history_observed_until: datetime | None = None,
     model_trained_until: datetime | None = None,
 ) -> ProspectiveFeature:
@@ -951,7 +1355,7 @@ def _feature(
         ticker=ticker,
         trading_day=trading_day,
         observed_at=observed_at,
-        feature_max_observed_at=observed_at,
+        feature_max_observed_at=feature_max_observed_at or observed_at,
         history_observed_until=history_observed_until,
         model_trained_until=model_trained_until,
         horizon_seconds=horizon_seconds,
@@ -976,6 +1380,14 @@ def _unavailable_outcome(
         target=feature.target,
         measurements=(),
     )
+
+
+def _direction(value: float) -> int:
+    if value > 0.0:
+        return 1
+    if value < 0.0:
+        return -1
+    return 0
 
 
 def _percentile(history: Iterable[float], value: float) -> float:

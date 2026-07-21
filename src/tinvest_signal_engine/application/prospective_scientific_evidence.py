@@ -65,6 +65,28 @@ class ProspectiveEvidenceDefinition:
 
 
 PROSPECTIVE_EVIDENCE_DEFINITIONS = {
+    ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+            "h1-morning-low-volume-reversion",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls_multi_horizon",
+            TargetMetric.FORWARD_RETURN,
+            "reversion_to_previous_close",
+        )
+    ),
+    ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+            "h2-morning-high-volume-continuation",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls_multi_horizon",
+            TargetMetric.FORWARD_RETURN,
+            "continuation",
+        )
+    ),
     ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2: (
         ProspectiveEvidenceDefinition(
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
@@ -96,6 +118,39 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
             "independent_holdout_matched_controls",
             TargetMetric.FUTURE_VARIANCE_UPLIFT,
             "volatility_increase",
+        )
+    ),
+    ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
+            "h5-same-phase-return-recurrence",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls",
+            TargetMetric.FORWARD_RETURN,
+            "same_as_prior_phase_mean",
+        )
+    ),
+    ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
+            "h6-open-close-market-continuation",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls",
+            TargetMetric.FORWARD_RETURN,
+            "same_as_opening_basket",
+        )
+    ),
+    ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+            "h12-pair-residual-reversion",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls_multi_horizon",
+            TargetMetric.FORWARD_RETURN,
+            "pair_residual_reversion",
         )
     ),
     ProspectiveHypothesis.HAR_VOLATILITY_V2: ProspectiveEvidenceDefinition(
@@ -431,8 +486,13 @@ def _effect_value(
     if feature.decision is ProspectiveDecision.ABSTAIN or not outcome.available:
         return None
     if feature.hypothesis in {
+        ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+        ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
+        ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
     }:
         forward = outcome.metric("forward_return").value
         return feature.expected_direction * forward - round_trip_cost_bps

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from hashlib import sha256
 import json
-from math import log, pi
-from statistics import median
+from math import log, pi, sqrt
+from statistics import fmean, median, pstdev
 from typing import Iterable, Protocol, Sequence, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -19,6 +19,7 @@ from tinvest_signal_engine.domain.hypothesis_evidence import (
     chronological_split_60_20_20,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
+    FrozenPairParameters,
     HarV2Parameters,
     HarV2TrainingPoint,
     JumpHistoryPoint,
@@ -32,6 +33,10 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     har_v2_feature,
     har_v2_outcome,
     jump_regime_features,
+    morning_regime_features,
+    open_close_basket_feature,
+    pair_residual_reversion_feature,
+    phase_recurrence_feature,
     relative_volume_volatility_feature,
     variance_uplift_outcome,
     volatility_jump_feature,
@@ -48,6 +53,23 @@ _ELIGIBLE_PHASES = {
     TradingPhase.MAIN_CONTINUOUS,
     TradingPhase.PRE_CLOSE,
 }
+DEFAULT_FIXED_MARKET_UNIVERSE = (
+    "SBER",
+    "GAZP",
+    "LKOH",
+    "YDEX",
+    "T",
+    "ROSN",
+    "NVTK",
+    "GMKN",
+    "MOEX",
+    "TATN",
+)
+DEFAULT_PAIR_CANDIDATES = (
+    ("SBER", "SBERP"),
+    ("TATN", "TATNP"),
+    ("SNGS", "SNGSP"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,12 +78,27 @@ class ProspectiveScientificRequest:
         ProspectiveHypothesis
     )
     policy: ProspectiveScientificPolicy = ProspectiveScientificPolicy()
+    market_universe: tuple[str, ...] = DEFAULT_FIXED_MARKET_UNIVERSE
+    pair_candidates: tuple[tuple[str, str], ...] = DEFAULT_PAIR_CANDIDATES
 
     def __post_init__(self) -> None:
         if not self.selected_hypotheses:
             raise ValueError("at least one prospective hypothesis is required")
         if len(set(self.selected_hypotheses)) != len(self.selected_hypotheses):
             raise ValueError("prospective hypotheses must be unique")
+        if len(set(self.market_universe)) != len(self.market_universe):
+            raise ValueError("market universe must be unique")
+        if any(not ticker.strip() for ticker in self.market_universe):
+            raise ValueError("market universe tickers must not be empty")
+        normalized_pairs = tuple(tuple(pair) for pair in self.pair_candidates)
+        if any(
+            len(pair) != 2 or not pair[0].strip() or not pair[1].strip()
+            or pair[0] == pair[1]
+            for pair in normalized_pairs
+        ):
+            raise ValueError("pair candidates require two distinct tickers")
+        if len(set(normalized_pairs)) != len(normalized_pairs):
+            raise ValueError("pair candidates must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +111,7 @@ class ProspectiveScientificReport:
     har_v2_parameters: HarV2Parameters | None
     features: tuple[ProspectiveFeature, ...]
     outcomes: tuple[ProspectiveOutcome, ...]
+    pair_parameters: tuple[FrozenPairParameters, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.dataset_fingerprint.startswith("sha256:"):
@@ -121,12 +159,30 @@ def build_prospective_scientific_research(
     rows: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
     selected = frozenset(request.selected_hypotheses)
     if selected & {
+        ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+        ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+    }:
+        rows.extend(
+            _morning_rows(
+                ordered,
+                selected,
+                request.policy,
+                request.market_universe,
+            )
+        )
+    if selected & {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
     }:
         rows.extend(_jump_rows(ordered, selected, request.policy))
     if ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3 in selected:
         rows.extend(_relative_volume_rows(ordered, request.policy))
+    if ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE in selected:
+        rows.extend(_phase_recurrence_rows(ordered, request.policy))
+    if ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION in selected:
+        rows.extend(
+            _open_close_rows(ordered, request.policy, request.market_universe)
+        )
     if ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK in selected:
         rows.extend(_semivariance_rows(ordered, request.policy))
     if ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE in selected:
@@ -135,6 +191,15 @@ def build_prospective_scientific_research(
     if ProspectiveHypothesis.HAR_VOLATILITY_V2 in selected:
         har_rows, har_parameters = _har_v2_rows(ordered, split, request.policy)
         rows.extend(har_rows)
+    pair_parameters: tuple[FrozenPairParameters, ...] = ()
+    if ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION in selected:
+        pair_rows, pair_parameters = _pair_reversion_rows(
+            ordered,
+            split,
+            request.policy,
+            request.pair_candidates,
+        )
+        rows.extend(pair_rows)
 
     rows.sort(
         key=lambda item: (
@@ -152,6 +217,7 @@ def build_prospective_scientific_research(
         features,
         outcomes,
         har_parameters,
+        pair_parameters,
     )
     return ProspectiveScientificReport(
         dataset_fingerprint=dataset_fingerprint,
@@ -160,8 +226,451 @@ def build_prospective_scientific_research(
         policy=request.policy,
         selected_hypotheses=request.selected_hypotheses,
         har_v2_parameters=har_parameters,
+        pair_parameters=pair_parameters,
         features=features,
         outcomes=outcomes,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _MorningCandidate:
+    ticker: str
+    trading_day: date
+    observed_at: datetime
+    feature_max_observed_at: datetime
+    opening_index: int
+    rows: tuple[HistoricalCandle, ...]
+    deviation_bps: float
+    cumulative_volume: float
+    range_bps: float
+    trading_gap: bool
+
+
+def _morning_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    selected: frozenset[ProspectiveHypothesis],
+    policy: ProspectiveScientificPolicy,
+    market_universe: tuple[str, ...],
+) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+    candidates: list[_MorningCandidate] = []
+    for ticker, rows in by_ticker.items():
+        by_day = _indexed_rows_by_day(rows)
+        previous_close: float | None = None
+        for trading_day, day_rows in sorted(by_day.items()):
+            opening = day_rows.get(10 * 60)
+            morning = tuple(
+                candle
+                for minute, (_, candle) in sorted(day_rows.items())
+                if 7 * 60 <= minute <= 9 * 60 + 49
+            )
+            if previous_close is not None and opening is not None and morning:
+                opening_index, opening_candle = opening
+                high = max(item.high for item in morning)
+                low = min(item.low for item in morning)
+                candidates.append(
+                    _MorningCandidate(
+                        ticker=ticker,
+                        trading_day=trading_day,
+                        observed_at=opening_candle.at,
+                        feature_max_observed_at=_observed_at(morning[-1]),
+                        opening_index=opening_index,
+                        rows=rows,
+                        deviation_bps=(morning[-1].close / previous_close - 1.0)
+                        * 10_000.0,
+                        cumulative_volume=sum(item.volume for item in morning),
+                        range_bps=(high / low - 1.0) * 10_000.0,
+                        trading_gap=len(morning) != 170 or not _continuous(morning),
+                    )
+                )
+            main_closes = tuple(
+                candle.close
+                for minute, (_, candle) in sorted(day_rows.items())
+                if 10 * 60 <= minute <= 18 * 60 + 39
+            )
+            if main_closes:
+                previous_close = main_closes[-1]
+
+    universe = frozenset(market_universe)
+    market_by_day: dict[date, tuple[float, float]] = {}
+    for trading_day, day_items in _items_by_day(candidates):
+        member_returns = tuple(
+            item.deviation_bps for item in day_items if item.ticker in universe
+        )
+        market_by_day[trading_day] = (
+            fmean(member_returns) if member_returns else 0.0,
+            len(member_returns) / len(universe) if universe else 0.0,
+        )
+
+    histories: defaultdict[
+        str, deque[tuple[float, float, float, datetime]]
+    ] = defaultdict(lambda: deque(maxlen=policy.morning_history_days))
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    all_horizons = tuple(
+        sorted(
+            set(policy.morning_reversion_horizons_seconds)
+            | set(policy.morning_continuation_horizons_seconds)
+        )
+    )
+    for trading_day, day_items in _items_by_day(candidates):
+        market_return, market_coverage = market_by_day[trading_day]
+        for item in day_items:
+            history = histories[item.ticker]
+            deviations = tuple(value[0] for value in history)
+            volumes = tuple(value[1] for value in history)
+            ranges = tuple(value[2] for value in history)
+            deviation_std = pstdev(deviations) if len(deviations) > 1 else 0.0
+            deviation_z = (
+                (item.deviation_bps - fmean(deviations)) / deviation_std
+                if deviation_std > 0.0
+                else 0.0
+            )
+            volume_mean = fmean(volumes) if volumes else 0.0
+            relative_volume = (
+                item.cumulative_volume / volume_mean if volume_mean > 0.0 else 0.0
+            )
+            range_percentile = _percentile_rank(ranges, item.range_bps)
+            valid_baseline = deviation_std > 0.0 and volume_mean > 0.0
+            for horizon in all_horizons:
+                h1, h2 = morning_regime_features(
+                    ticker=item.ticker,
+                    trading_day=trading_day,
+                    observed_at=item.observed_at,
+                    feature_max_observed_at=item.feature_max_observed_at,
+                    horizon_seconds=horizon,
+                    morning_deviation_bps=item.deviation_bps,
+                    morning_deviation_z=deviation_z,
+                    cumulative_relative_volume=relative_volume,
+                    morning_range_percentile=range_percentile,
+                    market_return_bps=market_return,
+                    market_coverage=market_coverage,
+                    history_count=len(history),
+                    history_observed_until=history[-1][3] if history else None,
+                    trading_gap=item.trading_gap,
+                    valid_baseline=valid_baseline,
+                    policy=policy,
+                )
+                for feature, allowed_horizons in (
+                    (h1, policy.morning_reversion_horizons_seconds),
+                    (h2, policy.morning_continuation_horizons_seconds),
+                ):
+                    if (
+                        feature.hypothesis not in selected
+                        or horizon not in allowed_horizons
+                    ):
+                        continue
+                    forward = _forward_return_from_open(
+                        item.rows, item.opening_index, horizon // 60
+                    )
+                    result.append(
+                        (
+                            feature,
+                            directional_outcome(
+                                feature,
+                                target_at=item.observed_at
+                                + timedelta(seconds=horizon),
+                                forward_return_bps=forward,
+                                round_trip_cost_bps=policy.round_trip_cost_bps,
+                            ),
+                        )
+                    )
+        for item in day_items:
+            if not item.trading_gap:
+                histories[item.ticker].append(
+                    (
+                        item.deviation_bps,
+                        item.cumulative_volume,
+                        item.range_bps,
+                        item.feature_max_observed_at,
+                    )
+                )
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectionalCandidate:
+    ticker: str
+    trading_day: date
+    bucket: int
+    observed_at: datetime
+    index: int
+    rows: tuple[HistoricalCandle, ...]
+    raw_return_bps: float | None
+
+
+def _phase_recurrence_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    policy: ProspectiveScientificPolicy,
+) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+    candidates: list[_DirectionalCandidate] = []
+    minutes = policy.phase_recurrence_horizon_seconds // 60
+    for ticker, rows in by_ticker.items():
+        for index, candle in enumerate(rows):
+            local = candle.at.astimezone(MOSCOW)
+            observed_at = candle.at
+            if local.minute % 30 or not _eligible(observed_at):
+                continue
+            candidates.append(
+                _DirectionalCandidate(
+                    ticker=ticker,
+                    trading_day=_trading_day(candle.at),
+                    bucket=_clock_bucket(candle.at, 30),
+                    observed_at=observed_at,
+                    index=index,
+                    rows=rows,
+                    raw_return_bps=_forward_return_from_open(rows, index, minutes),
+                )
+            )
+    histories: defaultdict[
+        tuple[str, int], deque[tuple[float, datetime]]
+    ] = defaultdict(lambda: deque(maxlen=policy.phase_recurrence_history_days))
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    for trading_day, day_items in _items_by_day(candidates):
+        for item in day_items:
+            history = histories[(item.ticker, item.bucket)]
+            feature = phase_recurrence_feature(
+                ticker=item.ticker,
+                trading_day=trading_day,
+                observed_at=item.observed_at,
+                historical_same_phase_returns_bps=(value[0] for value in history),
+                history_observed_until=history[-1][1] if history else None,
+                trading_gap=False,
+                policy=policy,
+            )
+            result.append(
+                (
+                    feature,
+                    directional_outcome(
+                        feature,
+                        target_at=item.observed_at
+                        + timedelta(seconds=policy.phase_recurrence_horizon_seconds),
+                        forward_return_bps=item.raw_return_bps,
+                        round_trip_cost_bps=policy.round_trip_cost_bps,
+                    ),
+                )
+            )
+        for item in day_items:
+            if item.raw_return_bps is not None:
+                histories[(item.ticker, item.bucket)].append(
+                    (
+                        item.raw_return_bps,
+                        item.observed_at
+                        + timedelta(seconds=policy.phase_recurrence_horizon_seconds),
+                    )
+                )
+    return result
+
+
+def _open_close_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    policy: ProspectiveScientificPolicy,
+    market_universe: tuple[str, ...],
+) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+    indexed = {
+        ticker: _indexed_rows_by_day(rows)
+        for ticker, rows in by_ticker.items()
+        if ticker in frozenset(market_universe)
+    }
+    trading_days = sorted(
+        {trading_day for by_day in indexed.values() for trading_day in by_day}
+    )
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    for trading_day in trading_days:
+        opening_returns: list[float] = []
+        closing_returns: list[float] = []
+        opening_cutoffs: list[datetime] = []
+        closing_starts: list[datetime] = []
+        complete_members = 0
+        for ticker in market_universe:
+            day_rows = indexed.get(ticker, {}).get(trading_day)
+            if day_rows is None:
+                continue
+            opening = _minute_window(day_rows, 10 * 60, 30)
+            closing = _minute_window(day_rows, 18 * 60 + 10, 30)
+            if opening is None or closing is None:
+                continue
+            complete_members += 1
+            opening_returns.append(
+                (opening[-1].close / opening[0].open - 1.0) * 10_000.0
+            )
+            closing_returns.append(
+                (closing[-1].close / closing[0].open - 1.0) * 10_000.0
+            )
+            opening_cutoffs.append(_observed_at(opening[-1]))
+            closing_starts.append(closing[0].at)
+        coverage = (
+            complete_members / len(market_universe) if market_universe else 0.0
+        )
+        if not opening_cutoffs or not closing_starts:
+            continue
+        observed_at = max(closing_starts)
+        feature = open_close_basket_feature(
+            trading_day=trading_day,
+            observed_at=observed_at,
+            feature_max_observed_at=max(opening_cutoffs),
+            opening_basket_return_bps=fmean(opening_returns),
+            basket_coverage=coverage,
+            shortened_session=complete_members == 0,
+            policy=policy,
+        )
+        result.append(
+            (
+                feature,
+                directional_outcome(
+                    feature,
+                    target_at=observed_at
+                    + timedelta(seconds=policy.open_close_horizon_seconds),
+                    forward_return_bps=fmean(closing_returns),
+                    round_trip_cost_bps=policy.round_trip_cost_bps,
+                ),
+            )
+        )
+    return result
+
+
+def _pair_reversion_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    split: ChronologicalSplit,
+    policy: ProspectiveScientificPolicy,
+    pair_candidates: tuple[tuple[str, str], ...],
+) -> tuple[
+    list[tuple[ProspectiveFeature, ProspectiveOutcome]],
+    tuple[FrozenPairParameters, ...],
+]:
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    fitted: list[FrozenPairParameters] = []
+    for left_ticker, right_ticker in pair_candidates:
+        left = {item.at: item for item in by_ticker.get(left_ticker, ())}
+        right = {item.at: item for item in by_ticker.get(right_ticker, ())}
+        shared = tuple(sorted(set(left) & set(right)))
+        training_at = tuple(
+            at
+            for at in shared
+            if split.partition_for(_trading_day(at)) is DatasetPartition.TRAIN
+            and _eligible(_observed_at(left[at]))
+            and at.astimezone(MOSCOW).minute % 30 == 29
+        )
+        parameters = _fit_pair_parameters(
+            left_ticker,
+            right_ticker,
+            left,
+            right,
+            training_at,
+            policy,
+        )
+        if parameters is not None:
+            fitted.append(parameters)
+        evaluation_at = tuple(
+            at
+            for at in shared
+            if split.partition_for(_trading_day(at)) is not DatasetPartition.TRAIN
+            and _eligible(_observed_at(left[at]))
+            and at.astimezone(MOSCOW).minute % 30 == 29
+        )
+        positions = {at: index for index, at in enumerate(shared)}
+        for at in evaluation_at:
+            index = positions[at]
+            previous_at = shared[index - 1] if index else None
+            current_left, current_right = left[at], right[at]
+            corporate_action = False
+            if previous_at is not None:
+                corporate_action = (
+                    abs(current_left.close / left[previous_at].close - 1.0) >= 0.20
+                    or abs(current_right.close / right[previous_at].close - 1.0) >= 0.20
+                )
+            observed_at = _observed_at(current_left)
+            for horizon in policy.pair_horizons_seconds:
+                feature = pair_residual_reversion_feature(
+                    left_ticker=left_ticker,
+                    right_ticker=right_ticker,
+                    trading_day=_trading_day(at),
+                    observed_at=observed_at,
+                    left_price=current_left.close,
+                    right_price=current_right.close,
+                    parameters=parameters,
+                    corporate_action_suspected=corporate_action,
+                    liquid=current_left.volume > 0.0 and current_right.volume > 0.0,
+                    policy=policy,
+                    horizon_seconds=horizon,
+                )
+                target_at = observed_at + timedelta(seconds=horizon)
+                future_left = left.get(target_at - timedelta(minutes=1))
+                future_right = right.get(target_at - timedelta(minutes=1))
+                forward: float | None = None
+                expected_times = tuple(
+                    at + timedelta(minutes=minute)
+                    for minute in range(1, horizon // 60 + 1)
+                )
+                if (
+                    parameters is not None
+                    and future_left is not None
+                    and future_right is not None
+                    and _trading_day(future_left.at) == _trading_day(at)
+                    and all(
+                        expected_at in left and expected_at in right
+                        for expected_at in expected_times
+                    )
+                ):
+                    current_spread = parameters.spread(
+                        current_left.close, current_right.close
+                    )
+                    future_spread = parameters.spread(
+                        future_left.close, future_right.close
+                    )
+                    forward = (future_spread - current_spread) * 10_000.0
+                result.append(
+                    (
+                        feature,
+                        directional_outcome(
+                            feature,
+                            target_at=target_at,
+                            forward_return_bps=forward,
+                            round_trip_cost_bps=policy.round_trip_cost_bps,
+                        ),
+                    )
+                )
+    return result, tuple(fitted)
+
+
+def _fit_pair_parameters(
+    left_ticker: str,
+    right_ticker: str,
+    left: dict[datetime, HistoricalCandle],
+    right: dict[datetime, HistoricalCandle],
+    training_at: tuple[datetime, ...],
+    policy: ProspectiveScientificPolicy,
+) -> FrozenPairParameters | None:
+    if len(training_at) < policy.pair_min_training_points:
+        return None
+    x = tuple(log(right[at].close) for at in training_at)
+    y = tuple(log(left[at].close) for at in training_at)
+    x_mean, y_mean = fmean(x), fmean(y)
+    x_variance = sum((value - x_mean) ** 2 for value in x)
+    y_variance = sum((value - y_mean) ** 2 for value in y)
+    if x_variance <= 0.0 or y_variance <= 0.0:
+        return None
+    covariance = sum(
+        (left_value - x_mean) * (right_value - y_mean)
+        for left_value, right_value in zip(x, y, strict=True)
+    )
+    hedge_ratio = covariance / x_variance
+    intercept = y_mean - hedge_ratio * x_mean
+    spreads = tuple(
+        y_value - intercept - hedge_ratio * x_value
+        for x_value, y_value in zip(x, y, strict=True)
+    )
+    spread_std = pstdev(spreads)
+    if spread_std <= 0.0:
+        return None
+    return FrozenPairParameters(
+        left_ticker=left_ticker,
+        right_ticker=right_ticker,
+        intercept=intercept,
+        hedge_ratio=hedge_ratio,
+        spread_mean=fmean(spreads),
+        spread_std=spread_std,
+        correlation=covariance / sqrt(x_variance * y_variance),
+        training_points=len(training_at),
+        trained_until=max(_observed_at(left[at]) for at in training_at),
     )
 
 
@@ -729,6 +1238,59 @@ def _continuous(rows: Sequence[HistoricalCandle]) -> bool:
     )
 
 
+def _indexed_rows_by_day(
+    rows: Sequence[HistoricalCandle],
+) -> dict[date, dict[int, tuple[int, HistoricalCandle]]]:
+    grouped: defaultdict[date, dict[int, tuple[int, HistoricalCandle]]] = defaultdict(
+        dict
+    )
+    for index, candle in enumerate(rows):
+        local = candle.at.astimezone(MOSCOW)
+        grouped[local.date()][local.hour * 60 + local.minute] = (index, candle)
+    return dict(grouped)
+
+
+def _minute_window(
+    day_rows: dict[int, tuple[int, HistoricalCandle]],
+    start_minute: int,
+    minutes: int,
+) -> tuple[HistoricalCandle, ...] | None:
+    window = tuple(
+        day_rows[minute][1]
+        for minute in range(start_minute, start_minute + minutes)
+        if minute in day_rows
+    )
+    if len(window) != minutes or not _continuous(window):
+        return None
+    return window
+
+
+def _forward_return_from_open(
+    rows: Sequence[HistoricalCandle],
+    anchor_index: int,
+    minutes: int,
+) -> float | None:
+    if minutes <= 0:
+        raise ValueError("forward-return horizon must be positive")
+    end_index = anchor_index + minutes - 1
+    if end_index >= len(rows):
+        return None
+    future = tuple(rows[anchor_index : end_index + 1])
+    if len(future) != minutes or not _continuous(future):
+        return None
+    if _trading_day(future[0].at) != _trading_day(future[-1].at):
+        return None
+    if any(not _eligible(_observed_at(item)) for item in future):
+        return None
+    return (future[-1].close / future[0].open - 1.0) * 10_000.0
+
+
+def _percentile_rank(values: Sequence[float], current: float) -> float:
+    if not values:
+        return 0.0
+    return sum(value <= current for value in values) / len(values)
+
+
 def _log_returns(rows: Sequence[HistoricalCandle]) -> tuple[float, ...]:
     return tuple(
         log(current.close / previous.close) * 10_000.0
@@ -770,11 +1332,14 @@ def _report_fingerprint(
     features: tuple[ProspectiveFeature, ...],
     outcomes: tuple[ProspectiveOutcome, ...],
     parameters: HarV2Parameters | None,
+    pair_parameters: tuple[FrozenPairParameters, ...],
 ) -> str:
     payload = {
         "dataset_fingerprint": dataset_fingerprint,
         "policy": request.policy.version,
         "selected": [item.value for item in request.selected_hypotheses],
+        "market_universe": request.market_universe,
+        "pair_candidates": request.pair_candidates,
         "features": [
             (
                 item.observation_id,
@@ -809,6 +1374,19 @@ def _report_fingerprint(
             if parameters is not None
             else None
         ),
+        "pairs": [
+            (
+                item.pair_id,
+                item.intercept,
+                item.hedge_ratio,
+                item.spread_mean,
+                item.spread_std,
+                item.correlation,
+                item.training_points,
+                item.trained_until.isoformat(),
+            )
+            for item in pair_parameters
+        ],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + sha256(encoded).hexdigest()

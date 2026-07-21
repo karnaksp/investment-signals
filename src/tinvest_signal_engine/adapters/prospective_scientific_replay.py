@@ -42,9 +42,10 @@ PROSPECTIVE_SCIENTIFIC_EVIDENCE_POLICY = EvidenceGatePolicy(
     minimum_coverage=0.10,
 )
 
-# All six formulas were sealed on 2026-07-19.  Day-partitioned evidence can
-# therefore become genuinely prospective only from the next trading day.
-PROSPECTIVE_PRIMARY_HOLDOUT_START = date(2026, 7, 20)
+# H12 was the last formula added to this portfolio and was sealed on
+# 2026-07-22.  A combined portfolio claim therefore starts no earlier than the
+# next trading day; older observations remain useful only for research.
+PROSPECTIVE_PRIMARY_HOLDOUT_START = date(2026, 7, 23)
 PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA = (
     "prospective-scientific-evidence-v1.1.0"
 )
@@ -295,8 +296,13 @@ def _evidence_row(
         "independent_validation": independent_validation,
         "cost_adjusted": hypothesis
         in {
+            ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+            ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+            ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
+            ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
         },
         "sample_count": bundle.matched_events,
         "trading_days": bundle.trading_days,
@@ -403,6 +409,10 @@ def _horizons(
     report: _ReportSummary,
     hypothesis: ProspectiveHypothesis,
 ) -> tuple[int, ...]:
+    if hypothesis is ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION:
+        return report.policy.morning_reversion_horizons_seconds
+    if hypothesis is ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION:
+        return report.policy.morning_continuation_horizons_seconds
     if hypothesis in {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
@@ -410,6 +420,12 @@ def _horizons(
         return report.policy.jump_horizons_seconds
     if hypothesis is ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3:
         return (report.policy.volume_horizon_seconds,)
+    if hypothesis is ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE:
+        return (report.policy.phase_recurrence_horizon_seconds,)
+    if hypothesis is ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION:
+        return (report.policy.open_close_horizon_seconds,)
+    if hypothesis is ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION:
+        return report.policy.pair_horizons_seconds
     if hypothesis is ProspectiveHypothesis.HAR_VOLATILITY_V2:
         return (report.policy.har_horizon_seconds,)
     if hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK:

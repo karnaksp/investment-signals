@@ -225,6 +225,23 @@ sources:
       - A detected jump predicts volatility risk, not the sign of the next price move.
     original_result: Separating jumps from continuous variation improved volatility forecasts, especially after a detected jump.
 
+  - source_id: gatev-goetzmann-rouwenhorst-2006
+    title: "Pairs Trading: Performance of a Relative-Value Arbitrage Rule"
+    authors: [Evan Gatev, William N. Goetzmann, K. Geert Rouwenhorst]
+    publication_year: 2006
+    identifier: doi:10.1093/rfs/hhj020
+    url: https://doi.org/10.1093/rfs/hhj020
+    primary_publication: true
+    market: United States equities
+    sample_period: 1962 through 2002
+    sample_description: Liquid United States stocks grouped into price-history pairs on a formation period and traded on subsequent relative divergence
+    data_frequency: Daily total-return price histories
+    economic_mechanism: Related securities can share common valuation drivers; a temporary idiosyncratic divergence in their relative prices may be absorbed as the common relation reasserts itself.
+    limitations:
+      - The source uses daily United States data; an intraday MOEX residual and minute-candle execution rule are new adaptations.
+      - Pair selection, hedge ratios, corporate actions, liquidity, shorting constraints, and trading costs must be frozen and tested on later data.
+    original_result: A rule that formed historically close price pairs and traded later divergences produced positive reported excess returns before a complete modern implementation-cost analysis.
+
 hypotheses:
   - hypothesis_id: h1-morning-low-volume-reversion
     version: "1.0.0"
@@ -654,6 +671,39 @@ hypotheses:
       cost_model_version: "1.0.0"
       data_split_policy: 60/20/20 chronological trading days with an embargo of at least 1800 seconds
       multiple_testing_policy: Benjamini-Hochberg within residual-reversion family at q<=0.05 for research; Holm on future primary release tests
+
+  - hypothesis_id: h12-pair-residual-reversion
+    version: "1.0.0"
+    title: Возврат остаточного отклонения устойчивой пары
+    origin: research_extension
+    source_ids: [gatev-goetzmann-rouwenhorst-2006]
+    testable_statement: Если остаток логарифмической цены заранее зафиксированной пары ликвидных акций Московской биржи отклонился от обучающей нормы не менее чем на два стандартных отклонения, остаток чаще движется к норме в следующие 15, 30 или 60 минут, чем в сопоставимых контрольных моментах.
+    economic_mechanism: Акции одной компании или близкой структуры капитала могут иметь общие драйверы стоимости; временный дисбаланс ликвидности в одной бумаге создаёт относительное отклонение, которое затем поглощается.
+    market_phase: main_liquid_session
+    trigger_conditions: [pair_is_in_sealed_candidate_list, training_correlation >= 0.70, absolute_pair_residual_z >= 2.0, pair_model_fitted_on_training_days_only]
+    expected_direction: pair_residual_reversion
+    horizon_seconds: [900, 1800, 3600]
+    abstention_conditions: [pair_model_unavailable, pair_relationship_unstable, corporate_action_suspected, insufficient_liquidity, trading_gap]
+    falsification_criterion: Нижняя граница дневного 95%-интервала прироста результата после издержек к сопоставимому контролю не выше нуля на независимых днях либо знак эффекта нестабилен по парам и временным блокам.
+    original_market_result: Исходная работа сообщила положительный результат торговли расхождениями исторически близких пар на дневных данных США; внутридневной логарифмический остаток заранее выбранных пар Московской биржи является новой локальной версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h12-v1
+      hypothesis_id: h12-pair-residual-reversion
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-22T00:00:00+03:00"
+      expected_direction: pair_residual_reversion
+      feature_definitions: [candidate pairs are fixed as SBER/SBERP TATN/TATNP and SNGS/SNGSP, logarithmic left price is regressed on logarithmic right price with intercept using training days only, residual z score uses only the sealed training mean and standard deviation, the feature cutoff and model training boundary strictly precede the observation]
+      thresholds: {absolute_residual_z_min: 2.0, training_correlation_min: 0.70, minimum_training_points: 500, train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20, primary_horizon_seconds: 1800}
+      market_phase: main_liquid_session
+      horizon_seconds: [900, 1800, 3600]
+      success_criterion: At least 300 eligible observations over 30 trading days; cost-adjusted residual-reversion lift to five same-pair same-phase controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, and a stable sign in at least 4 of 5 chronological blocks.
+      abstention_conditions: [pair_model_unavailable, pair_relationship_unstable, corporate_action_suspected, insufficient_liquidity, trading_gap]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days; pair candidates and model coefficients are frozen on the first 60 percent; outcome embargo equals the longest 3600-second horizon
+      multiple_testing_policy: Benjamini-Hochberg within pair and horizon research variants at q<=0.05; Holm across future primary release claims
 
   - hypothesis_id: h15-multi-window-volatility-forecast
     version: "1.0.0"

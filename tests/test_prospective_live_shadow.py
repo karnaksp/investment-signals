@@ -12,6 +12,7 @@ from tinvest_signal_engine.adapters.in_memory_prospective_live_shadow import (
 from tinvest_signal_engine.application.prospective_live_shadow import (
     HarFeatureInput,
     JumpFeatureInput,
+    LIVE_SHADOW_HYPOTHESES,
     ProcessProspectiveLiveOutcomes,
     ProspectiveLiveOutcomeEvidence,
     ProspectivePortfolioSnapshot,
@@ -190,9 +191,9 @@ def test_full_portfolio_is_built_once_versioned_and_idempotent() -> None:
     assert second.replayed == 8
     assert first.observation_ids == second.observation_ids
     assert len(store.observations()) == 8
-    assert {item.feature.hypothesis for item in store.observations()} == set(
-        ProspectiveHypothesis
-    )
+    assert {
+        item.feature.hypothesis for item in store.observations()
+    } == LIVE_SHADOW_HYPOTHESES
     assert all(
         item.record_version == LIVE_SHADOW_RECORD_VERSION
         and item.policy_version == POLICY.version
