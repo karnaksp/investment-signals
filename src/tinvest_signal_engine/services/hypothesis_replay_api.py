@@ -87,7 +87,7 @@ JobState = Literal["queued", "running", "completed", "failed"]
 ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H10", "H11", "H15", "H7V2"})
 PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
-    {"H3V2", "H4V2", "H7V3", "H15V2", "H16", "H17"}
+    {"H3V2", "H4V2", "H7V3", "H12", "H15V2", "H16", "H17"}
 )
 SUPPORTED_HYPOTHESES = (
     frozenset(ALL_HYPOTHESES)
