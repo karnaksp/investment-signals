@@ -48,6 +48,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
         }
     ),
     "ingestor": frozenset({"TINVEST_TOKEN"}),
+    "historical_candle_import": frozenset({"CLICKHOUSE_PASSWORD"}),
     "local_notifier": frozenset(),
     "market_unary_emitter": frozenset({"TINVEST_TOKEN"}),
     "migration": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),

@@ -52,6 +52,7 @@ tinvest-scientific-candle-writer = "tinvest_signal_engine.services.scientific_ca
 tinvest-signal-outcome-worker = "tinvest_signal_engine.services.signal_outcome_worker:main"
 tinvest-bond-convergence-emitter = "tinvest_signal_engine.services.bond_convergence_emitter:main"
 tinvest-cache-candles = "tinvest_signal_engine.services.candle_cache:main"
+tinvest-import-scientific-history = "tinvest_signal_engine.services.historical_candle_import:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
