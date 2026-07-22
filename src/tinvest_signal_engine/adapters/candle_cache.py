@@ -211,15 +211,112 @@ class ParquetCandlePartitionRepository:
         self,
         keys: tuple[CandlePartitionKey, ...],
     ) -> tuple[CandlePartitionState, ...]:
-        summaries, _digest = self._scan_many(keys)
+        try:
+            summaries = self._inspect_many_batch(keys)
+        except Exception:
+            # A corrupt footer can fail the multi-file table function before
+            # it identifies the offending path.  Isolate it on the slow path.
+            return tuple(self.inspect(key) for key in keys)
         return tuple(
-            CandlePartitionState(
-                key=key,
-                valid=key in summaries,
-                row_count=summaries.get(key, (0, 0))[0],
-            )
-            for key in keys
+            summaries.get(key, CandlePartitionState(key, False)) for key in keys
         )
+
+    def _inspect_many_batch(
+        self,
+        keys: tuple[CandlePartitionKey, ...],
+    ) -> dict[CandlePartitionKey, CandlePartitionState]:
+        key_by_path: dict[str, CandlePartitionKey] = {}
+        for key in keys:
+            path = self._path(key)
+            if not path.is_file() or path.stat().st_size <= 0:
+                continue
+            resolved = str(path.resolve())
+            if resolved in key_by_path:
+                raise ValueError("partition paths must be unique")
+            key_by_path[resolved] = key
+        if not key_by_path:
+            return {}
+
+        # Initial cache discovery only needs structural invariants.  The
+        # immutable content fingerprint is calculated once when the final
+        # inventory is sealed, after missing or corrupt partitions are fixed.
+        database = self._database_connection()
+        paths = tuple(sorted(key_by_path))
+        schema_rows = database.execute(
+            "SELECT file_name, name FROM parquet_schema(?)",
+            [list(paths)],
+        ).fetchall()
+        fields_by_path: dict[str, set[str]] = {}
+        for raw_path, raw_name in schema_rows:
+            path = str(Path(str(raw_path)).resolve())
+            if path in key_by_path and raw_name is not None:
+                fields_by_path.setdefault(path, set()).add(str(raw_name))
+        valid_paths = tuple(
+            path
+            for path in paths
+            if set(_FIELDS).issubset(fields_by_path.get(path, set()))
+        )
+        if not valid_paths:
+            return {}
+
+        metadata_rows = database.execute(
+            "SELECT file_name, MAX(num_rows) "
+            "FROM parquet_file_metadata(?) GROUP BY file_name",
+            [list(valid_paths)],
+        ).fetchall()
+        expected_rows = {
+            str(Path(str(raw_path)).resolve()): int(row_count)
+            for raw_path, row_count in metadata_rows
+        }
+        valid_paths = tuple(path for path in valid_paths if path in expected_rows)
+        if not valid_paths:
+            return {}
+
+        rows = database.execute(
+            "SELECT filename, COUNT(*) AS row_count, "
+            'COUNT(DISTINCT CAST("at" AS TIMESTAMPTZ)) AS distinct_times, '
+            'MIN(CAST("ticker" AS VARCHAR)) AS min_ticker, '
+            'MAX(CAST("ticker" AS VARCHAR)) AS max_ticker, '
+            'BOOL_AND(CAST("complete" AS BOOLEAN)) AS all_complete, '
+            'MIN(CAST(CAST("at" AS TIMESTAMPTZ) AT TIME ZONE '
+            "'Europe/Moscow' AS DATE)) AS min_day, "
+            'MAX(CAST(CAST("at" AS TIMESTAMPTZ) AT TIME ZONE '
+            "'Europe/Moscow' AS DATE)) AS max_day "
+            "FROM read_parquet(?, filename=true, union_by_name=true) "
+            "GROUP BY filename",
+            [list(valid_paths)],
+        ).fetchall()
+        aggregate_by_path = {str(Path(str(row[0])).resolve()): row[1:] for row in rows}
+        summaries: dict[CandlePartitionKey, CandlePartitionState] = {}
+        for path in valid_paths:
+            key = key_by_path[path]
+            expected = expected_rows[path]
+            if expected == 0:
+                summaries[key] = CandlePartitionState(key, True, 0)
+                continue
+            aggregate = aggregate_by_path.get(path)
+            if aggregate is None:
+                continue
+            (
+                row_count,
+                distinct_times,
+                min_ticker,
+                max_ticker,
+                all_complete,
+                min_day,
+                max_day,
+            ) = aggregate
+            if (
+                int(row_count) == expected
+                and int(distinct_times) == expected
+                and min_ticker == key.ticker
+                and max_ticker == key.ticker
+                and bool(all_complete)
+                and min_day == key.trading_day
+                and max_day == key.trading_day
+            ):
+                summaries[key] = CandlePartitionState(key, True, expected)
+        return summaries
 
     def replace_atomically(
         self,
