@@ -41,11 +41,14 @@ WHERE candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
 ORDER BY ticker, candle_at, record_version
 SETTINGS
     max_execution_time = 300,
+    max_threads = 1,
+    max_block_size = 8192,
+    output_format_parallel_formatting = 0,
     timeout_before_checking_execution_speed = 0,
     max_rows_to_read = 10000000,
     max_result_rows = 10000000,
     result_overflow_mode = 'throw',
-    max_bytes_before_external_sort = 134217728
+    max_bytes_before_external_sort = 33554432
 FORMAT JSONEachRow
 """.strip()
 
