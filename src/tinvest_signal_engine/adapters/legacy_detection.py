@@ -16,7 +16,11 @@ from tinvest_signal_engine.application.reliable_processing import (
     DetectorConfigAcknowledgementSink,
     DetectorStateCheckpoint,
 )
-from tinvest_signal_engine.config import RuntimeSettings, load_detector_config, load_secret
+from tinvest_signal_engine.config import (
+    RuntimeSettings,
+    load_detector_config,
+    load_secret,
+)
 from tinvest_signal_engine.delivery_policy import DELIVERY_DELIVERED, DeliveryPolicy
 from tinvest_signal_engine.detector_core import SignalDetector
 from tinvest_signal_engine.detector_state_persist import (
@@ -136,9 +140,7 @@ class LegacyDetectionAdapter:
             loaded.default,
             loaded.per_instrument,
             lead_lag_pairs=loaded.lead_lag_pairs,
-            expectation_catalog_version=(
-                self._settings.expectation_catalog_version
-            ),
+            expectation_catalog_version=(self._settings.expectation_catalog_version),
             detector_config_version=self._detector_config_version(),
             delivery_config_version=self._settings.delivery_config_version,
             cost_model_version=self._settings.cost_model_version,
@@ -151,9 +153,7 @@ class LegacyDetectionAdapter:
             self._settings.detector_path,
             self._settings.detector_overrides_path,
         )
-        return content_version(
-            path.read_bytes() for path in paths if path.exists()
-        )
+        return content_version(path.read_bytes() for path in paths if path.exists())
 
     def _current_overrides_mtime(self) -> float | None:
         path = self._settings.detector_overrides_path
@@ -220,17 +220,23 @@ class LegacyDetectionAdapter:
 
     def _delivery_targets(self) -> tuple[DeliveryTarget, ...]:
         targets: list[DeliveryTarget] = []
+        current_webhook = load_secret("ALERT_WEBHOOK_URL", service_name="detector")
         alert_webhook_url = (
-            load_secret("ALERT_WEBHOOK_URL", service_name="detector")
-            or self._settings.alert_webhook_url
+            self._settings.alert_webhook_url
+            if current_webhook is None
+            else current_webhook
         )
+        current_bot_token = load_secret("TELEGRAM_BOT_TOKEN", service_name="detector")
         telegram_bot_token = (
-            load_secret("TELEGRAM_BOT_TOKEN", service_name="detector")
-            or self._settings.telegram_bot_token
+            self._settings.telegram_bot_token
+            if current_bot_token is None
+            else current_bot_token
         )
+        current_chat_id = load_secret("TELEGRAM_CHAT_ID", service_name="detector")
         telegram_chat_id = (
-            load_secret("TELEGRAM_CHAT_ID", service_name="detector")
-            or self._settings.telegram_chat_id
+            self._settings.telegram_chat_id
+            if current_chat_id is None
+            else current_chat_id
         )
         telegram_thread_raw = load_secret(
             "TELEGRAM_MESSAGE_THREAD_ID", service_name="detector"

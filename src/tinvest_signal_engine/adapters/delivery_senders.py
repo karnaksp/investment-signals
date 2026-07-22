@@ -55,20 +55,24 @@ class ConfiguredDeliverySender:
             raise DeliveryFailure("delivery_error") from error
 
     def _current_webhook_sink(self) -> WebhookAlertSink:
-        webhook_url = (
-            load_secret("ALERT_WEBHOOK_URL", service_name="delivery_worker")
-            or self._webhook._webhook_url
-        )
+        current = load_secret("ALERT_WEBHOOK_URL", service_name="delivery_worker")
+        webhook_url = self._webhook._webhook_url if current is None else current
         return WebhookAlertSink(webhook_url)
 
     def _current_telegram_sink(self) -> TelegramAlertSink:
+        current_bot_token = load_secret(
+            "TELEGRAM_BOT_TOKEN", service_name="delivery_worker"
+        )
         bot_token = (
-            load_secret("TELEGRAM_BOT_TOKEN", service_name="delivery_worker")
-            or self._telegram._bot_token
+            self._telegram._bot_token
+            if current_bot_token is None
+            else current_bot_token
+        )
+        current_chat_id = load_secret(
+            "TELEGRAM_CHAT_ID", service_name="delivery_worker"
         )
         chat_id = (
-            load_secret("TELEGRAM_CHAT_ID", service_name="delivery_worker")
-            or self._telegram._chat_id
+            self._telegram._chat_id if current_chat_id is None else current_chat_id
         )
         thread_raw = load_secret(
             "TELEGRAM_MESSAGE_THREAD_ID", service_name="delivery_worker"

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from tinvest_signal_engine.config import RuntimeSettings, load_secret
+from tinvest_signal_engine.adapters.delivery_senders import ConfiguredDeliverySender
+from tinvest_signal_engine.adapters.legacy_detection import LegacyDetectionAdapter
 
 
 def test_secret_can_be_loaded_from_utf8_file(tmp_path: Path) -> None:
@@ -122,3 +125,46 @@ def test_delivery_worker_reads_telegram_config_from_service_secret_files(
     assert settings.telegram_bot_token == "bot-token"
     assert settings.telegram_chat_id == "-1001234567890"
     assert settings.telegram_message_thread_id == 42
+
+
+def test_empty_live_secret_files_disable_started_telegram_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "telegram-bot-token"
+    chat_file = tmp_path / "telegram-chat-id"
+    token_file.write_text("updated-token\n", encoding="utf-8")
+    chat_file.write_text("-100200\n", encoding="utf-8")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("TELEGRAM_CHAT_ID_FILE", str(chat_file))
+    settings = replace(
+        RuntimeSettings.from_env(service_name="delivery_worker"),
+        telegram_bot_token="startup-token",
+        telegram_chat_id="-100100",
+    )
+    sender = ConfiguredDeliverySender(settings)
+    detector = LegacyDetectionAdapter(
+        replace(
+            RuntimeSettings.from_env(service_name="detector"),
+            telegram_bot_token="startup-token",
+            telegram_chat_id="-100100",
+        ),
+        delivered_count_since=lambda **_kwargs: 0,
+    )
+    try:
+        current = sender._current_telegram_sink()
+        assert current.enabled is True
+        assert current._bot_token == "updated-token"
+        assert current._chat_id == "-100200"
+        assert [target.destination_type for target in detector._delivery_targets()] == [
+            "telegram"
+        ]
+
+        token_file.write_text("", encoding="utf-8")
+        chat_file.write_text("", encoding="utf-8")
+
+        disabled = sender._current_telegram_sink()
+        assert disabled.enabled is False
+        assert detector._delivery_targets() == ()
+    finally:
+        sender.close()
