@@ -10,12 +10,17 @@ from zoneinfo import ZoneInfo
 from tinvest_signal_engine.adapters.file_scientific_combination_evidence import (
     FileScientificCombinationEvidenceArtifacts,
 )
+from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import (
+    FileProspectiveScientificPartitionStage,
+    FileScientificCombinationStreamingArtifacts,
+)
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificReport,
 )
 from tinvest_signal_engine.application.scientific_combination_evidence import (
     CombinationStatisticalState,
+    EvaluateScientificCombinationPartitions,
     EvaluateScientificCombinationPortfolio,
     EvaluateScientificCombinationPortfolioRequest,
     StoreScientificCombinationPortfolio,
@@ -173,20 +178,158 @@ def test_negative_result_is_rejected_and_persisted_as_immutable_artifact(
     assert c1_300["evidence"]["mean_lift_bps"] == -25.0
 
 
-def _evaluator() -> EvaluateScientificCombinationPortfolio:
-    return EvaluateScientificCombinationPortfolio(
-        EvidenceGatePolicy(
-            minimum_trading_days=5,
-            minimum_eligible_events=10,
-            controls_per_event=5,
-            bootstrap_samples=100,
-            bootstrap_seed=23,
-            false_discovery_rate=0.05,
-            required_positive_stability_blocks=4,
-            maximum_instrument_share=0.75,
-            minimum_coverage=0.10,
+def test_bounded_partition_pipeline_matches_batch_and_resumes_without_reading_source(
+    tmp_path: Path,
+) -> None:
+    report = _c1_report(event_forward_bps=30.0)
+    source = _stage_by_hypothesis(report, tmp_path / "source")
+    artifacts = FileScientificCombinationStreamingArtifacts(tmp_path / "evidence")
+
+    first = EvaluateScientificCombinationPartitions(
+        artifacts=artifacts,
+        policy=_policy(),
+    ).execute(
+        source,
+        cost_model_version="cost-v1",
+        combination_ids=(ScientificCombinationId.C1,),
+    )
+
+    assert first.resumed is False
+    assert first.partition_count == 180
+    assert first.observation_count == 360
+    assert first.result_count == 2
+    payload = json.loads(
+        (Path(first.artifact.artifact_uri) / "results.json").read_text(
+            encoding="utf-8"
         )
     )
+    c1_300 = next(item for item in payload if item["horizon_seconds"] == 300)
+    assert c1_300["statistical_state"] == "passed"
+    assert c1_300["comparison_hypotheses"] == ["H4V2"]
+
+    class CompletedSourceMustNotIterate:
+        def describe(self):
+            return source.describe()
+
+        def iter_partitions(self):
+            raise AssertionError("completed combination run reread source partitions")
+
+    resumed = EvaluateScientificCombinationPartitions(
+        artifacts=artifacts,
+        policy=_policy(),
+    ).execute(
+        CompletedSourceMustNotIterate(),  # type: ignore[arg-type]
+        cost_model_version="cost-v1",
+        combination_ids=(ScientificCombinationId.C1,),
+    )
+    assert resumed.resumed is True
+    assert resumed.artifact == first.artifact
+
+
+def test_partition_source_loads_one_trading_day_and_preserves_no_future_guard(
+    tmp_path: Path,
+) -> None:
+    report = _c1_report(
+        event_forward_bps=30.0,
+        context_shift=timedelta(minutes=1),
+    )
+    source = _stage_by_hypothesis(report, tmp_path / "source")
+
+    partitions = source.iter_partitions()
+    first_partition = next(iter(partitions))
+
+    assert first_partition.features
+    assert all(
+        item.trading_day == first_partition.trading_day
+        for item in first_partition.features
+    )
+    assert all(
+        item.feature_max_observed_at <= item.observed_at
+        for item in first_partition.features
+    )
+    completion = EvaluateScientificCombinationPartitions(
+        artifacts=FileScientificCombinationStreamingArtifacts(tmp_path / "evidence"),
+        policy=_policy(),
+    ).execute(
+        source,
+        cost_model_version="cost-v1",
+        combination_ids=(ScientificCombinationId.C1,),
+    )
+    partition_payload = json.loads(
+        next(
+            (Path(completion.artifact.artifact_uri) / "partitions").glob("*.json")
+        ).read_text(encoding="utf-8")
+    )
+    assert partition_payload["observations"]
+    assert all(
+        item["decision"] == "abstain"
+        and item["reason"] == "future_component"
+        and item["max_used_observed_at"] is None
+        for item in partition_payload["observations"]
+    )
+
+
+def test_staged_source_detects_corrupted_partition(tmp_path: Path) -> None:
+    source = _stage_by_hypothesis(
+        _c1_report(event_forward_bps=30.0),
+        tmp_path / "source",
+    )
+    partition = next((tmp_path / "source").glob("*/partitions/*.json"))
+    partition.write_text("{}\n", encoding="utf-8")
+
+    try:
+        source.describe()
+    except ValueError as exc:
+        assert "failed verification" in str(exc)
+    else:  # pragma: no cover - fail loudly without importing pytest here
+        raise AssertionError("corrupted source partition was accepted")
+
+
+def _evaluator() -> EvaluateScientificCombinationPortfolio:
+    return EvaluateScientificCombinationPortfolio(_policy())
+
+
+def _policy() -> EvidenceGatePolicy:
+    return EvidenceGatePolicy(
+        minimum_trading_days=5,
+        minimum_eligible_events=10,
+        controls_per_event=5,
+        bootstrap_samples=100,
+        bootstrap_seed=23,
+        false_discovery_rate=0.05,
+        required_positive_stability_blocks=4,
+        maximum_instrument_share=0.75,
+        minimum_coverage=0.10,
+    )
+
+
+def _stage_by_hypothesis(
+    report: ProspectiveScientificReport,
+    root: Path,
+) -> FileProspectiveScientificPartitionStage:
+    source = FileProspectiveScientificPartitionStage(root)
+    for hypothesis in report.selected_hypotheses:
+        pairs = tuple(
+            pair
+            for pair in zip(report.features, report.outcomes, strict=True)
+            if pair[0].hypothesis is hypothesis
+        )
+        source.stage(
+            replace(
+                report,
+                report_fingerprint=(
+                    "sha256:"
+                    + sha256(
+                        f"{report.report_fingerprint}|{hypothesis.value}".encode()
+                    ).hexdigest()
+                ),
+                selected_hypotheses=(hypothesis,),
+                features=tuple(item[0] for item in pairs),
+                outcomes=tuple(item[1] for item in pairs),
+            ),
+            cost_model_version="cost-v1",
+        )
+    return source
 
 
 def _request(

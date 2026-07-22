@@ -45,6 +45,10 @@ from tinvest_signal_engine.adapters.scientific_candle_replay import (
 from tinvest_signal_engine.adapters.prospective_scientific_replay import (
     ProspectiveScientificReplayArtifactAdapter,
 )
+from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import (
+    FileProspectiveScientificPartitionStage,
+    FileScientificCombinationStreamingArtifacts,
+)
 from tinvest_signal_engine.application.historical_hypothesis_replay import (
     DEFAULT_LIQUID_UNIVERSE,
     HistoricalReplayRequest,
@@ -62,6 +66,9 @@ from tinvest_signal_engine.application.prospective_scientific_models import (
     build_partitioned_prospective_scientific_research,
     build_prospective_scientific_research,
 )
+from tinvest_signal_engine.application.scientific_combination_evidence import (
+    EvaluateScientificCombinationPartitions,
+)
 from tinvest_signal_engine.application.historical_hypothesis_replay import (
     HistoricalCandleCachePort,
 )
@@ -76,6 +83,9 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveHypothesis,
     ProspectiveScientificPolicy,
 )
+from tinvest_signal_engine.domain.scientific_hypothesis_combinations import (
+    ScientificCombinationId,
+)
 from tinvest_signal_engine.domain.scientific_replay_contract import (
     ReplaySourceDataState,
     SCIENTIFIC_REPLAY_CONTRACT_V1,
@@ -89,6 +99,18 @@ ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H10", "H11", "H15", "H7V2"})
 PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
     {"H3V2", "H4V2", "H7V3", "H12", "H15V2", "H16", "H17"}
+)
+COMBINATION_SOURCE_HYPOTHESES = (
+    ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+    ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+    ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+    ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+    ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+    ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+    ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+)
+COMBINATION_SOURCE_IDS = frozenset(
+    item.value for item in COMBINATION_SOURCE_HYPOTHESES
 )
 SUPPORTED_HYPOTHESES = (
     frozenset(ALL_HYPOTHESES)
@@ -703,33 +725,60 @@ class LocalHypothesisPortfolioRunner:
             policy = ProspectiveScientificPolicy(
                 round_trip_cost_bps=request.cost_model.round_trip_bps
             )
-            if callable(getattr(candle_cache, "iter_ticker_partitions", None)):
-                reports = (
-                    build_partitioned_prospective_scientific_research(
+            partitioned = callable(
+                getattr(candle_cache, "iter_ticker_partitions", None)
+            )
+            candles = None if partitioned else candle_cache.load()
+
+            def build_one(
+                hypothesis: ProspectiveHypothesis,
+            ) -> Any:
+                scientific_request = ProspectiveScientificRequest(
+                    selected_hypotheses=(hypothesis,),
+                    policy=policy,
+                )
+                if partitioned:
+                    return build_partitioned_prospective_scientific_research(
                         candle_cache,  # type: ignore[arg-type]
                         dataset_fingerprint=descriptor.dataset_fingerprint,
-                        request=ProspectiveScientificRequest(
-                            selected_hypotheses=(hypothesis,),
-                            policy=policy,
-                        ),
+                        request=scientific_request,
                     )
-                    for hypothesis in requested_prospective
+                assert candles is not None
+                return build_prospective_scientific_research(
+                    candles,
+                    dataset_fingerprint=descriptor.dataset_fingerprint,
+                    request=scientific_request,
                 )
-            else:
-                candles = candle_cache.load()
-                reports = (
-                    build_prospective_scientific_research(
-                        candles,
-                        dataset_fingerprint=descriptor.dataset_fingerprint,
-                        request=ProspectiveScientificRequest(
-                            selected_hypotheses=(hypothesis,),
-                            policy=policy,
-                        ),
-                    )
-                    for hypothesis in requested_prospective
+
+            combinations_enabled = COMBINATION_SOURCE_IDS <= set(
+                request.hypothesis_ids
+            )
+            combination_source = (
+                FileProspectiveScientificPartitionStage(
+                    self._artifact_root
+                    / "scientific-combinations"
+                    / "source"
+                    / run_fingerprint.removeprefix("sha256:")
                 )
+                if combinations_enabled
+                else None
+            )
+
+            def reports() -> Any:
+                for hypothesis in requested_prospective:
+                    report = build_one(hypothesis)
+                    if (
+                        combination_source is not None
+                        and hypothesis in COMBINATION_SOURCE_HYPOTHESES
+                    ):
+                        combination_source.stage(
+                            report,
+                            cost_model_version=request.cost_model.version,
+                        )
+                    yield report
+
             artifact = self._prospective_artifacts.save_portfolio(
-                reports,
+                reports(),
                 requested_prospective,
                 cost_model_version=request.cost_model.version,
             )
@@ -742,6 +791,44 @@ class LocalHypothesisPortfolioRunner:
                 "resumed": False,
             })
             evidence.extend(artifact.evidence)
+            if combination_source is not None:
+                # H1/H2 have a legacy product evidence path, but C3 requires
+                # their causal prospective observations.  Build and release
+                # them one at a time after the main evidence adapter has
+                # already discarded every requested report graph.
+                for hypothesis in (
+                    ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+                    ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+                ):
+                    if hypothesis in requested_prospective:
+                        continue
+                    combination_source.stage(
+                        build_one(hypothesis),
+                        cost_model_version=request.cost_model.version,
+                    )
+                combination_completion = EvaluateScientificCombinationPartitions(
+                    artifacts=FileScientificCombinationStreamingArtifacts(
+                        self._artifact_root / "scientific-combinations" / "evidence"
+                    )
+                ).execute(
+                    combination_source,
+                    cost_model_version=request.cost_model.version,
+                )
+                engines.append({
+                    "engine": "scientific_combination_evidence",
+                    "combination_ids": tuple(
+                        item.value for item in ScientificCombinationId
+                    ),
+                    "application_run_id": combination_completion.run_id,
+                    "artifact_fingerprint": (
+                        combination_completion.artifact.artifact_fingerprint
+                    ),
+                    "artifact_uri": combination_completion.artifact.artifact_uri,
+                    "partition_count": combination_completion.partition_count,
+                    "observation_count": combination_completion.observation_count,
+                    "result_count": combination_completion.result_count,
+                    "resumed": combination_completion.resumed,
+                })
         requested_orderbook = tuple(
             item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
         )

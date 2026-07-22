@@ -9,12 +9,12 @@ basis; arbitrary feature mining is deliberately outside this use case.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from enum import Enum
 from hashlib import sha256
 import json
-from typing import Mapping, Protocol
+from typing import Iterable, Mapping, Protocol
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.application.hypothesis_evidence import (
@@ -33,6 +33,7 @@ from tinvest_signal_engine.application.scientific_hypothesis_combinations import
     ComposeScientificCombinationRequest,
 )
 from tinvest_signal_engine.domain.hypothesis_evidence import (
+    ChronologicalSplit,
     DatasetPartition,
     EvidenceBundle,
     EvidenceDecision,
@@ -44,6 +45,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveFeature,
     ProspectiveHypothesis,
     ProspectiveOutcome,
+    ProspectiveScientificPolicy,
 )
 from tinvest_signal_engine.domain.scientific_hypothesis_combinations import (
     CombinationComponentRole,
@@ -257,6 +259,115 @@ class ScientificCombinationArtifactPort(Protocol):
     def save(
         self, portfolio: ScientificCombinationPortfolio
     ) -> ScientificCombinationArtifactReference: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProspectiveScientificPartition:
+    """One bounded trading-day input from an outer persistence adapter."""
+
+    trading_day: date
+    features: tuple[ProspectiveFeature, ...]
+    outcomes: tuple[ProspectiveOutcome, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.features) != len(self.outcomes):
+            raise ValueError("prospective partition features and outcomes must align")
+        if any(item.trading_day != self.trading_day for item in self.features):
+            raise ValueError("prospective partition must contain one trading day")
+        if any(
+            feature.observation_id != outcome.observation_id
+            for feature, outcome in zip(self.features, self.outcomes, strict=True)
+        ):
+            raise ValueError("prospective partition outcomes must align with features")
+
+
+@dataclass(frozen=True, slots=True)
+class ProspectiveScientificPartitionSourceDescriptor:
+    dataset_fingerprint: str
+    source_report_fingerprint: str
+    split: ChronologicalSplit
+    policy: ProspectiveScientificPolicy
+    selected_hypotheses: tuple[ProspectiveHypothesis, ...]
+
+    def __post_init__(self) -> None:
+        if not self.dataset_fingerprint.startswith("sha256:"):
+            raise ValueError("partition source dataset fingerprint must use sha256")
+        if not self.source_report_fingerprint.startswith("sha256:"):
+            raise ValueError("partition source report fingerprint must use sha256")
+        if not self.selected_hypotheses:
+            raise ValueError("partition source requires hypotheses")
+        if len(set(self.selected_hypotheses)) != len(self.selected_hypotheses):
+            raise ValueError("partition source hypotheses must be unique")
+
+
+class ProspectiveScientificPartitionSourcePort(Protocol):
+    def describe(self) -> ProspectiveScientificPartitionSourceDescriptor: ...
+
+    def iter_partitions(self) -> Iterable[ProspectiveScientificPartition]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ScientificCombinationPartitionArtifact:
+    trading_day: date
+    observations: tuple[ScientificCombinationObservation, ...]
+    outcomes: tuple[CombinationOutcomeRecord, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.observations) != len(self.outcomes):
+            raise ValueError("combination partition rows must align")
+        if any(item.trading_day != self.trading_day for item in self.observations):
+            raise ValueError("combination artifact partition must contain one day")
+        if any(
+            observation.observation_id != outcome.observation_id
+            for observation, outcome in zip(
+                self.observations, self.outcomes, strict=True
+            )
+        ):
+            raise ValueError("combination partition outcomes must align")
+
+
+@dataclass(frozen=True, slots=True)
+class ScientificCombinationStreamingCompletion:
+    run_id: str
+    artifact: ScientificCombinationArtifactReference
+    partition_count: int
+    observation_count: int
+    result_count: int
+    resumed: bool
+
+    def __post_init__(self) -> None:
+        if not self.run_id.startswith("sha256:"):
+            raise ValueError("combination streaming run id must use sha256")
+        if min(
+            self.partition_count,
+            self.observation_count,
+            self.result_count,
+        ) < 0:
+            raise ValueError("combination streaming counts must be non-negative")
+
+
+class ScientificCombinationStreamingArtifactPort(Protocol):
+    def load_completed(
+        self, run_id: str
+    ) -> ScientificCombinationStreamingCompletion | None: ...
+
+    def stage_partition(
+        self,
+        run_id: str,
+        descriptor: ProspectiveScientificPartitionSourceDescriptor,
+        partition: ScientificCombinationPartitionArtifact,
+    ) -> None: ...
+
+    def complete(
+        self,
+        run_id: str,
+        descriptor: ProspectiveScientificPartitionSourceDescriptor,
+        results: tuple[CombinationEvidenceResult, ...],
+        *,
+        cost_model_version: str,
+        partition_count: int,
+        observation_count: int,
+    ) -> ScientificCombinationStreamingCompletion: ...
 
 
 class StoreScientificCombinationPortfolio:
@@ -653,6 +764,404 @@ class EvaluateScientificCombinationPortfolio:
         )
 
 
+@dataclass(slots=True)
+class _StreamingEvidenceAccumulator:
+    combination_id: ScientificCombinationId
+    horizon_seconds: int
+    total_observations: int = 0
+    matched_observations: int = 0
+    not_matched_observations: int = 0
+    abstained_observations: int = 0
+    available_outcomes: int = 0
+    reasons: Counter[str] = field(default_factory=Counter)
+    events: list[StudyPoint] = field(default_factory=list)
+    unavailable_event_ids: list[str] = field(default_factory=list)
+    candidates: list[StudyPoint] = field(default_factory=list)
+
+
+class EvaluateScientificCombinationPartitions:
+    """Bounded-memory C1-C4 evaluation over trading-day partitions.
+
+    Only event and standalone-control points survive the current partition.
+    Full feature graphs and composed observations are sealed by the artifact
+    port before the next trading day is requested.
+    """
+
+    def __init__(
+        self,
+        *,
+        artifacts: ScientificCombinationStreamingArtifactPort,
+        policy: EvidenceGatePolicy = EvidenceGatePolicy(),
+    ) -> None:
+        if policy.controls_per_event != 5:
+            raise ValueError("scientific combinations require exactly five controls")
+        self._artifacts = artifacts
+        self._policy = policy
+        self._composer = ComposeScientificCombinationBatch()
+        self._controls = BuildMatchedControls(
+            controls_per_event=5,
+            scenario_exclusion_window=timedelta(minutes=5),
+        )
+        self._portfolio = AssessEvidencePortfolio(policy)
+
+    def execute(
+        self,
+        source: ProspectiveScientificPartitionSourcePort,
+        *,
+        cost_model_version: str,
+        combination_ids: tuple[ScientificCombinationId, ...] = tuple(
+            ScientificCombinationId
+        ),
+        market_context_scope: str = "MOEX",
+    ) -> ScientificCombinationStreamingCompletion:
+        if not cost_model_version.strip():
+            raise ValueError("cost_model_version must not be empty")
+        if not combination_ids or len(set(combination_ids)) != len(combination_ids):
+            raise ValueError("combination ids must be non-empty and unique")
+        if not market_context_scope.strip():
+            raise ValueError("market_context_scope must not be empty")
+        descriptor = source.describe()
+        run_id = scientific_combination_streaming_run_id(
+            descriptor,
+            cost_model_version=cost_model_version,
+            combination_ids=combination_ids,
+            market_context_scope=market_context_scope,
+            evidence_policy=self._policy,
+        )
+        completed = self._artifacts.load_completed(run_id)
+        if completed is not None:
+            return completed
+
+        accumulators = {
+            (combination_id, horizon): _StreamingEvidenceAccumulator(
+                combination_id=combination_id,
+                horizon_seconds=horizon,
+            )
+            for combination_id in sorted(combination_ids, key=lambda item: item.value)
+            for horizon in preregistered_combination_definition(
+                combination_id
+            ).horizons_seconds
+        }
+        partition_count = 0
+        observation_count = 0
+        previous_day: date | None = None
+        for partition in source.iter_partitions():
+            if previous_day is not None and partition.trading_day <= previous_day:
+                raise ValueError("prospective partitions must be strictly ordered")
+            previous_day = partition.trading_day
+            observations = _compose_feature_partition(
+                self._composer,
+                partition.features,
+                combination_ids=combination_ids,
+                market_context_scope=market_context_scope,
+            )
+            source_outcomes = {
+                outcome.observation_id: outcome for outcome in partition.outcomes
+            }
+            outcomes = tuple(
+                EvaluateScientificCombinationPortfolio._outcome(
+                    observation,
+                    source_outcomes=source_outcomes,
+                    round_trip_cost_bps=descriptor.policy.round_trip_cost_bps,
+                )
+                for observation in observations
+            )
+            self._artifacts.stage_partition(
+                run_id,
+                descriptor,
+                ScientificCombinationPartitionArtifact(
+                    trading_day=partition.trading_day,
+                    observations=observations,
+                    outcomes=outcomes,
+                ),
+            )
+            partition_count += 1
+            observation_count += len(observations)
+            if (
+                descriptor.split.partition_for(partition.trading_day)
+                is not DatasetPartition.HOLDOUT
+            ):
+                continue
+            self._accumulate_holdout(
+                accumulators,
+                descriptor=descriptor,
+                partition=partition,
+                observations=observations,
+                outcomes=outcomes,
+                cost_model_version=cost_model_version,
+            )
+
+        prepared = tuple(
+            self._prepare_streaming(accumulator, descriptor=descriptor)
+            for accumulator in accumulators.values()
+        )
+        bundles = self._portfolio.execute(tuple(item.request for item in prepared))
+        results = tuple(
+            CombinationEvidenceResult(
+                combination_id=item.combination_id,
+                combination_version=item.combination_id.version,
+                horizon_seconds=item.horizon_seconds,
+                statistical_state=_statistical_state(bundle.decision),
+                comparison_hypotheses=(
+                    preregistered_combination_definition(
+                        item.combination_id
+                    ).comparison_hypothesis_ids
+                ),
+                abstain_policy_version=COMBINATION_ABSTAIN_POLICY_VERSION,
+                coverage=item.coverage,
+                control_matches=_control_matches(item.request),
+                evidence=bundle,
+            )
+            for item, bundle in zip(prepared, bundles, strict=True)
+        )
+        return self._artifacts.complete(
+            run_id,
+            descriptor,
+            results,
+            cost_model_version=cost_model_version,
+            partition_count=partition_count,
+            observation_count=observation_count,
+        )
+
+    @staticmethod
+    def _accumulate_holdout(
+        accumulators: Mapping[
+            tuple[ScientificCombinationId, int], _StreamingEvidenceAccumulator
+        ],
+        *,
+        descriptor: ProspectiveScientificPartitionSourceDescriptor,
+        partition: ProspectiveScientificPartition,
+        observations: tuple[ScientificCombinationObservation, ...],
+        outcomes: tuple[CombinationOutcomeRecord, ...],
+        cost_model_version: str,
+    ) -> None:
+        outcome_by_id = {item.observation_id: item for item in outcomes}
+        source_features = {item.observation_id: item for item in partition.features}
+        for observation in observations:
+            accumulator = accumulators[
+                (observation.combination_id, observation.horizon_seconds)
+            ]
+            accumulator.total_observations += 1
+            if observation.decision is ProspectiveDecision.MATCHED:
+                accumulator.matched_observations += 1
+            elif observation.decision is ProspectiveDecision.NOT_MATCHED:
+                accumulator.not_matched_observations += 1
+            else:
+                accumulator.abstained_observations += 1
+                accumulator.reasons[observation.reason.value] += 1
+            outcome = outcome_by_id[observation.observation_id]
+            if outcome.available:
+                accumulator.available_outcomes += 1
+            if observation.decision is not ProspectiveDecision.MATCHED:
+                continue
+            if outcome.net_directional_return_bps is None:
+                accumulator.unavailable_event_ids.append(observation.observation_id)
+                accumulator.reasons[outcome.reason_code] += 1
+                continue
+            source = source_features.get(outcome.source_observation_id or "")
+            if source is None:
+                accumulator.unavailable_event_ids.append(observation.observation_id)
+                accumulator.reasons["directional_basis_unavailable"] += 1
+                continue
+            accumulator.events.append(
+                _combination_study_point(
+                    observation,
+                    source,
+                    net_effect=outcome.net_directional_return_bps,
+                    cost_model_version=cost_model_version,
+                )
+            )
+
+        for accumulator in accumulators.values():
+            definition = preregistered_combination_definition(
+                accumulator.combination_id
+            )
+            accumulator.candidates.extend(
+                _standalone_candidates_from_partition(
+                    partition,
+                    hypotheses=definition.comparison_hypothesis_ids,
+                    horizon_seconds=accumulator.horizon_seconds,
+                    round_trip_cost_bps=descriptor.policy.round_trip_cost_bps,
+                    cost_model_version=cost_model_version,
+                )
+            )
+
+    def _prepare_streaming(
+        self,
+        accumulator: _StreamingEvidenceAccumulator,
+        *,
+        descriptor: ProspectiveScientificPartitionSourceDescriptor,
+    ) -> _PreparedCombinationEvidence:
+        with_exclusions = tuple(
+            replace(
+                candidate,
+                nearby_scenario_ids=tuple(
+                    event.scenario_id
+                    for event in accumulator.events
+                    if event.scenario_id is not None
+                    and event.instrument_id == candidate.instrument_id
+                    and abs(event.occurred_at - candidate.occurred_at)
+                    <= timedelta(minutes=5)
+                ),
+            )
+            for candidate in accumulator.candidates
+        )
+        matched = self._controls.execute(accumulator.events, with_exclusions)
+        unmatched = (
+            tuple(accumulator.unavailable_event_ids) + matched.unmatched_event_ids
+        )
+        if matched.unmatched_event_ids:
+            accumulator.reasons["standalone_controls_unavailable"] += len(
+                matched.unmatched_event_ids
+            )
+        coverage = CombinationEvidenceCoverage(
+            total_observations=accumulator.total_observations,
+            matched_observations=accumulator.matched_observations,
+            not_matched_observations=accumulator.not_matched_observations,
+            abstained_observations=accumulator.abstained_observations,
+            available_outcomes=accumulator.available_outcomes,
+            eligible_events=accumulator.matched_observations,
+            matched_events=len(matched.groups),
+            standalone_candidates=len(with_exclusions),
+            reasons_histogram=tuple(
+                EvidenceReasonCount(reason_code=code, count=count)
+                for code, count in sorted(accumulator.reasons.items())
+                if count > 0
+            ),
+        )
+        request = EvidenceRequest(
+            hypothesis_id=(
+                f"{accumulator.combination_id.value}:"
+                f"{accumulator.horizon_seconds}"
+            ),
+            hypothesis_version=accumulator.combination_id.version,
+            dataset_fingerprint=descriptor.dataset_fingerprint,
+            groups=matched.groups,
+            expected_eligible_events=accumulator.matched_observations,
+            unmatched_event_ids=unmatched,
+            total_available_observations=accumulator.total_observations or None,
+            diagnostics_input=EvidenceDiagnosticsInput(
+                total_observation_count=accumulator.total_observations,
+                available_observation_count=accumulator.available_outcomes,
+                eligible_event_count=len(accumulator.events),
+                reasons_histogram=coverage.reasons_histogram,
+            ),
+        )
+        return _PreparedCombinationEvidence(
+            combination_id=accumulator.combination_id,
+            horizon_seconds=accumulator.horizon_seconds,
+            request=request,
+            coverage=coverage,
+        )
+
+
+def scientific_combination_streaming_run_id(
+    descriptor: ProspectiveScientificPartitionSourceDescriptor,
+    *,
+    cost_model_version: str,
+    combination_ids: tuple[ScientificCombinationId, ...],
+    market_context_scope: str,
+    evidence_policy: EvidenceGatePolicy,
+) -> str:
+    payload = {
+        "version": COMBINATION_EVIDENCE_VERSION,
+        "dataset_fingerprint": descriptor.dataset_fingerprint,
+        "source_report_fingerprint": descriptor.source_report_fingerprint,
+        "cost_model_version": cost_model_version,
+        "combination_ids": [
+            item.value for item in sorted(combination_ids, key=lambda item: item.value)
+        ],
+        "market_context_scope": market_context_scope,
+        "abstain_policy": COMBINATION_ABSTAIN_POLICY_VERSION,
+        "evidence_policy": {
+            key: getattr(evidence_policy, key)
+            for key in evidence_policy.__dataclass_fields__
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _compose_feature_partition(
+    composer: ComposeScientificCombinationBatch,
+    features: tuple[ProspectiveFeature, ...],
+    *,
+    combination_ids: tuple[ScientificCombinationId, ...],
+    market_context_scope: str,
+) -> tuple[ScientificCombinationObservation, ...]:
+    component_index: defaultdict[
+        tuple[date, ProspectiveHypothesis, str, int],
+        list[ProspectiveFeature],
+    ] = defaultdict(list)
+    for feature in features:
+        component_index[
+            (
+                feature.trading_day,
+                feature.hypothesis,
+                feature.ticker,
+                feature.horizon_seconds,
+            )
+        ].append(feature)
+    requests: list[ComposeScientificCombinationRequest] = []
+    seen: set[tuple[object, ...]] = set()
+    for combination_id in sorted(combination_ids, key=lambda item: item.value):
+        definition = preregistered_combination_definition(combination_id)
+        anchors = tuple(
+            feature
+            for feature in features
+            if feature.hypothesis in definition.comparison_hypothesis_ids
+            and feature.horizon_seconds in definition.horizons_seconds
+        )
+        for anchor in anchors:
+            key = (
+                combination_id,
+                anchor.ticker,
+                anchor.trading_day,
+                anchor.observed_at,
+                anchor.horizon_seconds,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            uses_market_context = any(
+                item.role is CombinationComponentRole.MARKET_CONTEXT
+                for item in definition.requirements
+            )
+            context_scope = market_context_scope if uses_market_context else None
+            components: list[ProspectiveFeature] = []
+            for requirement in definition.requirements:
+                scope = (
+                    anchor.ticker
+                    if requirement.role is CombinationComponentRole.PRIMARY
+                    else context_scope
+                )
+                if scope is None:
+                    continue
+                components.extend(
+                    component_index.get(
+                        (
+                            anchor.trading_day,
+                            requirement.hypothesis,
+                            scope,
+                            requirement.horizon_for(anchor.horizon_seconds),
+                        ),
+                        (),
+                    )
+                )
+            requests.append(
+                ComposeScientificCombinationRequest(
+                    combination_id=combination_id,
+                    primary_scope=anchor.ticker,
+                    market_context_scope=context_scope,
+                    trading_day=anchor.trading_day,
+                    observed_at=anchor.observed_at,
+                    horizon_seconds=anchor.horizon_seconds,
+                    components=tuple(components),
+                )
+            )
+    return composer.execute(ComposeScientificCombinationBatchRequest(tuple(requests)))
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedCombinationEvidence:
     combination_id: ScientificCombinationId
@@ -688,6 +1197,42 @@ def _standalone_candidates(
                 net_effect=(
                     feature.expected_direction * forward
                     - report.policy.round_trip_cost_bps
+                ),
+                cost_model_version=cost_model_version,
+            )
+        )
+    return tuple(
+        sorted(candidates, key=lambda item: (item.occurred_at, item.point_id))
+    )
+
+
+def _standalone_candidates_from_partition(
+    partition: ProspectiveScientificPartition,
+    *,
+    hypotheses: tuple[ProspectiveHypothesis, ...],
+    horizon_seconds: int,
+    round_trip_cost_bps: float,
+    cost_model_version: str,
+) -> tuple[StudyPoint, ...]:
+    candidates: list[StudyPoint] = []
+    for feature, outcome in zip(
+        partition.features, partition.outcomes, strict=True
+    ):
+        if feature.hypothesis not in hypotheses:
+            continue
+        if feature.horizon_seconds != horizon_seconds:
+            continue
+        if feature.decision is not ProspectiveDecision.MATCHED or not outcome.available:
+            continue
+        try:
+            forward = outcome.metric("forward_return").value
+        except KeyError:
+            continue
+        candidates.append(
+            _feature_study_point(
+                feature,
+                net_effect=(
+                    feature.expected_direction * forward - round_trip_cost_bps
                 ),
                 cost_model_version=cost_model_version,
             )

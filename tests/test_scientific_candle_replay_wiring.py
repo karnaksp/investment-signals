@@ -184,3 +184,135 @@ def test_internal_runner_wires_prospective_portfolio_as_one_evidence_family(
         request.hypothesis_ids
     )
     assert result["engines"][0]["engine"] == "prospective_scientific_replay"
+
+
+def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {"staged": []}
+    source_ids = tuple(
+        hypothesis.value for hypothesis in replay_api.COMBINATION_SOURCE_HYPOTHESES
+    )
+    report = SimpleNamespace(
+        report_fingerprint="sha256:" + "a" * 64,
+        dataset_fingerprint="sha256:" + "b" * 64,
+    )
+
+    class FakeCache:
+        def describe(self) -> object:
+            return SimpleNamespace(dataset_fingerprint=report.dataset_fingerprint)
+
+        def load(self) -> tuple[object, ...]:
+            return (object(),)
+
+    class FakeProspectiveArtifacts:
+        def save_portfolio(
+            self,
+            actual_reports: object,
+            requested: tuple[object, ...],
+            *,
+            cost_model_version: str,
+        ) -> object:
+            captured["reports"] = tuple(actual_reports)
+            return SimpleNamespace(
+                artifact_uri=str(tmp_path / "prospective"),
+                artifact_fingerprint="sha256:" + "c" * 64,
+                evidence=tuple(
+                    {"hypothesis_id": item.value} for item in requested
+                ),
+            )
+
+    class FakeStage:
+        def __init__(self, root: object) -> None:
+            captured["stage_root"] = root
+
+        def stage(self, actual_report: object, *, cost_model_version: str) -> None:
+            captured["staged"].append((actual_report, cost_model_version))
+
+    class FakeStreamingArtifacts:
+        def __init__(self, root: object) -> None:
+            captured["combination_root"] = root
+
+    class FakeCombinationEvaluator:
+        def __init__(self, *, artifacts: object) -> None:
+            captured["streaming_artifacts"] = artifacts
+
+        def execute(
+            self,
+            source: object,
+            *,
+            cost_model_version: str,
+        ) -> object:
+            captured["combination_source"] = source
+            captured["combination_cost_model"] = cost_model_version
+            return SimpleNamespace(
+                run_id="sha256:" + "d" * 64,
+                artifact=SimpleNamespace(
+                    artifact_uri=str(tmp_path / "combinations"),
+                    artifact_fingerprint="sha256:" + "e" * 64,
+                ),
+                partition_count=180,
+                observation_count=1234,
+                result_count=8,
+                resumed=False,
+            )
+
+    def fake_build(
+        candles: object,
+        *,
+        dataset_fingerprint: str,
+        request: object,
+    ) -> object:
+        captured.setdefault("requests", []).append(request)
+        return report
+
+    monkeypatch.setattr(
+        replay_api,
+        "PROSPECTIVE_SCIENTIFIC_HYPOTHESES",
+        replay_api.PROSPECTIVE_SCIENTIFIC_HYPOTHESES | {"H1", "H2"},
+    )
+    monkeypatch.setattr(replay_api, "GENERAL_HYPOTHESES", frozenset())
+    monkeypatch.setattr(
+        replay_api, "build_prospective_scientific_research", fake_build
+    )
+    monkeypatch.setattr(
+        replay_api, "FileProspectiveScientificPartitionStage", FakeStage
+    )
+    monkeypatch.setattr(
+        replay_api, "FileScientificCombinationStreamingArtifacts", FakeStreamingArtifacts
+    )
+    monkeypatch.setattr(
+        replay_api, "EvaluateScientificCombinationPartitions", FakeCombinationEvaluator
+    )
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "cache",
+        artifact_root=tmp_path / "artifacts",
+        prospective_artifacts=FakeProspectiveArtifacts(),  # type: ignore[arg-type]
+    )
+    runner._descriptor_cache = FakeCache()  # type: ignore[assignment]
+
+    result = runner.execute(
+        StartReplayRequest(
+            hypothesis_ids=source_ids,
+            cost_model={"version": "cost-v4"},
+        ),
+        run_fingerprint="sha256:" + "f" * 64,
+    )
+
+    assert len(captured["reports"]) == len(source_ids)
+    assert len(captured["staged"]) == len(source_ids)
+    assert all(item[1] == "cost-v4" for item in captured["staged"])
+    assert captured["combination_source"].__class__ is FakeStage
+    assert captured["combination_cost_model"] == "cost-v4"
+    assert result["engines"][1] == {
+        "engine": "scientific_combination_evidence",
+        "combination_ids": ("C1", "C2", "C3", "C4"),
+        "application_run_id": "sha256:" + "d" * 64,
+        "artifact_fingerprint": "sha256:" + "e" * 64,
+        "artifact_uri": str(tmp_path / "combinations"),
+        "partition_count": 180,
+        "observation_count": 1234,
+        "result_count": 8,
+        "resumed": False,
+    }
