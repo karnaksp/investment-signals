@@ -207,6 +207,20 @@ class ParquetCandlePartitionRepository:
             return CandlePartitionState(key=key, valid=False)
         return CandlePartitionState(key=key, valid=True, row_count=len(records))
 
+    def inspect_many(
+        self,
+        keys: tuple[CandlePartitionKey, ...],
+    ) -> tuple[CandlePartitionState, ...]:
+        summaries, _digest = self._scan_many(keys)
+        return tuple(
+            CandlePartitionState(
+                key=key,
+                valid=key in summaries,
+                row_count=summaries.get(key, (0, 0))[0],
+            )
+            for key in keys
+        )
+
     def replace_atomically(
         self,
         key: CandlePartitionKey,
@@ -230,22 +244,150 @@ class ParquetCandlePartitionRepository:
         self,
         keys: tuple[CandlePartitionKey, ...],
     ) -> CandleCacheInventory:
-        digest = sha256()
-        row_counts: list[tuple[str, int]] = []
-        morning_row_counts: list[tuple[str, int]] = []
-        for key in sorted(keys, key=lambda item: (item.ticker, item.trading_day)):
-            summary = self._inventory_partition(key, digest)
-            if summary is None:
-                continue
-            row_count, morning_rows = summary
-            row_counts.append((key.manifest_key, row_count))
-            if morning_rows:
-                morning_row_counts.append((key.manifest_key, morning_rows))
+        summaries, digest = self._scan_many(keys)
+        row_counts = [
+            (key.manifest_key, summaries[key][0])
+            for key in sorted(
+                summaries, key=lambda item: (item.ticker, item.trading_day)
+            )
+        ]
+        morning_row_counts = [
+            (key.manifest_key, summaries[key][1])
+            for key in sorted(
+                summaries, key=lambda item: (item.ticker, item.trading_day)
+            )
+            if summaries[key][1]
+        ]
         return CandleCacheInventory(
-            dataset_fingerprint=digest.hexdigest(),
+            dataset_fingerprint=digest,
             rows_by_partition=tuple(sorted(row_counts)),
             morning_rows_by_partition=tuple(sorted(morning_row_counts)),
         )
+
+    def _scan_many(
+        self,
+        keys: tuple[CandlePartitionKey, ...],
+    ) -> tuple[dict[CandlePartitionKey, tuple[int, int]], str]:
+        ordered = tuple(sorted(keys, key=lambda item: (item.ticker, item.trading_day)))
+        key_by_path: dict[str, CandlePartitionKey] = {}
+        for key in ordered:
+            path = self._path(key)
+            if not path.is_file() or path.stat().st_size <= 0:
+                continue
+            resolved = str(path.resolve())
+            if resolved in key_by_path:
+                return self._scan_many_fallback(ordered)
+            key_by_path[resolved] = key
+        if not key_by_path:
+            return {}, sha256().hexdigest()
+        try:
+            return self._scan_many_batch(key_by_path)
+        except Exception:
+            # A corrupt Parquet footer can make a multi-file scan fail as a
+            # whole.  The slow path isolates that file so every other valid
+            # partition remains reusable and the corrupt one is re-fetched.
+            return self._scan_many_fallback(ordered)
+
+    def _scan_many_batch(
+        self,
+        key_by_path: Mapping[str, CandlePartitionKey],
+    ) -> tuple[dict[CandlePartitionKey, tuple[int, int]], str]:
+        database = self._database_connection()
+        paths = tuple(sorted(key_by_path))
+        schema_rows = database.execute(
+            "SELECT file_name, name FROM parquet_schema(?)",
+            [list(paths)],
+        ).fetchall()
+        fields_by_path: dict[str, set[str]] = {}
+        for raw_path, raw_name in schema_rows:
+            path = str(Path(str(raw_path)).resolve())
+            if path in key_by_path and raw_name is not None:
+                fields_by_path.setdefault(path, set()).add(str(raw_name))
+        valid_paths = tuple(
+            path
+            for path in paths
+            if set(_FIELDS).issubset(fields_by_path.get(path, set()))
+        )
+        if not valid_paths:
+            return {}, sha256().hexdigest()
+
+        metadata_rows = database.execute(
+            "SELECT file_name, MAX(num_rows) "
+            "FROM parquet_file_metadata(?) GROUP BY file_name",
+            [list(valid_paths)],
+        ).fetchall()
+        expected_rows = {
+            str(Path(str(raw_path)).resolve()): int(row_count)
+            for raw_path, row_count in metadata_rows
+        }
+        valid_paths = tuple(path for path in valid_paths if path in expected_rows)
+        if not valid_paths:
+            return {}, sha256().hexdigest()
+
+        quoted_fields = ", ".join(f'"{field}"' for field in _FIELDS)
+        cursor = database.execute(
+            f"SELECT filename, {quoted_fields} "
+            "FROM read_parquet(?, filename=true, union_by_name=true) "
+            'ORDER BY filename, "ticker", "at"',
+            [list(valid_paths)],
+        )
+        columns = tuple(item[0] for item in cursor.description)
+        if not {"filename", *_FIELDS}.issubset(columns):
+            raise ValueError("candle partition schema is incomplete")
+
+        digest = sha256()
+        summaries: dict[CandlePartitionKey, tuple[int, int]] = {}
+        current_path: str | None = None
+        current_records: list[dict[str, object]] = []
+
+        def finish() -> None:
+            nonlocal current_path, current_records
+            if current_path is None:
+                return
+            key = key_by_path[current_path]
+            records = tuple(current_records)
+            if len(records) != expected_rows[current_path]:
+                raise ValueError("candle partition row count changed during scan")
+            self._validate(key, records)
+            _update_records_fingerprint(digest, records)
+            summaries[key] = (
+                len(records),
+                sum(1 for record in records if _is_morning(_cached_candle(record).at)),
+            )
+            current_path = None
+            current_records = []
+
+        while rows := cursor.fetchmany(4096):
+            for row in rows:
+                record = dict(zip(columns, row))
+                raw_path = str(Path(str(record.pop("filename"))).resolve())
+                if raw_path not in key_by_path:
+                    raise ValueError("Parquet scan returned an unexpected partition")
+                if current_path is not None and raw_path != current_path:
+                    finish()
+                current_path = raw_path
+                current_records.append(record)
+        finish()
+
+        for path in valid_paths:
+            if expected_rows[path] == 0:
+                key = key_by_path[path]
+                summaries[key] = (0, 0)
+            elif key_by_path[path] not in summaries:
+                raise ValueError("non-empty candle partition was absent from scan")
+        return summaries, digest.hexdigest()
+
+    def _scan_many_fallback(
+        self,
+        keys: tuple[CandlePartitionKey, ...],
+    ) -> tuple[dict[CandlePartitionKey, tuple[int, int]], str]:
+        digest = sha256()
+        summaries: dict[CandlePartitionKey, tuple[int, int]] = {}
+        for key in keys:
+            summary = self._inventory_partition(key, digest)
+            if summary is not None:
+                summaries[key] = summary
+        return summaries, digest.hexdigest()
 
     def _inventory_partition(
         self,

@@ -23,6 +23,11 @@ class CandleHistorySourcePort(Protocol):
 class CandlePartitionRepositoryPort(Protocol):
     def inspect(self, key: CandlePartitionKey) -> CandlePartitionState: ...
 
+    def inspect_many(
+        self,
+        keys: tuple[CandlePartitionKey, ...],
+    ) -> tuple[CandlePartitionState, ...]: ...
+
     def replace_atomically(
         self,
         key: CandlePartitionKey,
@@ -55,11 +60,16 @@ class BuildReusableCandleCache:
 
     def execute(self, scope: CandleCacheScope) -> CandleCacheReceipt:
         keys = _partition_keys(scope)
+        current_by_key = {
+            state.key: state for state in self._repository.inspect_many(keys)
+        }
+        if set(current_by_key) != set(keys):
+            raise ValueError("partition inventory must cover the requested scope")
         skipped = 0
         written = 0
         failures: list[CandleCacheFailure] = []
         for key in keys:
-            current = self._repository.inspect(key)
+            current = current_by_key[key]
             if current.valid:
                 skipped += 1
                 continue

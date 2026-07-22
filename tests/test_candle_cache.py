@@ -136,6 +136,50 @@ def test_partition_repository_reuses_one_database_connection(
     assert first.closed is True
 
 
+def test_scope_inventory_uses_one_batch_scan_instead_of_per_file_queries(
+    tmp_path: Path,
+) -> None:
+    first_day = date(2026, 7, 15)
+    keys = tuple(
+        CandlePartitionKey("SBER", first_day + timedelta(days=offset))
+        for offset in range(3)
+    )
+    writer = ParquetCandlePartitionRepository(tmp_path)
+    try:
+        writer.replace_atomically(keys[0], (_candle("SBER", keys[0].trading_day),))
+        writer.replace_atomically(keys[1], ())
+        writer.replace_atomically(keys[2], (_candle("SBER", keys[2].trading_day),))
+    finally:
+        writer.close()
+
+    queries: list[str] = []
+    connection = candle_cache_adapter._duckdb().connect(database=":memory:")
+
+    class TrackingConnection:
+        def execute(self, query: str, parameters: object = None) -> object:
+            queries.append(query)
+            if parameters is None:
+                return connection.execute(query)
+            return connection.execute(query, parameters)
+
+        def close(self) -> None:
+            connection.close()
+
+    repository = ParquetCandlePartitionRepository(tmp_path)
+    repository._database = TrackingConnection()
+    try:
+        states = repository.inspect_many(keys)
+    finally:
+        repository.close()
+
+    assert [state.valid for state in states] == [True, True, True]
+    assert [state.row_count for state in states] == [1, 0, 1]
+    assert len(queries) == 3
+    assert "parquet_schema" in queries[0]
+    assert "parquet_file_metadata" in queries[1]
+    assert "read_parquet" in queries[2]
+
+
 def test_manifest_distinguishes_empty_day_and_records_actual_morning_rows(
     tmp_path: Path,
 ) -> None:
