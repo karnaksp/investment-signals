@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from typing import Any, Literal, Mapping, Protocol, Sequence
 from uuid import uuid4
 
@@ -139,6 +140,7 @@ GENERAL_HYPOTHESES = frozenset({"H1", "H2", "H5", "H6", "H7"})
 JUMP_HYPOTHESES = frozenset({"H3", "H4"})
 ORDERBOOK_HYPOTHESES = frozenset({"H8", "H9"})
 JOB_SCHEMA_VERSION = 2
+PREPARED_CANDLE_CACHE_LIMIT = 8
 
 
 class ReplayCostModelRequest(BaseModel):
@@ -599,6 +601,16 @@ class LocalHypothesisPortfolioRunner:
                 self._artifact_root / "h3v2-h4v2-h7v3-h15v2-h16-h17"
             )
         )
+        # A new submission seals its dataset fingerprint at an exact ``as_of``.
+        # The worker receives that same timestamp moments later.  Retaining the
+        # lightweight cache object lets execution reuse the descriptor already
+        # computed during submission instead of repeating a full ClickHouse
+        # scan.  The bounded map is only an optimization: evicted/recovered jobs
+        # reconstruct the same causal cache and remain correct.
+        self._prepared_cache_lock = Lock()
+        self._prepared_caches: OrderedDict[
+            datetime, HistoricalCandleCachePort
+        ] = OrderedDict()
 
     def _candle_cache(self, as_of: datetime | None = None) -> HistoricalCandleCachePort:
         if self._live_candles is None:
@@ -610,7 +622,27 @@ class LocalHypothesisPortfolioRunner:
         )
 
     def dataset_fingerprint(self, *, as_of: datetime | None = None) -> str:
-        return self._candle_cache(as_of).describe().dataset_fingerprint
+        candle_cache = self._candle_cache(as_of)
+        fingerprint = candle_cache.describe().dataset_fingerprint
+        if self._live_candles is not None and as_of is not None:
+            cutoff = as_of.astimezone(timezone.utc)
+            with self._prepared_cache_lock:
+                self._prepared_caches[cutoff] = candle_cache
+                self._prepared_caches.move_to_end(cutoff)
+                while len(self._prepared_caches) > PREPARED_CANDLE_CACHE_LIMIT:
+                    self._prepared_caches.popitem(last=False)
+        return fingerprint
+
+    def _execution_candle_cache(
+        self,
+        as_of: datetime | None,
+    ) -> HistoricalCandleCachePort:
+        if self._live_candles is None or as_of is None:
+            return self._candle_cache(as_of)
+        cutoff = as_of.astimezone(timezone.utc)
+        with self._prepared_cache_lock:
+            prepared = self._prepared_caches.pop(cutoff, None)
+        return prepared if prepared is not None else self._candle_cache(cutoff)
 
     def readiness(self) -> tuple[bool, str | None]:
         try:
@@ -629,7 +661,7 @@ class LocalHypothesisPortfolioRunner:
         run_fingerprint: str,
         dataset_as_of: datetime | None = None,
     ) -> Mapping[str, Any]:
-        candle_cache = self._candle_cache(dataset_as_of)
+        candle_cache = self._execution_candle_cache(dataset_as_of)
         engines: list[Mapping[str, Any]] = []
         evidence: list[Mapping[str, Any]] = []
         generated_at = _now()

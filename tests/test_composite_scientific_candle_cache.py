@@ -54,6 +54,15 @@ class _LiveSource:
         return self.rows
 
 
+class _StreamingLiveSource(_LiveSource):
+    def iter_as_of(
+        self,
+        as_of: datetime,
+    ):
+        self.calls.append(as_of)
+        yield self.rows
+
+
 class _DescriptorOnlyHistory:
     def __init__(self) -> None:
         self.load_calls = 0
@@ -344,6 +353,36 @@ def test_composite_merges_local_cache_and_live_revisions_without_future_data(
     assert descriptor.start_day == descriptor.end_day == old.at.date()
     assert descriptor.dataset_fingerprint.startswith("sha256:")
     assert live.calls == [datetime(2026, 7, 17, 11, 0, tzinfo=UTC)]
+
+
+def test_sealed_composite_reuses_snapshot_for_every_partitioned_model(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / "candles"
+    _write_cache(cache_dir, (_candle(0), _candle(1)))
+    live = _StreamingLiveSource(
+        (
+            VersionedHistoricalCandle(_candle(0, close=102.0), 7),
+            VersionedHistoricalCandle(_candle(1, close=103.0), 8),
+        )
+    )
+    cutoff = datetime(2026, 7, 17, 11, 0, tzinfo=UTC)
+    cache = CompositeScientificCandleCache(
+        historical=LocalCandleCache(cache_dir),
+        live=live,
+        as_of=cutoff,
+    )
+
+    cache.describe()
+    sealed = cache.load()
+    first_model = tuple(cache.iter_ticker_partitions())
+    second_model = tuple(cache.iter_ticker_partitions())
+
+    assert tuple(item for partition in first_model for item in partition) == sealed
+    assert first_model == second_model
+    # One descriptor scan and one sealing scan.  Any number of downstream
+    # models reuse the sealed snapshot without another ClickHouse read.
+    assert live.calls == [cutoff, cutoff]
 
 
 def test_composite_fingerprint_is_stable_and_contains_no_storage_credentials(

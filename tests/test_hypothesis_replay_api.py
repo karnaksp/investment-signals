@@ -484,6 +484,58 @@ def test_single_general_request_executes_fixed_portfolio_but_returns_requested_o
     assert engine["executed_hypothesis_ids"] == ("H1", "H2", "H5", "H6", "H7")
 
 
+def test_runner_reuses_submission_cache_for_same_causal_cutoff(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    created: list[Any] = []
+
+    class FakeCompositeCache:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.describe_calls = 0
+            self.expensive_scans = 0
+            self._descriptor: Any | None = None
+            created.append(self)
+
+        def describe(self) -> Any:
+            self.describe_calls += 1
+            if self._descriptor is None:
+                self.expensive_scans += 1
+                self._descriptor = SimpleNamespace(
+                    dataset_fingerprint="sha256:" + "a" * 64
+                )
+            return self._descriptor
+
+    monkeypatch.setattr(
+        replay_api,
+        "CompositeScientificCandleCache",
+        FakeCompositeCache,
+    )
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "cache",
+        artifact_root=tmp_path / "artifacts",
+        live_candles=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    cutoff = datetime.fromisoformat("2026-07-22T12:00:00+00:00")
+
+    fingerprint = runner.dataset_fingerprint(as_of=cutoff)
+    result = runner.execute(
+        StartReplayRequest(hypothesis_ids=("H8", "H9")),
+        run_fingerprint="sha256:" + "c" * 64,
+        dataset_as_of=cutoff,
+    )
+
+    assert fingerprint == "sha256:" + "a" * 64
+    assert len(created) == 1
+    assert created[0].describe_calls == 3
+    assert created[0].expensive_scans == 1
+    assert tuple(item["hypothesis_id"] for item in result["evidence"]) == (
+        "H8",
+        "H9",
+    )
+
+
 def test_cli_host_defaults_to_loopback_and_allows_explicit_internal_bind(
     tmp_path: Path,
     monkeypatch: Any,

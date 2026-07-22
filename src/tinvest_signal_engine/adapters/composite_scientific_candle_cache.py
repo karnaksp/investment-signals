@@ -194,6 +194,16 @@ class CompositeScientificCandleCache:
     def iter_ticker_partitions(self) -> Iterator[tuple[HistoricalCandle, ...]]:
         """Merge local and live revisions while retaining one ticker in memory."""
 
+        # ``load`` seals the exact point-in-time composite used by the legacy,
+        # R2, and next-candle engines.  Portfolio replay then asks for the same
+        # ticker partitions once per prospective hypothesis.  Re-querying
+        # ClickHouse here would both repeat the expensive ordered 2.5M-row
+        # scan and needlessly rebuild identical domain objects.  Partition the
+        # already sealed immutable tuple instead; no formula or cutoff changes.
+        if self._snapshot is not None:
+            yield from _partition_historical(self._snapshot)
+            return
+
         historical = _iter_historical_partitions(self._historical, self._as_of)
         live = self._iter_live_partitions()
         historical_partition = next(historical, None)
