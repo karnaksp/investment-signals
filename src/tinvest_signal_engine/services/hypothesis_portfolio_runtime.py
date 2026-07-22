@@ -14,6 +14,9 @@ from tinvest_signal_engine.application.hypothesis_portfolio_runner import (
     PortfolioEvidenceGatePort,
     RunHypothesisPortfolio,
 )
+from tinvest_signal_engine.application.scientific_portfolio_versions import (
+    ScientificPortfolioVersion,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +27,7 @@ class FileHypothesisPortfolioRuntime:
     store: ImmutableFileHypothesisPortfolioStore
     progress: SafeFileHypothesisPortfolioProgress
     repaired_progress_runs: int
+    portfolio_version: ScientificPortfolioVersion
 
 
 def build_file_hypothesis_portfolio_runtime(
@@ -31,6 +35,9 @@ def build_file_hypothesis_portfolio_runtime(
     state_dir: str | Path,
     replay: HypothesisReplayPort,
     evidence_gates: PortfolioEvidenceGatePort,
+    portfolio_version: ScientificPortfolioVersion = (
+        ScientificPortfolioVersion.SEALED_ELEVEN_V1
+    ),
 ) -> FileHypothesisPortfolioRuntime:
     """Build and repair the portfolio runtime without transport dependencies."""
 
@@ -48,4 +55,5 @@ def build_file_hypothesis_portfolio_runtime(
         store=store,
         progress=progress,
         repaired_progress_runs=repaired,
+        portfolio_version=portfolio_version,
     )

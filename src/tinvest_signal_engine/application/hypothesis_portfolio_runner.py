@@ -131,6 +131,7 @@ class RunHypothesisPortfolioRequest:
     cost_model_version: str
     replay_engine_version: str
     hypotheses: tuple[PortfolioHypothesisRegistration, ...]
+    portfolio_definition_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -157,6 +158,11 @@ class RunHypothesisPortfolioRequest:
                 or preregistration.cost_model_version != self.cost_model_version
             ):
                 raise ValueError("portfolio cost model differs from preregistration")
+        if (
+            self.portfolio_definition_fingerprint is not None
+            and not self.portfolio_definition_fingerprint.startswith("sha256:")
+        ):
+            raise ValueError("portfolio definition fingerprint must use sha256")
 
     @property
     def ordered_hypotheses(self) -> tuple[PortfolioHypothesisRegistration, ...]:
@@ -164,16 +170,19 @@ class RunHypothesisPortfolioRequest:
 
     @property
     def input_fingerprint(self) -> str:
-        return _fingerprint(
-            {
-                "cost_model_version": self.cost_model_version,
-                "dataset_fingerprint": self.dataset_fingerprint,
-                "hypotheses": tuple(
-                    item.fingerprint for item in self.ordered_hypotheses
-                ),
-                "replay_engine_version": self.replay_engine_version,
-            }
-        )
+        payload: dict[str, object] = {
+            "cost_model_version": self.cost_model_version,
+            "dataset_fingerprint": self.dataset_fingerprint,
+            "hypotheses": tuple(item.fingerprint for item in self.ordered_hypotheses),
+            "replay_engine_version": self.replay_engine_version,
+        }
+        # Keep the legacy/default fingerprint byte-for-byte stable.  Only an
+        # explicitly versioned portfolio adds its immutable definition.
+        if self.portfolio_definition_fingerprint is not None:
+            payload["portfolio_definition_fingerprint"] = (
+                self.portfolio_definition_fingerprint
+            )
+        return _fingerprint(payload)
 
     @property
     def run_id(self) -> str:
