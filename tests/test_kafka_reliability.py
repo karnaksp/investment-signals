@@ -26,8 +26,13 @@ class FakeConsumer:
     log: list[str]
     commits: list[object] = field(default_factory=list)
 
-    def __iter__(self):
-        return iter(self.messages)
+    def poll(self, **kwargs):
+        self.log.append("poll")
+        messages, self.messages = self.messages, []
+        grouped: dict[tuple[str, int], list[FakeMessage]] = {}
+        for message in messages:
+            grouped.setdefault((message.topic, message.partition), []).append(message)
+        return grouped
 
     def commit(self, *, offsets) -> None:
         self.log.append("commit")
@@ -80,6 +85,9 @@ class FakeMetrics:
     def offset_committed(self) -> None:
         self.log.append("commit_metric")
 
+    def detector_batch_completed(self, **kwargs) -> None:
+        self.log.append(f"batch_metric:{kwargs['outcome']}:{kwargs['message_count']}")
+
     def delivery_attempted(self, **kwargs) -> None:
         pass
 
@@ -124,9 +132,9 @@ def test_offset_commits_only_after_processing_and_checkpoint() -> None:
     log: list[str] = []
     consumer = FakeConsumer([FakeMessage(_valid_event())], log)
 
-    _runtime(consumer, FakeProcessor(log), log).run()
+    assert _runtime(consumer, FakeProcessor(log), log).run_once() == 1
 
-    assert log[:4] == ["process", "checkpoint", "commit", "commit_metric"]
+    assert log[1:5] == ["process", "checkpoint", "commit", "commit_metric"]
     committed = next(iter(consumer.commits[0].values()))
     assert committed.offset == 11
 
@@ -141,7 +149,7 @@ def test_transient_processing_failure_does_not_commit_offset() -> None:
     )
 
     with pytest.raises(RuntimeError, match="postgres unavailable"):
-        runtime.run()
+        runtime.run_once()
 
     assert consumer.commits == []
     assert "checkpoint" not in log
@@ -151,15 +159,130 @@ def test_poison_payload_commits_only_after_dlq_ack() -> None:
     log: list[str] = []
     consumer = FakeConsumer([FakeMessage("not-a-mapping")], log)
 
-    _runtime(consumer, FakeProcessor(log), log).run()
+    _runtime(consumer, FakeProcessor(log), log).run_once()
 
-    assert log[:4] == [
+    assert log[1:6] == [
         "dlq_publish",
         "dlq_metric",
+        "checkpoint",
         "commit",
         "commit_metric",
     ]
     assert "process" not in log
+
+
+def test_batch_uses_one_checkpoint_and_commit_for_many_events() -> None:
+    log: list[str] = []
+    messages = [
+        FakeMessage({**_valid_event(), "event_id": f"event-{offset}"}, offset=offset)
+        for offset in range(500)
+    ]
+    consumer = FakeConsumer(messages, log)
+
+    assert _runtime(consumer, FakeProcessor(log), log).run_once() == 500
+
+    assert log.count("process") == 500
+    assert log.count("checkpoint") == 1
+    assert log.count("commit") == 1
+    assert log.count("commit_metric") == 1
+    assert "batch_metric:completed:500" in log
+    committed = next(iter(consumer.commits[0].values()))
+    assert committed.offset == 500
+
+
+def test_partial_failure_commits_only_successful_contiguous_prefix() -> None:
+    log: list[str] = []
+    messages = [
+        FakeMessage({**_valid_event(), "event_id": f"event-{offset}"}, offset=offset)
+        for offset in range(3)
+    ]
+    consumer = FakeConsumer(messages, log)
+
+    class FailSecondProcessor:
+        calls = 0
+
+        def process(self, event) -> None:
+            self.calls += 1
+            log.append("process")
+            if self.calls == 2:
+                raise RuntimeError("postgres unavailable")
+
+    runtime = _runtime(consumer, FakeProcessor(log), log)
+    runtime._processor = FailSecondProcessor()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="postgres unavailable"):
+        runtime.run_once()
+
+    assert log.count("process") == 2
+    assert log.count("checkpoint") == 1
+    committed = next(iter(consumer.commits[0].values()))
+    assert committed.offset == 1
+    assert "batch_metric:partial_failure:1" in log
+
+
+def test_batch_commit_refuses_offset_reordering() -> None:
+    log: list[str] = []
+    consumer = FakeConsumer([], log)
+    runtime = _runtime(consumer, FakeProcessor(log), log)
+
+    with pytest.raises(RuntimeError, match="non-increasing"):
+        runtime._commit_batch(
+            [
+                FakeMessage(_valid_event(), offset=12),
+                FakeMessage(_valid_event(), offset=10),
+            ]
+        )
+
+    assert consumer.commits == []
+
+
+def test_commit_failure_replays_through_idempotent_processor() -> None:
+    log: list[str] = []
+    messages = [
+        FakeMessage(
+            {**_valid_event(), "event_id": f"event-{offset}"},
+            offset=offset,
+        )
+        for offset in range(3)
+    ]
+
+    @dataclass
+    class IdempotentProcessor:
+        stored: set[str] = field(default_factory=set)
+        stored_calls: int = 0
+        replay_calls: int = 0
+
+        def process(self, event) -> None:
+            if event.event_id in self.stored:
+                self.replay_calls += 1
+                return
+            self.stored.add(event.event_id)
+            self.stored_calls += 1
+
+    class CommitFailingConsumer(FakeConsumer):
+        def commit(self, *, offsets) -> None:
+            raise RuntimeError("coordinator unavailable")
+
+    processor = IdempotentProcessor()
+    first = _runtime(
+        CommitFailingConsumer(list(messages), log),
+        FakeProcessor(log),
+        log,
+    )
+    first._processor = processor  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="coordinator unavailable"):
+        first.run_once()
+
+    second_consumer = FakeConsumer(list(messages), log)
+    second = _runtime(second_consumer, FakeProcessor(log), log)
+    second._processor = processor  # type: ignore[assignment]
+    assert second.run_once() == 3
+
+    assert processor.stored_calls == 3
+    assert processor.replay_calls == 3
+    committed = next(iter(second_consumer.commits[0].values()))
+    assert committed.offset == 3
 
 
 def test_consumer_disables_auto_commit(monkeypatch) -> None:
@@ -178,3 +301,4 @@ def test_consumer_disables_auto_commit(monkeypatch) -> None:
     build_raw_consumer(settings)
 
     assert captured["enable_auto_commit"] is False
+    assert captured["max_poll_records"] == 500

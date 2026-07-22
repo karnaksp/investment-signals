@@ -35,6 +35,29 @@ _commits = Counter(
     "reliable_processing_offset_commits_total",
     "Kafka offsets committed after durable processing or DLQ publication",
 )
+_detector_batches = Counter(
+    "reliable_processing_detector_batches_total",
+    "Bounded detector batches completed before a Kafka offset commit",
+    ("outcome",),
+)
+_detector_batch_size = Histogram(
+    "reliable_processing_detector_batch_messages",
+    "Messages durably handled in one detector batch",
+    ("outcome",),
+    buckets=(1, 2, 5, 10, 25, 50, 100, 250, 500),
+)
+_detector_batch_partitions = Histogram(
+    "reliable_processing_detector_batch_partitions",
+    "Kafka partitions represented in one detector batch",
+    ("outcome",),
+    buckets=(1, 2, 3, 4, 8, 16, 32),
+)
+_detector_batch_duration = Histogram(
+    "reliable_processing_detector_batch_seconds",
+    "Wall-clock duration of a bounded detector batch",
+    ("outcome",),
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+)
 _delivery = Counter(
     "delivery_worker_attempts_total",
     "Durable delivery attempts",
@@ -78,6 +101,20 @@ class PrometheusReliabilityMetrics:
 
     def offset_committed(self) -> None:
         _commits.inc()
+
+    def detector_batch_completed(
+        self,
+        *,
+        message_count: int,
+        partition_count: int,
+        outcome: str,
+        duration_seconds: float,
+    ) -> None:
+        labels = {"outcome": outcome}
+        _detector_batches.labels(**labels).inc()
+        _detector_batch_size.labels(**labels).observe(message_count)
+        _detector_batch_partitions.labels(**labels).observe(partition_count)
+        _detector_batch_duration.labels(**labels).observe(duration_seconds)
 
     def delivery_attempted(
         self,

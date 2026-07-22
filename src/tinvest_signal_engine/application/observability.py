@@ -19,6 +19,15 @@ class ReliabilityMetrics(Protocol):
 
     def offset_committed(self) -> None: ...
 
+    def detector_batch_completed(
+        self,
+        *,
+        message_count: int,
+        partition_count: int,
+        outcome: str,
+        duration_seconds: float,
+    ) -> None: ...
+
     def delivery_attempted(
         self,
         *,
