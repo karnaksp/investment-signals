@@ -1116,6 +1116,7 @@ def build_app(
     clickhouse_database: str = "signal_engine",
     clickhouse_username: str = "investment_signals",
     clickhouse_password_file: Path | None = None,
+    clickhouse_timeout_seconds: float = 300.0,
 ) -> FastAPI:
     live_candles: VersionedScientificCandleSource | None = None
     if clickhouse_url:
@@ -1128,6 +1129,7 @@ def build_app(
             database=clickhouse_database,
             username=clickhouse_username,
             password=clickhouse_password_file.read_text(encoding="utf-8").strip(),
+            timeout_seconds=clickhouse_timeout_seconds,
         )
     manager = ReplayJobManager(
         runner=LocalHypothesisPortfolioRunner(
@@ -1169,6 +1171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--clickhouse-database", default="signal_engine")
     parser.add_argument("--clickhouse-username", default="investment_signals")
     parser.add_argument("--clickhouse-password-file", type=Path)
+    parser.add_argument("--clickhouse-timeout-seconds", type=float, default=300.0)
     args = parser.parse_args(argv)
     import uvicorn
 
@@ -1181,6 +1184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             clickhouse_database=args.clickhouse_database,
             clickhouse_username=args.clickhouse_username,
             clickhouse_password_file=args.clickhouse_password_file,
+            clickhouse_timeout_seconds=args.clickhouse_timeout_seconds,
         ),
         host=args.host,
         port=args.port,
