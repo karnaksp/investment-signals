@@ -1,0 +1,52 @@
+{
+  "contract_version": "1.0.0",
+  "multiple_testing_family": "preregistered-combinations-v1",
+  "combinations": [
+    {
+      "id": "C1",
+      "version": "1.0.0",
+      "formula_fingerprint": "sha256:2dd31c7d555b0289a762f880d3af91c60c4125b5dc9d73319721c89bdf148336",
+      "horizons_seconds": [300, 900],
+      "primary_horizon_seconds": 300,
+      "components": [
+        {"hypothesis": "H4V2", "version": "2.0.0", "role": "primary", "horizon": "output_horizon"},
+        {"hypothesis": "H7V3", "version": "3.0.0", "role": "primary", "horizon_seconds": 1800, "max_age_seconds": 900},
+        {"hypothesis": "H17", "version": "1.0.0", "role": "primary", "horizon_seconds": 1800, "max_age_seconds": 1800}
+      ]
+    },
+    {
+      "id": "C2",
+      "version": "1.0.0",
+      "formula_fingerprint": "sha256:94b9f90b9da3bfc9672a2eb9631d7b8dad98ed1fcbaea494dbe20921e98dfd27",
+      "horizons_seconds": [300, 900],
+      "primary_horizon_seconds": 300,
+      "components": [
+        {"hypothesis": "H3V2", "version": "2.0.0", "role": "primary", "horizon": "output_horizon"},
+        {"hypothesis": "H7V3", "version": "3.0.0", "role": "primary", "horizon_seconds": 1800, "max_age_seconds": 900},
+        {"hypothesis": "H17", "version": "1.0.0", "role": "primary", "horizon_seconds": 1800, "max_age_seconds": 1800}
+      ]
+    },
+    {
+      "id": "C3",
+      "version": "1.0.0",
+      "formula_fingerprint": "sha256:6b19a348b7db6a92a74eb1c4a2b305f59269feea0b6dddc8b2a077134e8c0a75",
+      "horizons_seconds": [1800],
+      "primary_horizon_seconds": 1800,
+      "components": [
+        {"hypothesis": "H1", "version": "1.0.0", "role": "primary", "horizon": "output_horizon"},
+        {"hypothesis": "H2", "version": "1.0.0", "role": "primary", "horizon": "output_horizon"}
+      ]
+    },
+    {
+      "id": "C4",
+      "version": "1.0.0",
+      "formula_fingerprint": "sha256:e55e390689d1a8734d21b4c9391e0eb263c846e703f7d0c27cb95e3a2224e159",
+      "horizons_seconds": [900, 1800, 3600],
+      "primary_horizon_seconds": 1800,
+      "components": [
+        {"hypothesis": "H12", "version": "1.0.0", "role": "primary", "horizon": "output_horizon"},
+        {"hypothesis": "H17", "version": "1.0.0", "role": "market_context", "horizon_seconds": 1800}
+      ]
+    }
+  ]
+}
