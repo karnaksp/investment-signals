@@ -210,6 +210,31 @@ def test_clickhouse_source_queries_causal_snapshot_and_prefers_latest_version(
     assert captured["timeout"] == 7.0
 
 
+def test_clickhouse_datetime64_without_suffix_restores_schema_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.dumps(
+        _clickhouse_row(
+            source_time="2026-07-17 10:00:00.000000",
+            received_at="2026-07-17 10:00:01.000000",
+        )
+    )
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        lambda request, timeout: _Response(payload),
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+    )
+
+    rows = source.load_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
+
+    assert rows[0].candle.at == datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+
+
 def test_clickhouse_source_rejects_future_row_even_if_backend_returns_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

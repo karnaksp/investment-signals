@@ -477,6 +477,12 @@ def _parse_timestamp(value: object, field: str) -> datetime:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except ValueError as error:
             raise ValueError(f"ClickHouse {field} is not an ISO timestamp") from error
+    # ClickHouse JSONEachRow renders DateTime64 columns without an explicit
+    # suffix even when their schema timezone is UTC.  This adapter owns that
+    # storage contract, so it restores UTC before handing the value to the
+    # strict application/domain boundary.
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return _aware_utc(parsed, field)
 
 
