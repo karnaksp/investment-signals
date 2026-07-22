@@ -127,6 +127,12 @@ class ProspectiveScientificReport:
             raise ValueError("feature and outcome identities must remain aligned")
 
 
+class PartitionedProspectiveCandleCachePort(Protocol):
+    """Application-owned port for bounded, ticker-partitioned candle access."""
+
+    def iter_ticker_partitions(self) -> Iterable[tuple[HistoricalCandle, ...]]: ...
+
+
 def build_prospective_scientific_research(
     candles: Iterable[HistoricalCandle],
     *,
@@ -232,18 +238,170 @@ def build_prospective_scientific_research(
     )
 
 
+def build_partitioned_prospective_scientific_research(
+    cache: PartitionedProspectiveCandleCachePort,
+    *,
+    dataset_fingerprint: str,
+    request: ProspectiveScientificRequest,
+) -> ProspectiveScientificReport:
+    """Build one model while retaining at most one ordinary ticker partition.
+
+    Cross-sectional models retain only their fixed, pre-registered universe or
+    pair members.  All other models emit feature/outcome rows as soon as one
+    ticker has been evaluated, so the input candle graph is never global.
+    """
+
+    if len(request.selected_hypotheses) != 1:
+        raise ValueError("partitioned replay requires exactly one hypothesis")
+    if not dataset_fingerprint.startswith("sha256:"):
+        raise ValueError("dataset_fingerprint must use sha256")
+    hypothesis = request.selected_hypotheses[0]
+    selected = frozenset((hypothesis,))
+    all_days: set[date] = set()
+    seen_tickers: set[str] = set()
+    feature_outcomes: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    retained: dict[str, tuple[HistoricalCandle, ...]] = {}
+    morning_candidates: list[_MorningCandidate] = []
+    har_candidates: list[_HarCandidate] = []
+    pair_tickers = frozenset(
+        ticker for pair in request.pair_candidates for ticker in pair
+    )
+    universe = frozenset(request.market_universe)
+
+    for raw_partition in cache.iter_ticker_partitions():
+        rows = tuple(item for item in raw_partition if item.complete)
+        if not rows:
+            continue
+        ticker = rows[0].ticker
+        if ticker in seen_tickers or any(item.ticker != ticker for item in rows):
+            raise ValueError("partitioned candles require one unique ticker partition")
+        if any(left.at >= right.at for left, right in zip(rows, rows[1:])):
+            raise ValueError("partitioned candles must be strictly time ordered")
+        seen_tickers.add(ticker)
+        all_days.update(_trading_day(item.at) for item in rows)
+        by_ticker = {ticker: rows}
+        if hypothesis in {
+            ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+            ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+        }:
+            morning_candidates.extend(
+                _build_morning_candidates(
+                    ticker,
+                    rows,
+                    tuple(
+                        sorted(
+                            set(request.policy.morning_reversion_horizons_seconds)
+                            | set(
+                                request.policy.morning_continuation_horizons_seconds
+                            )
+                        )
+                    ),
+                )
+            )
+        elif hypothesis in {
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        }:
+            feature_outcomes.extend(
+                _jump_rows(by_ticker, selected, request.policy)
+            )
+        elif hypothesis is ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3:
+            feature_outcomes.extend(_relative_volume_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE:
+            feature_outcomes.extend(_phase_recurrence_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK:
+            feature_outcomes.extend(_semivariance_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE:
+            feature_outcomes.extend(_volatility_jump_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.HAR_VOLATILITY_V2:
+            har_candidates.extend(_build_har_candidates(ticker, rows, request.policy))
+        elif (
+            hypothesis is ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION
+            and ticker in universe
+        ):
+            retained[ticker] = rows
+        elif (
+            hypothesis is ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION
+            and ticker in pair_tickers
+        ):
+            retained[ticker] = rows
+
+    if not all_days:
+        raise ValueError("prospective research requires complete candles")
+    split = chronological_split_60_20_20(tuple(sorted(all_days)))
+    pair_parameters: tuple[FrozenPairParameters, ...] = ()
+    har_parameters: HarV2Parameters | None = None
+    if morning_candidates:
+        feature_outcomes.extend(
+            _evaluate_morning_candidates(
+                morning_candidates,
+                selected,
+                request.policy,
+                request.market_universe,
+            )
+        )
+    if hypothesis is ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION:
+        feature_outcomes.extend(
+            _open_close_rows(retained, request.policy, request.market_universe)
+        )
+    if hypothesis is ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION:
+        pair_rows, pair_parameters = _pair_reversion_rows(
+            retained,
+            split,
+            request.policy,
+            request.pair_candidates,
+        )
+        feature_outcomes.extend(pair_rows)
+    if hypothesis is ProspectiveHypothesis.HAR_VOLATILITY_V2:
+        har_rows, har_parameters = _evaluate_har_candidates(
+            har_candidates,
+            split,
+            request.policy,
+        )
+        feature_outcomes.extend(har_rows)
+
+    feature_outcomes.sort(
+        key=lambda item: (
+            item[0].observed_at,
+            item[0].ticker,
+            item[0].hypothesis.value,
+            item[0].horizon_seconds,
+        )
+    )
+    features = tuple(item[0] for item in feature_outcomes)
+    outcomes = tuple(item[1] for item in feature_outcomes)
+    fingerprint = _report_fingerprint(
+        dataset_fingerprint,
+        request,
+        features,
+        outcomes,
+        har_parameters,
+        pair_parameters,
+    )
+    return ProspectiveScientificReport(
+        dataset_fingerprint=dataset_fingerprint,
+        report_fingerprint=fingerprint,
+        split=split,
+        policy=request.policy,
+        selected_hypotheses=request.selected_hypotheses,
+        har_v2_parameters=har_parameters,
+        pair_parameters=pair_parameters,
+        features=features,
+        outcomes=outcomes,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _MorningCandidate:
     ticker: str
     trading_day: date
     observed_at: datetime
     feature_max_observed_at: datetime
-    opening_index: int
-    rows: tuple[HistoricalCandle, ...]
     deviation_bps: float
     cumulative_volume: float
     range_bps: float
     trading_gap: bool
+    forward_returns_bps: tuple[tuple[int, float | None], ...]
 
 
 def _morning_rows(
@@ -253,43 +411,79 @@ def _morning_rows(
     market_universe: tuple[str, ...],
 ) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
     candidates: list[_MorningCandidate] = []
+    all_horizons = tuple(
+        sorted(
+            set(policy.morning_reversion_horizons_seconds)
+            | set(policy.morning_continuation_horizons_seconds)
+        )
+    )
     for ticker, rows in by_ticker.items():
-        by_day = _indexed_rows_by_day(rows)
-        previous_close: float | None = None
-        for trading_day, day_rows in sorted(by_day.items()):
-            opening = day_rows.get(10 * 60)
-            morning = tuple(
-                candle
-                for minute, (_, candle) in sorted(day_rows.items())
-                if 7 * 60 <= minute <= 9 * 60 + 49
-            )
-            if previous_close is not None and opening is not None and morning:
-                opening_index, opening_candle = opening
-                high = max(item.high for item in morning)
-                low = min(item.low for item in morning)
-                candidates.append(
-                    _MorningCandidate(
-                        ticker=ticker,
-                        trading_day=trading_day,
-                        observed_at=opening_candle.at,
-                        feature_max_observed_at=_observed_at(morning[-1]),
-                        opening_index=opening_index,
-                        rows=rows,
-                        deviation_bps=(morning[-1].close / previous_close - 1.0)
-                        * 10_000.0,
-                        cumulative_volume=sum(item.volume for item in morning),
-                        range_bps=(high / low - 1.0) * 10_000.0,
-                        trading_gap=len(morning) != 170 or not _continuous(morning),
-                    )
-                )
-            main_closes = tuple(
-                candle.close
-                for minute, (_, candle) in sorted(day_rows.items())
-                if 10 * 60 <= minute <= 18 * 60 + 39
-            )
-            if main_closes:
-                previous_close = main_closes[-1]
+        candidates.extend(_build_morning_candidates(ticker, rows, all_horizons))
+    return _evaluate_morning_candidates(
+        candidates,
+        selected,
+        policy,
+        market_universe,
+    )
 
+
+def _build_morning_candidates(
+    ticker: str,
+    rows: tuple[HistoricalCandle, ...],
+    horizons: tuple[int, ...],
+) -> list[_MorningCandidate]:
+    candidates: list[_MorningCandidate] = []
+    by_day = _indexed_rows_by_day(rows)
+    previous_close: float | None = None
+    for trading_day, day_rows in sorted(by_day.items()):
+        opening = day_rows.get(10 * 60)
+        morning = tuple(
+            candle
+            for minute, (_, candle) in sorted(day_rows.items())
+            if 7 * 60 <= minute <= 9 * 60 + 49
+        )
+        if previous_close is not None and opening is not None and morning:
+            opening_index, opening_candle = opening
+            high = max(item.high for item in morning)
+            low = min(item.low for item in morning)
+            candidates.append(
+                _MorningCandidate(
+                    ticker=ticker,
+                    trading_day=trading_day,
+                    observed_at=opening_candle.at,
+                    feature_max_observed_at=_observed_at(morning[-1]),
+                    deviation_bps=(morning[-1].close / previous_close - 1.0)
+                    * 10_000.0,
+                    cumulative_volume=sum(item.volume for item in morning),
+                    range_bps=(high / low - 1.0) * 10_000.0,
+                    trading_gap=len(morning) != 170 or not _continuous(morning),
+                    forward_returns_bps=tuple(
+                        (
+                            horizon,
+                            _forward_return_from_open(
+                                rows, opening_index, horizon // 60
+                            ),
+                        )
+                        for horizon in horizons
+                    ),
+                )
+            )
+        main_closes = tuple(
+            candle.close
+            for minute, (_, candle) in sorted(day_rows.items())
+            if 10 * 60 <= minute <= 18 * 60 + 39
+        )
+        if main_closes:
+            previous_close = main_closes[-1]
+    return candidates
+
+
+def _evaluate_morning_candidates(
+    candidates: Sequence[_MorningCandidate],
+    selected: frozenset[ProspectiveHypothesis],
+    policy: ProspectiveScientificPolicy,
+    market_universe: tuple[str, ...],
+) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
     universe = frozenset(market_universe)
     market_by_day: dict[date, tuple[float, float]] = {}
     for trading_day, day_items in _items_by_day(candidates):
@@ -358,9 +552,7 @@ def _morning_rows(
                         or horizon not in allowed_horizons
                     ):
                         continue
-                    forward = _forward_return_from_open(
-                        item.rows, item.opening_index, horizon // 60
-                    )
+                    forward = dict(item.forward_returns_bps)[horizon]
                     result.append(
                         (
                             feature,
@@ -1036,33 +1228,51 @@ def _har_v2_rows(
     policy: ProspectiveScientificPolicy,
 ) -> tuple[list[tuple[ProspectiveFeature, ProspectiveOutcome]], HarV2Parameters | None]:
     candidates: list[_HarCandidate] = []
-    short, medium, long_window = policy.har_windows_minutes
     for ticker, rows in by_ticker.items():
-        for index, candle in enumerate(rows):
-            observed_at = _observed_at(candle)
-            if observed_at.minute % 30 or not _eligible(observed_at):
-                continue
-            window = _window_ending(rows, index, long_window)
-            if window is None:
-                continue
-            candidates.append(
-                _HarCandidate(
-                    ticker=ticker,
-                    trading_day=_trading_day(candle.at),
-                    bucket=_clock_bucket(candle.at, 30),
-                    observed_at=observed_at,
-                    target_at=observed_at
-                    + timedelta(seconds=policy.har_horizon_seconds),
-                    short_variance=_realized_variance(window[-short:]),
-                    medium_variance=_realized_variance(window[-medium:]),
-                    long_variance=_realized_variance(window),
-                    future_variance=_future_variance(
-                        rows,
-                        index,
-                        policy.har_horizon_seconds // 60,
-                    ),
-                )
+        candidates.extend(_build_har_candidates(ticker, rows, policy))
+    return _evaluate_har_candidates(candidates, split, policy)
+
+
+def _build_har_candidates(
+    ticker: str,
+    rows: tuple[HistoricalCandle, ...],
+    policy: ProspectiveScientificPolicy,
+) -> list[_HarCandidate]:
+    candidates: list[_HarCandidate] = []
+    short, medium, long_window = policy.har_windows_minutes
+    for index, candle in enumerate(rows):
+        observed_at = _observed_at(candle)
+        if observed_at.minute % 30 or not _eligible(observed_at):
+            continue
+        window = _window_ending(rows, index, long_window)
+        if window is None:
+            continue
+        candidates.append(
+            _HarCandidate(
+                ticker=ticker,
+                trading_day=_trading_day(candle.at),
+                bucket=_clock_bucket(candle.at, 30),
+                observed_at=observed_at,
+                target_at=observed_at
+                + timedelta(seconds=policy.har_horizon_seconds),
+                short_variance=_realized_variance(window[-short:]),
+                medium_variance=_realized_variance(window[-medium:]),
+                long_variance=_realized_variance(window),
+                future_variance=_future_variance(
+                    rows,
+                    index,
+                    policy.har_horizon_seconds // 60,
+                ),
             )
+        )
+    return candidates
+
+
+def _evaluate_har_candidates(
+    candidates: Sequence[_HarCandidate],
+    split: ChronologicalSplit,
+    policy: ProspectiveScientificPolicy,
+) -> tuple[list[tuple[ProspectiveFeature, ProspectiveOutcome]], HarV2Parameters | None]:
     training = tuple(
         HarV2TrainingPoint(
             feature_at=item.observed_at,

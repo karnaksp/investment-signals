@@ -7,6 +7,7 @@ import pytest
 
 from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificRequest,
+    build_partitioned_prospective_scientific_research,
     build_prospective_scientific_research,
 )
 from tinvest_signal_engine.domain.historical_hypothesis_replay import HistoricalCandle
@@ -352,3 +353,83 @@ def test_open_close_basket_uses_opening_data_only_at_preclose_decision() -> None
         and item.ticker == "MOEX_FIXED_BASKET"
         for item in report.features
     )
+
+
+class _PartitionOnlyCache:
+    def __init__(self, partitions: tuple[tuple[HistoricalCandle, ...], ...]) -> None:
+        self.partitions = partitions
+        self.yielded_sizes: list[int] = []
+        self.load_calls = 0
+
+    def describe(self) -> object:
+        raise AssertionError("the builder receives the sealed fingerprint explicitly")
+
+    def load(self) -> tuple[HistoricalCandle, ...]:
+        self.load_calls += 1
+        raise AssertionError("partitioned replay must never materialize the full cache")
+
+    def iter_ticker_partitions(self):
+        for partition in self.partitions:
+            self.yielded_sizes.append(len(partition))
+            yield partition
+
+
+def _full_session_partition(
+    ticker: str,
+    *,
+    days: int = 8,
+) -> tuple[HistoricalCandle, ...]:
+    rows: list[HistoricalCandle] = []
+    start = datetime(2026, 1, 5, 4, 0, tzinfo=ZoneInfo("UTC"))
+    for day_index in range(days):
+        day = start + timedelta(days=day_index)
+        for minute in range(700):
+            at = day + timedelta(minutes=minute)
+            common = 100.0 + day_index * 0.2 + minute * 0.001
+            pair_offset = 0.3 if ticker == "SBERP" else 0.0
+            wave = ((minute % 17) - 8) * 0.002
+            close = common + pair_offset + wave
+            rows.append(
+                _candle(
+                    ticker,
+                    at,
+                    close,
+                    close,
+                    volume=1_000.0 + (minute % 23) * 10.0,
+                )
+            )
+    return tuple(rows)
+
+
+@pytest.mark.parametrize("hypothesis", tuple(ProspectiveHypothesis))
+def test_partitioned_replay_matches_monolithic_without_loading_full_dataset(
+    hypothesis: ProspectiveHypothesis,
+) -> None:
+    partitions = (
+        _full_session_partition("SBER"),
+        _full_session_partition("SBERP"),
+    )
+    candles = tuple(item for partition in partitions for item in partition)
+    request = ProspectiveScientificRequest(
+        selected_hypotheses=(hypothesis,),
+        market_universe=("SBER",),
+        pair_candidates=(("SBER", "SBERP"),),
+    )
+    fingerprint = "sha256:" + "9" * 64
+    expected = build_prospective_scientific_research(
+        candles,
+        dataset_fingerprint=fingerprint,
+        request=request,
+    )
+    cache = _PartitionOnlyCache(partitions)
+
+    actual = build_partitioned_prospective_scientific_research(
+        cache,
+        dataset_fingerprint=fingerprint,
+        request=request,
+    )
+
+    assert actual == expected
+    assert actual.report_fingerprint == expected.report_fingerprint
+    assert cache.load_calls == 0
+    assert cache.yielded_sizes == [len(partition) for partition in partitions]

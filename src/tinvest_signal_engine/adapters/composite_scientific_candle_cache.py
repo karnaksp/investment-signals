@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 from typing import Protocol
@@ -37,6 +38,14 @@ FROM scientific_candles_1m
 WHERE candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
   AND source_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
   AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+ORDER BY ticker, candle_at, record_version
+SETTINGS
+    max_execution_time = 300,
+    timeout_before_checking_execution_speed = 0,
+    max_rows_to_read = 10000000,
+    max_result_rows = 10000000,
+    result_overflow_mode = 'throw',
+    max_bytes_before_external_sort = 134217728
 FORMAT JSONEachRow
 """.strip()
 
@@ -55,6 +64,11 @@ class VersionedHistoricalCandle:
 
 class VersionedScientificCandleSource(Protocol):
     def load_as_of(self, as_of: datetime) -> tuple[VersionedHistoricalCandle, ...]: ...
+
+    def iter_as_of(
+        self,
+        as_of: datetime,
+    ) -> Iterator[tuple[VersionedHistoricalCandle, ...]]: ...
 
 
 class ClickHouseScientificCandleSource:
@@ -82,6 +96,18 @@ class ClickHouseScientificCandleSource:
         self._timeout_seconds = timeout_seconds
 
     def load_as_of(self, as_of: datetime) -> tuple[VersionedHistoricalCandle, ...]:
+        return tuple(
+            row
+            for partition in self.iter_as_of(as_of)
+            for row in partition
+        )
+
+    def iter_as_of(
+        self,
+        as_of: datetime,
+    ) -> Iterator[tuple[VersionedHistoricalCandle, ...]]:
+        """Stream ordered, deduplicated ticker partitions from ClickHouse."""
+
         cutoff = _aware_utc(as_of, "as_of")
         cutoff_text = _timestamp(cutoff)
         query = urlencode(
@@ -103,7 +129,12 @@ class ClickHouseScientificCandleSource:
         )
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
-                payload = response.read().decode("utf-8")
+                yield from _deduplicated_ticker_partitions(
+                    (
+                        _versioned_candle(json.loads(line), cutoff=cutoff)
+                        for line in _response_lines(response)
+                    )
+                )
         except HTTPError as error:
             raise RuntimeError(
                 f"ClickHouse scientific candle read failed with status {error.code}"
@@ -112,13 +143,6 @@ class ClickHouseScientificCandleSource:
             raise RuntimeError(
                 "ClickHouse scientific candle read connection failed"
             ) from error
-
-        rows = tuple(
-            _versioned_candle(json.loads(line), cutoff=cutoff)
-            for line in payload.splitlines()
-            if line.strip()
-        )
-        return _deduplicate(rows)
 
 
 class CompositeScientificCandleCache:
@@ -134,17 +158,16 @@ class CompositeScientificCandleCache:
         self._historical = historical
         self._live = live
         self._as_of = _aware_utc(as_of, "as_of")
-        self._live_snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
+        self._fallback_live_snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
         self._snapshot: tuple[HistoricalCandle, ...] | None = None
         self._descriptor: CandleCacheDescriptor | None = None
 
     def describe(self) -> CandleCacheDescriptor:
         if self._descriptor is None:
             historical = self._historical.describe()
-            live = self._load_live()
-            self._descriptor = _composite_descriptor(
+            self._descriptor = _streaming_composite_descriptor(
                 historical,
-                live,
+                self._iter_live_partitions(),
                 as_of=self._as_of,
             )
         return self._descriptor
@@ -155,49 +178,64 @@ class CompositeScientificCandleCache:
     def _seal(self) -> tuple[HistoricalCandle, ...]:
         if self._snapshot is not None:
             return self._snapshot
-        historical = tuple(
-            item
-            for item in self._historical.load()
-            if item.at.astimezone(timezone.utc) <= self._as_of
+        snapshot = tuple(
+            candle
+            for partition in self.iter_ticker_partitions()
+            for candle in partition
         )
-        live = self._load_live()
-        if not live:
-            snapshot = historical
-        else:
-            live_by_key = {
-                (item.candle.ticker, item.candle.at.astimezone(timezone.utc)): item
-                for item in live
-            }
-            snapshot = tuple(
-                sorted(
-                    (
-                        *(
-                            item
-                            for item in historical
-                            if (
-                                item.ticker,
-                                item.at.astimezone(timezone.utc),
-                            )
-                            not in live_by_key
-                        ),
-                        *(item.candle for item in live_by_key.values()),
-                    ),
-                    key=lambda item: (
-                        item.ticker,
-                        item.at.astimezone(timezone.utc),
-                    ),
-                )
-            )
         if not snapshot:
             raise ValueError("composite candle cache contains no causal candles")
         self._snapshot = snapshot
-        self.describe()
         return snapshot
 
-    def _load_live(self) -> tuple[VersionedHistoricalCandle, ...]:
-        if self._live_snapshot is None:
-            self._live_snapshot = _deduplicate(self._live.load_as_of(self._as_of))
-        return self._live_snapshot
+    def iter_ticker_partitions(self) -> Iterator[tuple[HistoricalCandle, ...]]:
+        """Merge local and live revisions while retaining one ticker in memory."""
+
+        historical = _iter_historical_partitions(self._historical, self._as_of)
+        live = self._iter_live_partitions()
+        historical_partition = next(historical, None)
+        live_partition = next(live, None)
+        while historical_partition is not None or live_partition is not None:
+            historical_ticker = (
+                historical_partition[0].ticker
+                if historical_partition is not None
+                else None
+            )
+            live_ticker = (
+                live_partition[0].candle.ticker
+                if live_partition is not None
+                else None
+            )
+            if live_ticker is None or (
+                historical_ticker is not None and historical_ticker < live_ticker
+            ):
+                yield historical_partition  # type: ignore[misc]
+                historical_partition = next(historical, None)
+                continue
+            if historical_ticker is None or live_ticker < historical_ticker:
+                yield tuple(item.candle for item in live_partition)  # type: ignore[union-attr]
+                live_partition = next(live, None)
+                continue
+            yield _merge_ticker_partition(
+                historical_partition,  # type: ignore[arg-type]
+                live_partition,  # type: ignore[arg-type]
+            )
+            historical_partition = next(historical, None)
+            live_partition = next(live, None)
+
+    def _iter_live_partitions(
+        self,
+    ) -> Iterator[tuple[VersionedHistoricalCandle, ...]]:
+        iterator = getattr(self._live, "iter_as_of", None)
+        if callable(iterator):
+            yield from iterator(self._as_of)
+            return
+        if self._fallback_live_snapshot is None:
+            self._fallback_live_snapshot = _deduplicate(
+                self._live.load_as_of(self._as_of)
+            )
+        rows = self._fallback_live_snapshot
+        yield from _partition_versioned_rows(rows)
 
 
 def _versioned_candle(
@@ -261,63 +299,174 @@ def _deduplicate(
     )
 
 
-def _composite_descriptor(
+def _streaming_composite_descriptor(
     historical: CandleCacheDescriptor,
-    live: tuple[VersionedHistoricalCandle, ...],
+    live_partitions: Iterator[tuple[VersionedHistoricalCandle, ...]],
     *,
     as_of: datetime,
 ) -> CandleCacheDescriptor:
-    live_days = tuple(
-        item.candle.at.astimezone(timezone.utc).date() for item in live
-    )
-    live_partitions = {
-        (item.candle.ticker, item.candle.at.astimezone(timezone.utc).date())
-        for item in live
-    }
+    digest = sha256()
+    digest.update(b"composite-scientific-candles-v2\0")
+    digest.update(historical.dataset_fingerprint.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(_timestamp(as_of).encode("ascii"))
+    live_days: set[date] = set()
+    live_partition_keys: set[tuple[str, date]] = set()
+    live_tickers: set[str] = set()
+    for partition in live_partitions:
+        for item in partition:
+            candle = item.candle
+            candle_day = candle.at.astimezone(timezone.utc).date()
+            live_days.add(candle_day)
+            live_partition_keys.add((candle.ticker, candle_day))
+            live_tickers.add(candle.ticker)
+            digest.update(_versioned_fingerprint_row(item))
     known_historical_partitions = {
         partition
-        for partition in live_partitions
+        for partition in live_partition_keys
         if partition[0] in historical.tickers
         and historical.start_day <= partition[1] <= historical.end_day
     }
-    payload = {
-        "as_of": _timestamp(as_of),
-        "historical_fingerprint": historical.dataset_fingerprint,
-        "live_candles": [
-            {
-                "ticker": item.candle.ticker,
-                "source_time": _timestamp(item.candle.at),
-                "open": _number(item.candle.open),
-                "high": _number(item.candle.high),
-                "low": _number(item.candle.low),
-                "close": _number(item.candle.close),
-                "volume": _number(item.candle.volume),
-                "complete": item.candle.complete,
-                "record_version": item.record_version,
-            }
-            for item in live
-        ],
-    }
-    encoded = json.dumps(
-        payload,
-        allow_nan=False,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    all_days = (historical.start_day, historical.end_day, *live_days)
+    all_days = {historical.start_day, historical.end_day, *live_days}
     return CandleCacheDescriptor(
-        dataset_fingerprint="sha256:" + sha256(encoded).hexdigest(),
+        dataset_fingerprint="sha256:" + digest.hexdigest(),
         partition_count=(
             historical.partition_count
-            + len(live_partitions - known_historical_partitions)
+            + len(live_partition_keys - known_historical_partitions)
         ),
-        tickers=tuple(
-            sorted({*historical.tickers, *(item.candle.ticker for item in live)})
-        ),
+        tickers=tuple(sorted({*historical.tickers, *live_tickers})),
         start_day=min(all_days),
         end_day=max(all_days),
     )
+
+
+def _response_lines(response: object) -> Iterator[str]:
+    """Decode one JSONEachRow record at a time for bounded client memory."""
+
+    try:
+        iterator = iter(response)  # type: ignore[arg-type]
+    except TypeError:
+        payload = response.read()  # type: ignore[attr-defined]
+        iterator = iter(payload.splitlines())
+    for raw_line in iterator:
+        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
+        if line.strip():
+            yield line
+
+
+def _deduplicated_ticker_partitions(
+    rows: Iterator[VersionedHistoricalCandle],
+) -> Iterator[tuple[VersionedHistoricalCandle, ...]]:
+    """Deduplicate the ordered response with memory bounded by one ticker."""
+
+    ticker: str | None = None
+    selected: list[VersionedHistoricalCandle] = []
+    current: VersionedHistoricalCandle | None = None
+    current_key: tuple[str, datetime] | None = None
+    for row in rows:
+        key = (row.candle.ticker, row.candle.at.astimezone(timezone.utc))
+        if current_key is not None and key < current_key:
+            raise ValueError("ClickHouse candle response is not deterministically ordered")
+        if current_key == key:
+            if row.record_version < current.record_version:  # type: ignore[union-attr]
+                raise ValueError("ClickHouse candle revisions are not ordered")
+            if (
+                row.record_version == current.record_version  # type: ignore[union-attr]
+                and row.candle != current.candle  # type: ignore[union-attr]
+            ):
+                raise ValueError(
+                    "conflicting candle payloads share ticker, source_time, and record_version"
+                )
+            current = row
+            continue
+        if current is not None:
+            selected.append(current)
+        if ticker is not None and row.candle.ticker != ticker:
+            yield tuple(selected)
+            selected = []
+        ticker = row.candle.ticker
+        current = row
+        current_key = key
+    if current is not None:
+        selected.append(current)
+    if selected:
+        yield tuple(selected)
+
+
+def _partition_versioned_rows(
+    rows: tuple[VersionedHistoricalCandle, ...],
+) -> Iterator[tuple[VersionedHistoricalCandle, ...]]:
+    current: list[VersionedHistoricalCandle] = []
+    ticker: str | None = None
+    for row in rows:
+        if ticker is not None and row.candle.ticker != ticker:
+            yield tuple(current)
+            current = []
+        ticker = row.candle.ticker
+        current.append(row)
+    if current:
+        yield tuple(current)
+
+
+def _iter_historical_partitions(
+    historical: HistoricalCandleCachePort,
+    as_of: datetime,
+) -> Iterator[tuple[HistoricalCandle, ...]]:
+    iterator = getattr(historical, "iter_ticker_partitions", None)
+    source = iterator() if callable(iterator) else _partition_historical(historical.load())
+    for partition in source:
+        causal = tuple(
+            item
+            for item in partition
+            if item.at.astimezone(timezone.utc) <= as_of
+        )
+        if causal:
+            yield causal
+
+
+def _partition_historical(
+    rows: tuple[HistoricalCandle, ...],
+) -> Iterator[tuple[HistoricalCandle, ...]]:
+    current: list[HistoricalCandle] = []
+    ticker: str | None = None
+    for row in rows:
+        if ticker is not None and row.ticker != ticker:
+            yield tuple(current)
+            current = []
+        ticker = row.ticker
+        current.append(row)
+    if current:
+        yield tuple(current)
+
+
+def _merge_ticker_partition(
+    historical: tuple[HistoricalCandle, ...],
+    live: tuple[VersionedHistoricalCandle, ...],
+) -> tuple[HistoricalCandle, ...]:
+    selected = {item.at.astimezone(timezone.utc): item for item in historical}
+    selected.update(
+        {
+            item.candle.at.astimezone(timezone.utc): item.candle
+            for item in live
+        }
+    )
+    return tuple(selected[key] for key in sorted(selected))
+
+
+def _versioned_fingerprint_row(item: VersionedHistoricalCandle) -> bytes:
+    candle = item.candle
+    values = (
+        candle.ticker,
+        _timestamp(candle.at),
+        _number(candle.open),
+        _number(candle.high),
+        _number(candle.low),
+        _number(candle.close),
+        _number(candle.volume),
+        "1" if candle.complete else "0",
+        str(item.record_version),
+    )
+    return ("\x1f".join(values) + "\n").encode("ascii")
 
 
 def _parse_timestamp(value: object, field: str) -> datetime:

@@ -299,13 +299,11 @@ class AssessProspectiveScientificEvidence:
         if unavailable:
             raise ValueError("requested hypothesis is absent from research report")
 
-        paired = tuple(zip(report.features, report.outcomes, strict=True))
         prepared: list[PreparedProspectiveEvidence] = []
         for hypothesis in selected:
             request, coverage = self._request(
                 report,
                 hypothesis,
-                paired,
                 cost_model_version=cost_model_version,
             )
             prepared.append(
@@ -325,11 +323,9 @@ class AssessProspectiveScientificEvidence:
             raise ValueError("cost_model_version must not be empty")
         if hypothesis not in report.selected_hypotheses:
             raise ValueError("requested hypothesis is absent from research report")
-        paired = tuple(zip(report.features, report.outcomes, strict=True))
         request, coverage = self._request(
             report,
             hypothesis,
-            paired,
             cost_model_version=cost_model_version,
         )
         return PreparedProspectiveEvidence(request=request, coverage=coverage)
@@ -354,33 +350,44 @@ class AssessProspectiveScientificEvidence:
         self,
         report: ProspectiveScientificReport,
         hypothesis: ProspectiveHypothesis,
-        paired: Sequence[tuple[ProspectiveFeature, ProspectiveOutcome]],
         *,
         cost_model_version: str,
     ) -> tuple[EvidenceRequest, ProspectiveEvidenceCoverage]:
-        relevant = tuple(pair for pair in paired if pair[0].hypothesis is hypothesis)
         validation = tuple(
-            pair
-            for pair in relevant
-            if report.split.partition_for(pair[0].trading_day)
+            (feature, outcome)
+            for feature, outcome in zip(
+                report.features,
+                report.outcomes,
+                strict=True,
+            )
+            if feature.hypothesis is hypothesis
+            if report.split.partition_for(feature.trading_day)
             is DatasetPartition.VALIDATION
         )
-        holdout_all = tuple(
-            pair
-            for pair in relevant
-            if report.split.partition_for(pair[0].trading_day)
-            is DatasetPartition.HOLDOUT
-        )
-        holdout = tuple(pair for pair in holdout_all if pair[1].available)
         event_thresholds = _event_thresholds(hypothesis, validation)
         volatility_cutoffs = _volatility_cutoffs(hypothesis, validation)
 
         events: list[StudyPoint] = []
         candidates: list[StudyPoint] = []
-        diagnostic_reasons: Counter[str] = Counter(
-            outcome.reason.value for _, outcome in holdout_all if not outcome.available
-        )
-        for feature, outcome in holdout:
+        diagnostic_reasons: Counter[str] = Counter()
+        holdout_count = 0
+        available_holdout_count = 0
+        for feature, outcome in zip(
+            report.features,
+            report.outcomes,
+            strict=True,
+        ):
+            if (
+                feature.hypothesis is not hypothesis
+                or report.split.partition_for(feature.trading_day)
+                is not DatasetPartition.HOLDOUT
+            ):
+                continue
+            holdout_count += 1
+            if not outcome.available:
+                diagnostic_reasons[outcome.reason.value] += 1
+                continue
+            available_holdout_count += 1
             effect = _effect_value(
                 feature,
                 outcome,
@@ -418,7 +425,7 @@ class AssessProspectiveScientificEvidence:
         matched = self._controls.execute(events, candidates_with_exclusions)
         coverage = ProspectiveEvidenceCoverage(
             hypothesis_id=hypothesis.value,
-            available_holdout_observations=len(holdout),
+            available_holdout_observations=available_holdout_count,
             triggered_events=len(events),
             eligible_common_support_events=len(matched.groups),
             unmatched_events=len(matched.unmatched_event_ids),
@@ -433,10 +440,10 @@ class AssessProspectiveScientificEvidence:
                 groups=matched.groups,
                 expected_eligible_events=len(events),
                 unmatched_event_ids=matched.unmatched_event_ids,
-                total_available_observations=len(holdout) or None,
+                total_available_observations=available_holdout_count or None,
                 diagnostics_input=EvidenceDiagnosticsInput(
-                    total_observation_count=len(holdout_all),
-                    available_observation_count=len(holdout),
+                    total_observation_count=holdout_count,
+                    available_observation_count=available_holdout_count,
                     eligible_event_count=len(events),
                     reasons_histogram=tuple(
                         EvidenceReasonCount(reason_code=reason, count=count)

@@ -10,6 +10,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any, Iterable, Mapping
 
 from tinvest_signal_engine.domain.historical_hypothesis_replay import (
@@ -65,6 +66,15 @@ class LocalCandleCache:
         return self._descriptor_cache
 
     def load(self) -> tuple[HistoricalCandle, ...]:
+        return tuple(
+            candle
+            for partition in self.iter_ticker_partitions()
+            for candle in partition
+        )
+
+    def iter_ticker_partitions(self) -> Iterator[tuple[HistoricalCandle, ...]]:
+        """Yield one ordered ticker at a time instead of sealing the full cache."""
+
         descriptor = self.describe()
         files = self._partition_files()
         if len(files) != descriptor.partition_count:
@@ -72,6 +82,25 @@ class LocalCandleCache:
                 "cache partition count differs from immutable manifest: "
                 f"expected {descriptor.partition_count}, found {len(files)}"
             )
+        by_ticker: dict[str, list[Path]] = {}
+        for path in files:
+            ticker = path.parent.name.removeprefix("ticker=").upper()
+            by_ticker.setdefault(ticker, []).append(path)
+        for ticker in sorted(by_ticker):
+            records = self._read_partition_files(tuple(by_ticker[ticker]))
+            candles = tuple(
+                sorted(
+                    (_candle(record) for record in records),
+                    key=lambda item: item.at,
+                )
+            )
+            if candles:
+                yield candles
+
+    def _read_partition_files(
+        self,
+        files: tuple[Path, ...],
+    ) -> list[Mapping[str, object]]:
         records: list[Mapping[str, object]] = []
         parquet = [path for path in files if path.suffix == ".parquet"]
         records.extend(self._read_parquet(parquet))
@@ -84,8 +113,7 @@ class LocalCandleCache:
                     json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
                 )
-        candles = tuple(_candle(record) for record in records)
-        return tuple(sorted(candles, key=lambda item: (item.ticker, item.at)))
+        return records
 
     def _manifest(self) -> Mapping[str, object]:
         if not self._manifest_path.is_file():

@@ -36,6 +36,14 @@ class _Response:
         return self._payload
 
 
+class _StreamingResponse(_Response):
+    def __iter__(self):
+        return iter(self._payload.splitlines(keepends=True))
+
+    def read(self) -> bytes:
+        raise AssertionError("streaming ClickHouse reads must not call read()")
+
+
 class _LiveSource:
     def __init__(self, rows: tuple[VersionedHistoricalCandle, ...]) -> None:
         self.rows = rows
@@ -219,6 +227,60 @@ def test_clickhouse_source_rejects_future_row_even_if_backend_returns_it(
 
     with pytest.raises(ValueError, match="causal cutoff"):
         source.load_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
+
+
+def test_clickhouse_source_streams_and_bounds_deduplication_by_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = (
+        _clickhouse_row(close="101", version=4),
+        _clickhouse_row(close="102", version=5),
+        {
+            **_clickhouse_row(
+                source_time="2026-07-17T10:01:00Z",
+                received_at="2026-07-17T10:01:01Z",
+            ),
+            "ticker": "SBER",
+        },
+        {
+            **_clickhouse_row(
+                source_time="2026-07-17T10:00:00Z",
+                received_at="2026-07-17T10:00:01Z",
+            ),
+            "ticker": "SBERP",
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def open_request(request, timeout: float):
+        captured["sql"] = request.data.decode("utf-8")
+        return _StreamingResponse("\n".join(json.dumps(row) for row in rows))
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        open_request,
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+    )
+
+    partitions = tuple(
+        source.iter_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
+    )
+
+    assert tuple(partition[0].candle.ticker for partition in partitions) == (
+        "SBER",
+        "SBERP",
+    )
+    assert tuple(item.candle.close for item in partitions[0]) == (102.0, 102.0)
+    assert "ORDER BY ticker, candle_at, record_version" in str(captured["sql"])
+    assert "max_result_rows = 10000000" in str(captured["sql"])
+    assert str(captured["sql"]).index("SETTINGS") < str(captured["sql"]).index(
+        "FORMAT JSONEachRow"
+    )
 
 
 def test_composite_merges_local_cache_and_live_revisions_without_future_data(

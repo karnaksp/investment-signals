@@ -59,6 +59,7 @@ from tinvest_signal_engine.application.scientific_candle_models import (
 )
 from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificRequest,
+    build_partitioned_prospective_scientific_research,
     build_prospective_scientific_research,
 )
 from tinvest_signal_engine.application.historical_hypothesis_replay import (
@@ -699,21 +700,34 @@ class LocalHypothesisPortfolioRunner:
         )
         if requested_prospective:
             descriptor = candle_cache.describe()
-            candles = candle_cache.load()
             policy = ProspectiveScientificPolicy(
                 round_trip_cost_bps=request.cost_model.round_trip_bps
             )
-            reports = (
-                build_prospective_scientific_research(
-                    candles,
-                    dataset_fingerprint=descriptor.dataset_fingerprint,
-                    request=ProspectiveScientificRequest(
-                        selected_hypotheses=(hypothesis,),
-                        policy=policy,
-                    ),
+            if callable(getattr(candle_cache, "iter_ticker_partitions", None)):
+                reports = (
+                    build_partitioned_prospective_scientific_research(
+                        candle_cache,  # type: ignore[arg-type]
+                        dataset_fingerprint=descriptor.dataset_fingerprint,
+                        request=ProspectiveScientificRequest(
+                            selected_hypotheses=(hypothesis,),
+                            policy=policy,
+                        ),
+                    )
+                    for hypothesis in requested_prospective
                 )
-                for hypothesis in requested_prospective
-            )
+            else:
+                candles = candle_cache.load()
+                reports = (
+                    build_prospective_scientific_research(
+                        candles,
+                        dataset_fingerprint=descriptor.dataset_fingerprint,
+                        request=ProspectiveScientificRequest(
+                            selected_hypotheses=(hypothesis,),
+                            policy=policy,
+                        ),
+                    )
+                    for hypothesis in requested_prospective
+                )
             artifact = self._prospective_artifacts.save_portfolio(
                 reports,
                 requested_prospective,
