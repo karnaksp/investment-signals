@@ -273,20 +273,23 @@ class ParquetCandlePartitionRepository:
             return {}
 
         rows = database.execute(
-            "SELECT filename, COUNT(*) AS row_count, "
-            'COUNT(DISTINCT CAST("at" AS TIMESTAMPTZ)) AS distinct_times, '
-            'MIN(CAST("ticker" AS VARCHAR)) AS min_ticker, '
-            'MAX(CAST("ticker" AS VARCHAR)) AS max_ticker, '
-            'BOOL_AND(CAST("complete" AS BOOLEAN)) AS all_complete, '
-            'MIN(CAST(CAST("at" AS TIMESTAMPTZ) AT TIME ZONE '
-            "'Europe/Moscow' AS DATE)) AS min_day, "
-            'MAX(CAST(CAST("at" AS TIMESTAMPTZ) AT TIME ZONE '
-            "'Europe/Moscow' AS DATE)) AS max_day "
-            "FROM read_parquet(?, filename=true, union_by_name=true) "
-            "GROUP BY filename",
+            "SELECT file_name, path_in_schema, MIN(stats_min_value), "
+            "MAX(stats_max_value), SUM(num_values), SUM(stats_null_count) "
+            "FROM parquet_metadata(?) "
+            "GROUP BY file_name, path_in_schema",
             [list(valid_paths)],
         ).fetchall()
-        aggregate_by_path = {str(Path(str(row[0])).resolve()): row[1:] for row in rows}
+        metadata_by_path: dict[str, dict[str, tuple[str, str, int, int]]] = {}
+        for raw_path, raw_field, raw_min, raw_max, raw_values, raw_nulls in rows:
+            path = str(Path(str(raw_path)).resolve())
+            if path not in key_by_path or raw_field is None:
+                continue
+            metadata_by_path.setdefault(path, {})[str(raw_field)] = (
+                str(raw_min),
+                str(raw_max),
+                int(raw_values),
+                int(raw_nulls),
+            )
         summaries: dict[CandlePartitionKey, CandlePartitionState] = {}
         for path in valid_paths:
             key = key_by_path[path]
@@ -294,24 +297,27 @@ class ParquetCandlePartitionRepository:
             if expected == 0:
                 summaries[key] = CandlePartitionState(key, True, 0)
                 continue
-            aggregate = aggregate_by_path.get(path)
-            if aggregate is None:
+            fields = metadata_by_path.get(path, {})
+            if not set(_FIELDS).issubset(fields):
                 continue
-            (
-                row_count,
-                distinct_times,
-                min_ticker,
-                max_ticker,
-                all_complete,
-                min_day,
-                max_day,
-            ) = aggregate
+            ticker_min, ticker_max, ticker_values, ticker_nulls = fields["ticker"]
+            complete_min, complete_max, complete_values, complete_nulls = fields[
+                "complete"
+            ]
+            at_min, at_max, at_values, at_nulls = fields["at"]
+            min_day = _metadata_timestamp(at_min).astimezone(_MOSCOW).date()
+            max_day = _metadata_timestamp(at_max).astimezone(_MOSCOW).date()
             if (
-                int(row_count) == expected
-                and int(distinct_times) == expected
-                and min_ticker == key.ticker
-                and max_ticker == key.ticker
-                and bool(all_complete)
+                ticker_values == expected
+                and ticker_nulls == 0
+                and ticker_min == key.ticker
+                and ticker_max == key.ticker
+                and complete_values == expected
+                and complete_nulls == 0
+                and complete_min.lower() == "true"
+                and complete_max.lower() == "true"
+                and at_values == expected
+                and at_nulls == 0
                 and min_day == key.trading_day
                 and max_day == key.trading_day
             ):
@@ -658,6 +664,13 @@ def _quotation(value: object) -> float:
 
 def _api_time(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _metadata_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _is_morning(value: datetime) -> bool:

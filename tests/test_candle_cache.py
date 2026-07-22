@@ -136,7 +136,7 @@ def test_partition_repository_reuses_one_database_connection(
     assert first.closed is True
 
 
-def test_scope_inventory_uses_one_batch_scan_instead_of_per_file_queries(
+def test_scope_inventory_uses_batched_footer_reads_instead_of_row_scan(
     tmp_path: Path,
 ) -> None:
     first_day = date(2026, 7, 15)
@@ -177,7 +177,8 @@ def test_scope_inventory_uses_one_batch_scan_instead_of_per_file_queries(
     assert len(queries) == 3
     assert "parquet_schema" in queries[0]
     assert "parquet_file_metadata" in queries[1]
-    assert "read_parquet" in queries[2]
+    assert "parquet_metadata" in queries[2]
+    assert "read_parquet" not in queries[2]
 
 
 def test_manifest_distinguishes_empty_day_and_records_actual_morning_rows(
