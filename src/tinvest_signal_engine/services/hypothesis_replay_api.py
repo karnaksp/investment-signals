@@ -468,6 +468,13 @@ class ReplayJobManager:
                     continue
                 if existing.get("request") != request_payload:
                     raise IdempotencyConflict
+                if existing.get("status") == "failed" and request.resume:
+                    existing["status"] = "queued"
+                    existing["updated_at"] = _now()
+                    existing["finished_at"] = None
+                    existing["error"] = None
+                    self._store.save(existing)
+                    self._schedule(str(existing["job_id"]))
                 return _Submission(existing, reused=True)
             dataset_as_of = datetime.now(timezone.utc)
             dataset_fingerprint = self._runner.dataset_fingerprint(as_of=dataset_as_of)

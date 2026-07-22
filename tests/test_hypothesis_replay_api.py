@@ -373,6 +373,38 @@ def test_failure_is_persisted_without_traceback(tmp_path: Path) -> None:
     assert "failed-run" not in state_text
 
 
+def test_failed_job_is_retried_with_same_key_when_resume_is_enabled(
+    tmp_path: Path,
+) -> None:
+    runner = FakeReplayRunner(failure="temporary stream failure")
+    client, store = _client(tmp_path, runner)
+
+    with client:
+        submitted = client.post(
+            "/internal/v1/hypothesis-replays",
+            headers={"Idempotency-Key": "retry-failed-run"},
+            json={"hypothesis_ids": ["H1"], "resume": True},
+        ).json()
+        failed = _wait_for_status(client, submitted["job_id"], "failed")
+        runner.failure = None
+
+        repeated = client.post(
+            "/internal/v1/hypothesis-replays",
+            headers={"Idempotency-Key": "retry-failed-run"},
+            json={"hypothesis_ids": ["H1"], "resume": True},
+        )
+        completed = _wait_for_status(client, submitted["job_id"], "completed")
+
+    assert repeated.status_code == 202
+    assert repeated.json()["reused"] is True
+    assert repeated.json()["job_id"] == submitted["job_id"]
+    assert completed["attempt"] == failed["attempt"] + 1
+    assert len(runner.calls) == 2
+    record = store.load(submitted["job_id"])
+    assert record is not None
+    assert record["dataset_fingerprint"] == "sha256:" + "a" * 64
+
+
 def test_queued_job_is_recovered_from_disk_after_restart(tmp_path: Path) -> None:
     store = LocalReplayJobStore(tmp_path / "jobs")
     first_runner = FakeReplayRunner(blocker=Event())
