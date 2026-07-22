@@ -11,6 +11,13 @@ from uuid import UUID, uuid5
 _OUTBOX_NAMESPACE = UUID("f5bdc8cb-3731-5755-8136-f510a6c4c2e3")
 DELIVERY_DESTINATIONS = frozenset({"telegram", "webhook"})
 PROVENANCE_STATUSES = frozenset({"complete", "legacy"})
+_MANUALLY_RETRYABLE_DELIVERY_FAILURES = frozenset(
+    {
+        "delivery_network_error",
+        "delivery_timeout",
+        "delivery_http_429",
+    }
+)
 
 
 class EventReplayConflict(RuntimeError):
@@ -98,6 +105,54 @@ class DeliveryTask:
             )
         if self.attempt_count < 1:
             raise ValueError("claimed delivery attempt_count must be positive")
+
+
+@dataclass(frozen=True)
+class DeadLetterDelivery:
+    """Minimal sealed state used to decide an operator-requested retry."""
+
+    outbox_id: str
+    destination_type: str
+    status: str
+    attempt_count: int
+    last_error_code: str | None
+
+    def __post_init__(self) -> None:
+        if self.destination_type not in DELIVERY_DESTINATIONS:
+            raise ValueError(
+                f"Unsupported delivery destination: {self.destination_type!r}"
+            )
+        if self.attempt_count < 0:
+            raise ValueError("delivery attempt_count must not be negative")
+
+
+@dataclass(frozen=True)
+class ManualDeliveryRetryDecision:
+    allowed: bool
+    reason_code: str
+
+
+def manual_delivery_retry_decision(
+    delivery: DeadLetterDelivery,
+) -> ManualDeliveryRetryDecision:
+    """Allow a manual replay only for transient, terminal delivery failures.
+
+    Permanent configuration and Telegram 4xx failures are deliberately excluded:
+    replaying them cannot heal the cause and may create duplicate notifications.
+    """
+
+    if delivery.status != "dead_letter":
+        return ManualDeliveryRetryDecision(False, "delivery_not_dead_letter")
+    reason = (delivery.last_error_code or "").strip().lower()
+    if reason in _MANUALLY_RETRYABLE_DELIVERY_FAILURES:
+        return ManualDeliveryRetryDecision(True, "transient_failure_retry_allowed")
+    if reason.startswith("delivery_http_"):
+        status_code = reason.removeprefix("delivery_http_")
+        if status_code.isdigit() and 500 <= int(status_code) <= 599:
+            return ManualDeliveryRetryDecision(
+                True, "transient_failure_retry_allowed"
+            )
+    return ManualDeliveryRetryDecision(False, "delivery_failure_not_retryable")
 
 
 @dataclass(frozen=True)

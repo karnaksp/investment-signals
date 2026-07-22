@@ -1228,14 +1228,13 @@ class TelegramAlertSink:
         bot_token: str | None,
         chat_id: str | None,
         message_thread_id: int | None = None,
+        client: Any | None = None,
     ):
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._message_thread_id = message_thread_id
         self._client = (
-            httpx.Client(timeout=5.0)
-            if self.enabled
-            else None
+            (client or httpx.Client(timeout=5.0)) if self.enabled else None
         )
 
     @property

@@ -216,6 +216,32 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
         assert retry is not None
         assert retry.attempt_count == 2
         queue.mark_delivered(retry, delivered_at=claim_at)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE delivery_outbox
+                SET status = 'dead_letter', attempt_count = 8,
+                    last_error_code = 'delivery_network_error'
+                WHERE outbox_id = %s
+                """,
+                (retry.outbox_id,),
+            )
+        dead_letter = queue.get_for_manual_retry(outbox_id=retry.outbox_id)
+        assert dead_letter is not None
+        assert dead_letter.status == "dead_letter"
+        assert dead_letter.attempt_count == 8
+        assert queue.requeue_dead_letter(
+            dead_letter,
+            available_at=claim_at,
+        )
+        manually_retried = queue.claim(
+            available_at=claim_at,
+            lease_until=claim_at + timedelta(seconds=60),
+        )
+        assert manually_retried is not None
+        assert manually_retried.outbox_id == retry.outbox_id
+        assert manually_retried.attempt_count == 1
+        queue.mark_delivered(manually_retried, delivered_at=claim_at)
 
         failed_event = _event("2", 2)
         failed_prepared = (

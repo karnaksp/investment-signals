@@ -5,6 +5,9 @@ from __future__ import annotations
 import httpx
 
 from tinvest_signal_engine.application.delivery import DeliveryFailure
+from tinvest_signal_engine.adapters.telegram_http import (
+    TelegramMultiAddressHttpClient,
+)
 from tinvest_signal_engine.config import RuntimeSettings, load_secret
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTask
 from tinvest_signal_engine.models import TriggerSignal
@@ -85,6 +88,7 @@ class ConfiguredDeliverySender:
             bot_token=bot_token,
             chat_id=chat_id,
             message_thread_id=message_thread_id,
+            client=TelegramMultiAddressHttpClient(),
         )
 
     def close(self) -> None:

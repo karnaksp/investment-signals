@@ -23,6 +23,7 @@ from tinvest_signal_engine.application.observation_publication import (
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.detector_observations import DetectorObservation
 from tinvest_signal_engine.domain.reliable_processing import (
+    DeadLetterDelivery,
     DeliveryTask,
     EventReplayConflict,
     SignalRecord,
@@ -549,6 +550,64 @@ class PostgresDeliveryQueue:
                     task.attempt_count,
                 ),
             )
+
+    def get_for_manual_retry(
+        self, *, outbox_id: str
+    ) -> DeadLetterDelivery | None:
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT outbox_id, destination_type, status,
+                       attempt_count, last_error_code
+                FROM delivery_outbox
+                WHERE outbox_id = %s
+                """,
+                (outbox_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return DeadLetterDelivery(
+            outbox_id=str(row["outbox_id"]),
+            destination_type=str(row["destination_type"]),
+            status=str(row["status"]),
+            attempt_count=int(row["attempt_count"]),
+            last_error_code=(
+                str(row["last_error_code"])
+                if row["last_error_code"] is not None
+                else None
+            ),
+        )
+
+    def requeue_dead_letter(
+        self,
+        delivery: DeadLetterDelivery,
+        *,
+        available_at: datetime,
+    ) -> bool:
+        """Atomically requeue the exact dead-letter state approved by the use case."""
+
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE delivery_outbox
+                SET status = 'pending',
+                    attempt_count = 0,
+                    next_attempt_at = %s,
+                    delivered_at = NULL
+                WHERE outbox_id = %s
+                  AND status = 'dead_letter'
+                  AND attempt_count = %s
+                  AND last_error_code IS NOT DISTINCT FROM %s
+                """,
+                (
+                    available_at,
+                    delivery.outbox_id,
+                    delivery.attempt_count,
+                    delivery.last_error_code,
+                ),
+            )
+            return cursor.rowcount == 1
 
     def close(self) -> None:
         self._connection.close()

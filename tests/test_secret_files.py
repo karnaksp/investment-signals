@@ -7,6 +7,9 @@ import pytest
 
 from tinvest_signal_engine.config import RuntimeSettings, load_secret
 from tinvest_signal_engine.adapters.delivery_senders import ConfiguredDeliverySender
+from tinvest_signal_engine.adapters.telegram_http import (
+    TelegramMultiAddressHttpClient,
+)
 from tinvest_signal_engine.adapters.legacy_detection import LegacyDetectionAdapter
 
 
@@ -156,6 +159,7 @@ def test_empty_live_secret_files_disable_started_telegram_delivery(
         assert current.enabled is True
         assert current._bot_token == "updated-token"
         assert current._chat_id == "-100200"
+        assert isinstance(current._client, TelegramMultiAddressHttpClient)
         assert [target.destination_type for target in detector._delivery_targets()] == [
             "telegram"
         ]
