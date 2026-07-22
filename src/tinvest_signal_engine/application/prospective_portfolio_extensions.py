@@ -15,7 +15,7 @@ from hashlib import sha256
 import json
 from math import log
 from statistics import fmean, pstdev
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.application.prospective_scientific_models import (
@@ -23,7 +23,10 @@ from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificRequest,
     build_prospective_scientific_research,
 )
-from tinvest_signal_engine.domain.historical_hypothesis_replay import HistoricalCandle
+from tinvest_signal_engine.domain.historical_hypothesis_replay import (
+    CandleCacheDescriptor,
+    HistoricalCandle,
+)
 from tinvest_signal_engine.domain.prospective_portfolio_extensions import (
     R2Decision,
     R2ExtensionHypothesis,
@@ -147,6 +150,34 @@ class ExtendedProspectiveScientificReport:
 
     sealed_report: ProspectiveScientificReport
     extension_report: R2ExtensionReport
+
+
+class R2ExtensionCandleCachePort(Protocol):
+    """Application-owned boundary for immutable one-minute candle history."""
+
+    def describe(self) -> CandleCacheDescriptor: ...
+
+    def load(self) -> tuple[HistoricalCandle, ...]: ...
+
+
+class BuildR2ExtensionReplay:
+    """Build the causal H10/H11 extension from an injected local cache.
+
+    Evidence assessment and transport serialization deliberately remain
+    outside this use case.  A composition root may only publish the resulting
+    observations after a separate evidence gate has assessed them.
+    """
+
+    def __init__(self, candle_cache: R2ExtensionCandleCachePort) -> None:
+        self._candle_cache = candle_cache
+
+    def execute(self, request: R2ExtensionRequest) -> R2ExtensionReport:
+        descriptor = self._candle_cache.describe()
+        return build_r2_extension_research(
+            self._candle_cache.load(),
+            dataset_fingerprint=descriptor.dataset_fingerprint,
+            request=request,
+        )
 
 
 def build_r2_extension_research(

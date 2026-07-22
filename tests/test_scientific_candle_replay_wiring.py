@@ -11,7 +11,7 @@ from tinvest_signal_engine.services.hypothesis_replay_api import (
 import tinvest_signal_engine.services.hypothesis_replay_api as replay_api
 
 
-def test_internal_runner_wires_all_next_candle_hypotheses(
+def test_internal_runner_wires_non_r2_next_candle_hypotheses(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -58,7 +58,7 @@ def test_internal_runner_wires_all_next_candle_hypotheses(
         scientific_artifacts=FakeScientificArtifacts(),  # type: ignore[arg-type]
     )
     request = StartReplayRequest(
-        hypothesis_ids=("H7V2", "H15", "H10", "H11"),
+        hypothesis_ids=("H7V2", "H15"),
         cost_model={
             "version": "cost-v2",
             "commission_bps": 1.0,
@@ -72,29 +72,114 @@ def test_internal_runner_wires_all_next_candle_hypotheses(
 
     scientific_request = captured["request"]
     assert tuple(item.value for item in scientific_request.selected_hypotheses) == (
-        "H10",
-        "H11",
         "H15",
         "H7V2",
     )
     assert scientific_request.policy.round_trip_cost_bps == 10.0
     assert captured["artifact_report"] is report
-    assert captured["artifact_requested"] == ("H10", "H11", "H15", "H7V2")
+    assert captured["artifact_requested"] == ("H15", "H7V2")
     assert captured["cost_model_version"] == "cost-v2"
     assert tuple(item["hypothesis_id"] for item in result["evidence"]) == (
-        "H10",
-        "H11",
         "H15",
         "H7V2",
     )
     assert result["engines"] == (
         {
             "engine": "next_scientific_candle_replay",
-            "hypothesis_ids": ("H10", "H11", "H15", "H7V2"),
+            "hypothesis_ids": ("H15", "H7V2"),
             "application_run_id": "sha256:" + "a" * 64,
             "artifact_fingerprint": "sha256:" + "c" * 64,
             "artifact_uri": str(tmp_path / "immutable-artifact"),
             "resumed": False,
+        },
+    )
+
+
+def test_internal_runner_routes_h10_h11_only_to_causal_r2(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+    report = SimpleNamespace(report_fingerprint="sha256:" + "a" * 64)
+
+    class FakeR2UseCase:
+        def __init__(self, cache: object) -> None:
+            captured["cache"] = cache
+
+        def execute(self, request: object) -> object:
+            captured["request"] = request
+            return report
+
+    class FakeR2Artifacts:
+        def save(
+            self,
+            actual_report: object,
+            requested: tuple[object, ...],
+            *,
+            cost_model_version: str,
+            blocking_reason_codes: tuple[str, ...],
+        ) -> object:
+            captured["artifact_report"] = actual_report
+            captured["artifact_requested"] = tuple(
+                getattr(item, "value") for item in requested
+            )
+            captured["cost_model_version"] = cost_model_version
+            captured["blocking_reason_codes"] = blocking_reason_codes
+            return SimpleNamespace(
+                artifact_uri=str(tmp_path / "immutable-r2-artifact"),
+                artifact_fingerprint="sha256:" + "c" * 64,
+                evidence=tuple(
+                    {"hypothesis_id": getattr(item, "value")} for item in requested
+                ),
+            )
+
+    class ForbiddenLegacyUseCase:
+        def __init__(self, _cache: object) -> None:
+            raise AssertionError("H10/H11 must not use the legacy candle engine")
+
+    monkeypatch.setattr(replay_api, "BuildR2ExtensionReplay", FakeR2UseCase)
+    monkeypatch.setattr(
+        replay_api,
+        "BuildScientificCandleModelResearch",
+        ForbiddenLegacyUseCase,
+    )
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "cache",
+        artifact_root=tmp_path / "artifacts",
+        r2_artifacts=FakeR2Artifacts(),  # type: ignore[arg-type]
+    )
+
+    result = runner.execute(
+        StartReplayRequest(hypothesis_ids=("H10", "H11")),
+        run_fingerprint="sha256:" + "d" * 64,
+    )
+
+    request = captured["request"]
+    assert tuple(item.value for item in request.selected_hypotheses) == (
+        "H10",
+        "H11",
+    )
+    assert request.policy.round_trip_cost_bps == 10.0
+    assert request.policy.cost_model_version == "research-cost-v1.0.0"
+    assert captured["artifact_report"] is report
+    assert captured["artifact_requested"] == ("H10", "H11")
+    assert captured["blocking_reason_codes"] == (
+        "independent_evidence_gate_unavailable",
+        "r2_reference_data_unavailable",
+    )
+    assert tuple(item["hypothesis_id"] for item in result["evidence"]) == (
+        "H10",
+        "H11",
+    )
+    assert result["engines"] == (
+        {
+            "engine": "causal_h10_h11_r2_replay",
+            "hypothesis_ids": ("H10", "H11"),
+            "application_run_id": "sha256:" + "a" * 64,
+            "artifact_fingerprint": "sha256:" + "c" * 64,
+            "artifact_uri": str(tmp_path / "immutable-r2-artifact"),
+            "resumed": False,
+            "evidence_state": "blocked_by_data",
         },
     )
 

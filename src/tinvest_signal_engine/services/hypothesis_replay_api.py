@@ -45,6 +45,9 @@ from tinvest_signal_engine.adapters.scientific_candle_replay import (
 from tinvest_signal_engine.adapters.prospective_scientific_replay import (
     ProspectiveScientificReplayArtifactAdapter,
 )
+from tinvest_signal_engine.adapters.r2_extension_replay import (
+    R2ExtensionReplayArtifactAdapter,
+)
 from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import (
     FileProspectiveScientificPartitionStage,
     FileScientificCombinationStreamingArtifacts,
@@ -66,6 +69,10 @@ from tinvest_signal_engine.application.prospective_scientific_models import (
     build_partitioned_prospective_scientific_research,
     build_prospective_scientific_research,
 )
+from tinvest_signal_engine.application.prospective_portfolio_extensions import (
+    BuildR2ExtensionReplay,
+    R2ExtensionRequest,
+)
 from tinvest_signal_engine.application.scientific_combination_evidence import (
     EvaluateScientificCombinationPartitions,
 )
@@ -83,6 +90,10 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveHypothesis,
     ProspectiveScientificPolicy,
 )
+from tinvest_signal_engine.domain.prospective_portfolio_extensions import (
+    R2ExtensionHypothesis,
+    R2ExtensionPolicy,
+)
 from tinvest_signal_engine.domain.scientific_hypothesis_combinations import (
     ScientificCombinationId,
 )
@@ -96,7 +107,8 @@ from tinvest_signal_engine.domain.scientific_replay_contract import (
 
 JobState = Literal["queued", "running", "completed", "failed"]
 ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
-SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H10", "H11", "H15", "H7V2"})
+R2_EXTENSION_HYPOTHESES = frozenset({"H10", "H11"})
+SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H15", "H7V2"})
 PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
     {"H3V2", "H4V2", "H7V3", "H12", "H15V2", "H16", "H17"}
 )
@@ -114,11 +126,14 @@ COMBINATION_SOURCE_IDS = frozenset(
 )
 SUPPORTED_HYPOTHESES = (
     frozenset(ALL_HYPOTHESES)
+    | R2_EXTENSION_HYPOTHESES
     | SCIENTIFIC_CANDLE_HYPOTHESES
     | PROSPECTIVE_SCIENTIFIC_HYPOTHESES
 )
 LEGACY_DEFAULT_HYPOTHESES = tuple(
-    item for item in ALL_HYPOTHESES if item not in SCIENTIFIC_CANDLE_HYPOTHESES
+    item
+    for item in ALL_HYPOTHESES
+    if item not in SCIENTIFIC_CANDLE_HYPOTHESES | R2_EXTENSION_HYPOTHESES
 )
 GENERAL_HYPOTHESES = frozenset({"H1", "H2", "H5", "H6", "H7"})
 JUMP_HYPOTHESES = frozenset({"H3", "H4"})
@@ -553,7 +568,7 @@ class IdempotencyConflict(RuntimeError):
 
 
 class LocalHypothesisPortfolioRunner:
-    """Composition adapter for the H1-H9 scientific replay portfolio."""
+    """Composition adapter for the versioned scientific replay portfolio."""
 
     def __init__(
         self,
@@ -561,6 +576,7 @@ class LocalHypothesisPortfolioRunner:
         cache_dir: str | Path,
         artifact_root: str | Path,
         evidence_reader: ReplayEvidenceReader | None = None,
+        r2_artifacts: R2ExtensionReplayArtifactAdapter | None = None,
         scientific_artifacts: ScientificCandleReplayArtifactAdapter | None = None,
         prospective_artifacts: ProspectiveScientificReplayArtifactAdapter | None = None,
         live_candles: VersionedScientificCandleSource | None = None,
@@ -570,6 +586,9 @@ class LocalHypothesisPortfolioRunner:
         self._descriptor_cache = LocalCandleCache(self._cache_dir)
         self._live_candles = live_candles
         self._evidence_reader = evidence_reader or LocalReplayEvidenceReader()
+        self._r2_artifacts = r2_artifacts or R2ExtensionReplayArtifactAdapter(
+            self._artifact_root / "h10-h11-r2"
+        )
         self._scientific_artifacts = scientific_artifacts or (
             ScientificCandleReplayArtifactAdapter(
                 self._artifact_root / "h10-h11-h15-h7v2"
@@ -684,6 +703,44 @@ class LocalHypothesisPortfolioRunner:
                 tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
                 generated_at=generated_at,
             ))
+        requested_r2 = tuple(
+            R2ExtensionHypothesis(item)
+            for item in request.hypothesis_ids
+            if item in R2_EXTENSION_HYPOTHESES
+        )
+        if requested_r2:
+            r2_report = BuildR2ExtensionReplay(candle_cache).execute(
+                R2ExtensionRequest(
+                    selected_hypotheses=requested_r2,
+                    market_universe=request.liquid_universe,
+                    policy=R2ExtensionPolicy(
+                        cost_model_version=request.cost_model.version,
+                        round_trip_cost_bps=request.cost_model.round_trip_bps,
+                    ),
+                )
+            )
+            r2_artifact = self._r2_artifacts.save(
+                r2_report,
+                requested_r2,
+                cost_model_version=request.cost_model.version,
+                blocking_reason_codes=(
+                    "independent_evidence_gate_unavailable",
+                    "r2_reference_data_unavailable",
+                ),
+            )
+            engines.append(
+                {
+                    "engine": "causal_h10_h11_r2_replay",
+                    "hypothesis_ids": tuple(item.value for item in requested_r2),
+                    "application_run_id": r2_report.report_fingerprint,
+                    "artifact_fingerprint": r2_artifact.artifact_fingerprint,
+                    "artifact_uri": r2_artifact.artifact_uri,
+                    "resumed": False,
+                    "evidence_state": "blocked_by_data",
+                }
+            )
+            evidence.extend(r2_artifact.evidence)
+            del r2_report
         requested_scientific = tuple(
             ScientificCandleHypothesis(item)
             for item in request.hypothesis_ids
