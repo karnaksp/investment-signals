@@ -12,6 +12,7 @@ from tinvest_signal_engine.domain.hypothesis_evidence import ConfidenceInterval
 
 class SelectiveModelKind(str, Enum):
     SEALED_RULE = "sealed_rule"
+    SMOOTHED_PROBABILITY = "smoothed_probability"
     LOGISTIC_REGRESSION = "logistic_regression"
     GRADIENT_BOOSTED_TREES = "gradient_boosted_trees"
 
@@ -37,6 +38,7 @@ class SelectiveExample:
     feature_values: tuple[tuple[str, float], ...]
     cost_adjusted_result_bps: float
     cost_model_version: str
+    probability_stratum: str = "all"
 
     def __post_init__(self) -> None:
         if not all(
@@ -47,6 +49,7 @@ class SelectiveExample:
                 self.observation_id,
                 self.instrument_id,
                 self.cost_model_version,
+                self.probability_stratum,
             )
         ):
             raise ValueError("selective example identity must not be empty")
@@ -114,6 +117,9 @@ class SelectiveMetrics:
     brier_score: float
     expected_calibration_error: float
     calibration: tuple[CalibrationBin, ...]
+    coverage_day_interval: ConfidenceInterval | None = None
+    useful_rate_day_interval: ConfidenceInterval | None = None
+    mean_cost_adjusted_result_day_interval: ConfidenceInterval | None = None
 
     def __post_init__(self) -> None:
         if self.observations < 0 or self.acted_observations < 0:
@@ -140,6 +146,13 @@ class SelectiveMetrics:
             or self.mean_cost_adjusted_result_bps is None
         ):
             raise ValueError("selected sample requires acted metrics")
+        if self.observations == 0 and self.coverage_day_interval is not None:
+            raise ValueError("empty sample must not carry a coverage interval")
+        if self.acted_observations == 0 and (
+            self.useful_rate_day_interval is not None
+            or self.mean_cost_adjusted_result_day_interval is not None
+        ):
+            raise ValueError("empty selected sample must not carry selected intervals")
 
 
 @dataclass(frozen=True)
@@ -174,10 +187,15 @@ class SelectivePolicyResult:
     claim_allowed: bool
     hypothesis_changed: bool
     reason_codes: tuple[str, ...]
+    total_examples: int = 0
+    total_trading_days: int = 0
+    complex_model_gate_passed: bool = False
 
     def __post_init__(self) -> None:
         if min(self.train_examples, self.tune_examples, self.holdout_examples) < 0:
             raise ValueError("partition example counts must not be negative")
+        if self.total_examples < 0 or self.total_trading_days < 0:
+            raise ValueError("total sample counts must not be negative")
         if self.hypothesis_changed:
             raise ValueError("selective research must not change the sealed hypothesis")
         if self.claim_allowed and self.decision is not SelectiveResearchDecision.IMPROVED:
@@ -191,7 +209,7 @@ class SelectivePolicyResult:
 
 @dataclass(frozen=True)
 class SelectiveResearchPolicy:
-    version: str = "selective-meta-policy-v1.0.0"
+    version: str = "selective-meta-policy-v2.0.0"
     probability_thresholds: tuple[float, ...] = (
         0.50,
         0.55,
@@ -212,6 +230,9 @@ class SelectiveResearchPolicy:
     bootstrap_samples: int = 2_000
     bootstrap_seed: int = 41
     calibration_bins: int = 10
+    minimum_complex_examples: int = 3_000
+    minimum_complex_trading_days: int = 30
+    minimum_stable_blocks: int = 4
 
     def __post_init__(self) -> None:
         if not self.version.strip():
@@ -229,8 +250,13 @@ class SelectiveResearchPolicy:
             self.minimum_acted_examples,
             self.bootstrap_samples,
             self.calibration_bins,
+            self.minimum_complex_examples,
+            self.minimum_complex_trading_days,
+            self.minimum_stable_blocks,
         ) <= 0:
             raise ValueError("sample and calculation counts must be positive")
+        if self.minimum_stable_blocks > 5:
+            raise ValueError("minimum_stable_blocks must not exceed five")
         if not 0.0 < self.minimum_coverage <= 1.0:
             raise ValueError("minimum_coverage must be in (0, 1]")
         if self.minimum_lift_bps < 0.0:

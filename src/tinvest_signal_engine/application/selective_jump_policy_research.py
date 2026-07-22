@@ -27,7 +27,6 @@ from tinvest_signal_engine.application.selective_hypothesis_policy import (
 )
 from tinvest_signal_engine.domain.jump_activity_replay import (
     CandleBar,
-    JumpHypothesis,
     JumpReplayPolicy,
 )
 from tinvest_signal_engine.domain.selective_hypothesis_policy import (
@@ -36,7 +35,7 @@ from tinvest_signal_engine.domain.selective_hypothesis_policy import (
 )
 
 
-IMPLEMENTATION_VERSION = "selective-h3-h4-research-v1.0.0"
+IMPLEMENTATION_VERSION = "selective-h3-h4-research-v2.0.0"
 
 
 class SelectiveCandleCachePort(CandleCachePort, Protocol):
@@ -166,6 +165,10 @@ def build_selective_jump_dataset(
                     feature_values=values,
                     cost_adjusted_result_bps=outcome.net_effect_bps,
                     cost_model_version=outcome.cost_model_version,
+                    probability_stratum=(
+                        f"{feature.raw.session_bucket}|{feature.volatility_bucket}|"
+                        f"{feature.liquidity_bucket}|direction={feature.raw.direction}"
+                    ),
                 )
             )
     return SelectiveJumpDataset(

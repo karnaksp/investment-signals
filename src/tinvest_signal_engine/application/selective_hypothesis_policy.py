@@ -15,9 +15,11 @@ import json
 from typing import Protocol, Sequence
 
 from tinvest_signal_engine.domain.hypothesis_evidence import (
+    ConfidenceInterval,
     DatasetPartition,
     day_block_bootstrap_interval,
     chronological_split_60_20_20,
+    five_block_stability,
 )
 from tinvest_signal_engine.domain.selective_hypothesis_policy import (
     CalibrationBin,
@@ -75,6 +77,49 @@ class SelectivePortfolioExecution:
     result: SelectivePortfolioResult | None
 
 
+@dataclass(frozen=True)
+class _SmoothedProbabilityModel:
+    """Beta-binomial useful-rate estimate for preregistered strata."""
+
+    probabilities: dict[str, float]
+    fallback_probability: float
+
+    @classmethod
+    def fit(cls, examples: Sequence[SelectiveExample]) -> "_SmoothedProbabilityModel":
+        grouped: dict[str, list[bool]] = defaultdict(list)
+        for item in examples:
+            grouped[item.probability_stratum].append(item.useful)
+        successes = sum(item.useful for item in examples)
+        return cls(
+            probabilities={
+                key: (sum(values) + 1.0) / (len(values) + 2.0)
+                for key, values in sorted(grouped.items())
+            },
+            fallback_probability=(successes + 1.0) / (len(examples) + 2.0),
+        )
+
+    def predict(self, examples: Sequence[SelectiveExample]) -> tuple[float, ...]:
+        return tuple(
+            self.probabilities.get(item.probability_stratum, self.fallback_probability)
+            for item in examples
+        )
+
+
+@dataclass(frozen=True)
+class _LaterBlockCalibrator:
+    """Frozen reliability mapping learned only from the later tune block."""
+
+    bins: int
+    probabilities: tuple[float, ...]
+    fallback_probability: float
+
+    def apply(self, raw: Sequence[float]) -> tuple[float, ...]:
+        return tuple(
+            self.probabilities[min(int(value * self.bins), self.bins - 1)]
+            for value in raw
+        )
+
+
 class ResearchSelectiveHypothesisPolicy:
     """Select on validation and open the holdout only for the final gate."""
 
@@ -92,6 +137,12 @@ class ResearchSelectiveHypothesisPolicy:
             sorted(examples, key=lambda item: (item.trading_day, item.observed_at, item.observation_id))
         )
         identity, feature_names, cost_model = _validate_study(ordered)
+        total_days = len({item.trading_day for item in ordered})
+        complex_gate = (
+            len(ordered) >= self._policy.minimum_complex_examples
+            and total_days >= self._policy.minimum_complex_trading_days
+        )
+        seed = _study_seed(identity, self._policy.bootstrap_seed)
         split = chronological_split_60_20_20(tuple(item.trading_day for item in ordered))
         partitions = {
             partition: tuple(
@@ -110,12 +161,16 @@ class ResearchSelectiveHypothesisPolicy:
             tuple(train_rate for _ in tune),
             threshold=0.0,
             calibration_bins=self._policy.calibration_bins,
+            bootstrap_samples=self._policy.bootstrap_samples,
+            bootstrap_seed=seed,
         )
         holdout_rule = _metrics(
             holdout,
             tuple(train_rate for _ in holdout),
             threshold=0.0,
             calibration_bins=self._policy.calibration_bins,
+            bootstrap_samples=self._policy.bootstrap_samples,
+            bootstrap_seed=seed + 1,
         )
         rule_candidate = TuneCandidate(
             model_kind=SelectiveModelKind.SEALED_RULE,
@@ -148,70 +203,117 @@ class ResearchSelectiveHypothesisPolicy:
                 claim_allowed=False,
                 hypothesis_changed=False,
                 reason_codes=minimum_reasons,
+                total_examples=len(ordered),
+                total_trading_days=total_days,
+                complex_model_gate_passed=complex_gate,
             )
 
         train_rows = _matrix(train, feature_names)
         train_labels = tuple(int(item.useful) for item in train)
         tune_rows = _matrix(tune, feature_names)
+        tune_labels = tuple(int(item.useful) for item in tune)
         candidates = [rule_candidate]
         fitted: dict[SelectiveModelKind, FittedProbabilityEstimator] = {}
-        tune_predictions: dict[SelectiveModelKind, tuple[float, ...]] = {}
+        calibrators: dict[SelectiveModelKind, _LaterBlockCalibrator] = {}
+        smoothed = _SmoothedProbabilityModel.fit(train)
+        smoothed_raw = smoothed.predict(tune)
+        smoothed_calibrator = _fit_later_block_calibrator(
+            smoothed_raw, tune_labels, self._policy.calibration_bins
+        )
+        calibrators[SelectiveModelKind.SMOOTHED_PROBABILITY] = smoothed_calibrator
+        _append_tune_candidates(
+            candidates=candidates,
+            model_kind=SelectiveModelKind.SMOOTHED_PROBABILITY,
+            examples=tune,
+            probabilities=smoothed_calibrator.apply(smoothed_raw),
+            rule_metrics=tune_rule,
+            policy=self._policy,
+            seed=seed + 2,
+        )
         for model_kind in self._estimators.available_model_kinds():
-            if model_kind is SelectiveModelKind.SEALED_RULE:
+            if model_kind in {
+                SelectiveModelKind.SEALED_RULE,
+                SelectiveModelKind.SMOOTHED_PROBABILITY,
+            }:
+                continue
+            if not complex_gate:
+                reasons = []
+                if len(ordered) < self._policy.minimum_complex_examples:
+                    reasons.append("complex_model_minimum_examples_not_met")
+                if total_days < self._policy.minimum_complex_trading_days:
+                    reasons.append("complex_model_minimum_trading_days_not_met")
+                candidates.append(
+                    TuneCandidate(
+                        model_kind=model_kind,
+                        probability_threshold=self._policy.probability_thresholds[0],
+                        metrics=tune_rule,
+                        lift_over_sealed_rule_bps=None,
+                        eligible=False,
+                        reason_codes=tuple(reasons),
+                    )
+                )
                 continue
             estimator = self._estimators.fit(
                 model_kind=model_kind,
                 feature_names=feature_names,
                 rows=train_rows,
                 labels=train_labels,
-                seed=_study_seed(identity, self._policy.bootstrap_seed),
+                seed=seed,
             )
             if estimator is None:
-                continue
-            probabilities = _checked_probabilities(
-                estimator.predict_probabilities(tune_rows), len(tune)
-            )
-            fitted[model_kind] = estimator
-            tune_predictions[model_kind] = probabilities
-            for threshold in self._policy.probability_thresholds:
-                metrics = _metrics(
-                    tune,
-                    probabilities,
-                    threshold=threshold,
-                    calibration_bins=self._policy.calibration_bins,
-                )
-                lift = _mean_lift(metrics, tune_rule)
-                reasons = _candidate_reasons(metrics, lift, tune_rule, self._policy)
                 candidates.append(
                     TuneCandidate(
                         model_kind=model_kind,
-                        probability_threshold=threshold,
-                        metrics=metrics,
-                        lift_over_sealed_rule_bps=lift,
-                        eligible=not reasons,
-                        reason_codes=reasons,
+                        probability_threshold=self._policy.probability_thresholds[0],
+                        metrics=tune_rule,
+                        lift_over_sealed_rule_bps=None,
+                        eligible=False,
+                        reason_codes=("model_dependency_unavailable",),
                     )
                 )
+                continue
+            raw_probabilities = _checked_probabilities(
+                estimator.predict_probabilities(tune_rows), len(tune)
+            )
+            fitted[model_kind] = estimator
+            calibrator = _fit_later_block_calibrator(
+                raw_probabilities, tune_labels, self._policy.calibration_bins
+            )
+            calibrators[model_kind] = calibrator
+            _append_tune_candidates(
+                candidates=candidates,
+                model_kind=model_kind,
+                examples=tune,
+                probabilities=calibrator.apply(raw_probabilities),
+                rule_metrics=tune_rule,
+                policy=self._policy,
+                seed=seed + 3,
+            )
 
-        eligible_models = [
+        eligible_simple = [
             item
             for item in candidates
-            if item.model_kind is not SelectiveModelKind.SEALED_RULE and item.eligible
+            if item.model_kind is SelectiveModelKind.SMOOTHED_PROBABILITY
+            and item.eligible
         ]
-        selected = (
-            sorted(
-                eligible_models,
-                key=lambda item: (
-                    -(item.lift_over_sealed_rule_bps or 0.0),
-                    item.metrics.brier_score,
-                    -item.metrics.coverage,
-                    item.model_kind.value,
-                    item.probability_threshold,
-                ),
-            )[0]
-            if eligible_models
-            else rule_candidate
-        )
+        selected = _best_candidate(eligible_simple) if eligible_simple else rule_candidate
+        eligible_complex = [
+            item
+            for item in candidates
+            if item.model_kind
+            in {
+                SelectiveModelKind.LOGISTIC_REGRESSION,
+                SelectiveModelKind.GRADIENT_BOOSTED_TREES,
+            }
+            and item.eligible
+        ]
+        best_complex = _best_candidate(eligible_complex) if eligible_complex else None
+        if best_complex is not None and (
+            (best_complex.lift_over_sealed_rule_bps or 0.0)
+            >= (selected.lift_over_sealed_rule_bps or 0.0)
+            + self._policy.minimum_lift_bps
+        ):
+            selected = best_complex
         if selected.model_kind is SelectiveModelKind.SEALED_RULE:
             return SelectivePolicyResult(
                 hypothesis_id=identity[0],
@@ -234,17 +336,28 @@ class ResearchSelectiveHypothesisPolicy:
                 claim_allowed=False,
                 hypothesis_changed=False,
                 reason_codes=("no_tune_model_improved_sealed_rule",),
+                total_examples=len(ordered),
+                total_trading_days=total_days,
+                complex_model_gate_passed=complex_gate,
             )
 
-        holdout_probabilities = _checked_probabilities(
-            fitted[selected.model_kind].predict_probabilities(_matrix(holdout, feature_names)),
-            len(holdout),
-        )
+        if selected.model_kind is SelectiveModelKind.SMOOTHED_PROBABILITY:
+            holdout_raw = smoothed.predict(holdout)
+        else:
+            holdout_raw = _checked_probabilities(
+                fitted[selected.model_kind].predict_probabilities(
+                    _matrix(holdout, feature_names)
+                ),
+                len(holdout),
+            )
+        holdout_probabilities = calibrators[selected.model_kind].apply(holdout_raw)
         holdout_selected = _metrics(
             holdout,
             holdout_probabilities,
             threshold=selected.probability_threshold,
             calibration_bins=self._policy.calibration_bins,
+            bootstrap_samples=self._policy.bootstrap_samples,
+            bootstrap_seed=seed + 4,
         )
         holdout_lift = _mean_lift(holdout_selected, holdout_rule)
         interval = _selected_day_lift_interval(
@@ -264,6 +377,14 @@ class ResearchSelectiveHypothesisPolicy:
         )
         if interval is None or interval.lower <= 0.0:
             reasons.append("holdout_lift_lower_bound_not_positive")
+        stability = _selected_day_lift_stability(
+            holdout,
+            holdout_probabilities,
+            selected.probability_threshold,
+            required_positive_blocks=self._policy.minimum_stable_blocks,
+        )
+        if not stability.stable:
+            reasons.append("holdout_daily_lift_not_stable")
         improved = not reasons
         return SelectivePolicyResult(
             hypothesis_id=identity[0],
@@ -292,6 +413,9 @@ class ResearchSelectiveHypothesisPolicy:
             claim_allowed=improved,
             hypothesis_changed=False,
             reason_codes=tuple(dict.fromkeys(reasons)),
+            total_examples=len(ordered),
+            total_trading_days=total_days,
+            complex_model_gate_passed=complex_gate,
         )
 
 
@@ -357,12 +481,96 @@ def _checked_probabilities(
     return checked
 
 
+def _fit_later_block_calibrator(
+    probabilities: Sequence[float], labels: Sequence[int], bins: int
+) -> _LaterBlockCalibrator:
+    """Fit a Laplace-smoothed reliability table on the later time block."""
+
+    checked = _checked_probabilities(probabilities, len(labels))
+    if not checked:
+        raise ValueError("calibration requires later-block observations")
+    grouped: list[list[int]] = [[] for _ in range(bins)]
+    for probability, label in zip(checked, labels, strict=True):
+        grouped[min(int(probability * bins), bins - 1)].append(int(label))
+    fallback = (sum(labels) + 1.0) / (len(labels) + 2.0)
+    return _LaterBlockCalibrator(
+        bins=bins,
+        probabilities=tuple(
+            (sum(values) + 1.0) / (len(values) + 2.0) if values else fallback
+            for values in grouped
+        ),
+        fallback_probability=fallback,
+    )
+
+
+def _append_tune_candidates(
+    *,
+    candidates: list[TuneCandidate],
+    model_kind: SelectiveModelKind,
+    examples: Sequence[SelectiveExample],
+    probabilities: Sequence[float],
+    rule_metrics: SelectiveMetrics,
+    policy: SelectiveResearchPolicy,
+    seed: int,
+) -> None:
+    for threshold in policy.probability_thresholds:
+        metrics = _metrics(
+            examples,
+            probabilities,
+            threshold=threshold,
+            calibration_bins=policy.calibration_bins,
+            bootstrap_samples=policy.bootstrap_samples,
+            bootstrap_seed=seed,
+        )
+        lift = _mean_lift(metrics, rule_metrics)
+        reasons = list(_candidate_reasons(metrics, lift, rule_metrics, policy))
+        stability = _selected_day_lift_stability(
+            examples,
+            probabilities,
+            threshold,
+            required_positive_blocks=policy.minimum_stable_blocks,
+        )
+        if not stability.stable:
+            reasons.append("tune_daily_lift_not_stable")
+        candidates.append(
+            TuneCandidate(
+                model_kind=model_kind,
+                probability_threshold=threshold,
+                metrics=metrics,
+                lift_over_sealed_rule_bps=lift,
+                eligible=not reasons,
+                reason_codes=tuple(dict.fromkeys(reasons)),
+            )
+        )
+
+
+def _best_candidate(candidates: Sequence[TuneCandidate]) -> TuneCandidate:
+    complexity = {
+        SelectiveModelKind.SEALED_RULE: 0,
+        SelectiveModelKind.SMOOTHED_PROBABILITY: 1,
+        SelectiveModelKind.LOGISTIC_REGRESSION: 2,
+        SelectiveModelKind.GRADIENT_BOOSTED_TREES: 3,
+    }
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -(item.lift_over_sealed_rule_bps or 0.0),
+            complexity[item.model_kind],
+            item.metrics.brier_score,
+            -item.metrics.coverage,
+            item.probability_threshold,
+        ),
+    )[0]
+
+
 def _metrics(
     examples: Sequence[SelectiveExample],
     probabilities: Sequence[float],
     *,
     threshold: float,
     calibration_bins: int,
+    bootstrap_samples: int,
+    bootstrap_seed: int,
 ) -> SelectiveMetrics:
     probabilities = _checked_probabilities(probabilities, len(examples))
     if not examples:
@@ -391,6 +599,15 @@ def _metrics(
         * abs((item.mean_probability or 0.0) - (item.observed_useful_rate or 0.0))
         for item in calibration
     )
+    coverage_by_day: dict[date, list[float]] = defaultdict(list)
+    useful_by_day: dict[date, list[float]] = defaultdict(list)
+    result_by_day: dict[date, list[float]] = defaultdict(list)
+    for item, probability in zip(examples, probabilities, strict=True):
+        selected = probability >= threshold
+        coverage_by_day[item.trading_day].append(float(selected))
+        if selected:
+            useful_by_day[item.trading_day].append(float(item.useful))
+            result_by_day[item.trading_day].append(item.cost_adjusted_result_bps)
     return SelectiveMetrics(
         observations=len(examples),
         acted_observations=len(acted),
@@ -411,6 +628,15 @@ def _metrics(
         / len(examples),
         expected_calibration_error=expected_error,
         calibration=calibration,
+        coverage_day_interval=_day_interval(
+            coverage_by_day, samples=bootstrap_samples, seed=bootstrap_seed
+        ),
+        useful_rate_day_interval=_day_interval(
+            useful_by_day, samples=bootstrap_samples, seed=bootstrap_seed + 1
+        ),
+        mean_cost_adjusted_result_day_interval=_day_interval(
+            result_by_day, samples=bootstrap_samples, seed=bootstrap_seed + 2
+        ),
     )
 
 
@@ -498,6 +724,41 @@ def _selected_day_lift_interval(
     if len(differences) < 5:
         return None
     return day_block_bootstrap_interval(differences, samples=samples, seed=seed)
+
+
+def _day_interval(
+    values: dict[date, list[float]], *, samples: int, seed: int
+) -> ConfidenceInterval | None:
+    nonempty = {day: tuple(items) for day, items in values.items() if items}
+    if not nonempty:
+        return None
+    return day_block_bootstrap_interval(nonempty, samples=samples, seed=seed)
+
+
+def _selected_day_lift_stability(
+    examples: Sequence[SelectiveExample],
+    probabilities: Sequence[float],
+    threshold: float,
+    *,
+    required_positive_blocks: int,
+):
+    all_by_day: dict[date, list[float]] = defaultdict(list)
+    selected_by_day: dict[date, list[float]] = defaultdict(list)
+    for example, probability in zip(examples, probabilities, strict=True):
+        all_by_day[example.trading_day].append(example.cost_adjusted_result_bps)
+        if probability >= threshold:
+            selected_by_day[example.trading_day].append(example.cost_adjusted_result_bps)
+    daily_lift = {
+        day: (
+            sum(selected_by_day[day]) / len(selected_by_day[day])
+            - sum(values) / len(values),
+        )
+        for day, values in all_by_day.items()
+        if selected_by_day[day]
+    }
+    return five_block_stability(
+        daily_lift, required_positive_blocks=required_positive_blocks
+    )
 
 
 def _study_seed(identity: tuple[str, str, int], base: int) -> int:

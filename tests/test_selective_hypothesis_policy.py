@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,14 @@ class _ConstantFactory(_ScoreFactory):
         return _ConstantEstimator()
 
 
+class _EmptyFactory:
+    def available_model_kinds(self):
+        return ()
+
+    def fit(self, **kwargs):
+        raise AssertionError("empty factory must never fit")
+
+
 def _policy() -> SelectiveResearchPolicy:
     return SelectiveResearchPolicy(
         probability_thresholds=(0.5, 0.7, 0.9),
@@ -65,6 +74,8 @@ def _policy() -> SelectiveResearchPolicy:
         minimum_lift_bps=1.0,
         bootstrap_samples=200,
         calibration_bins=5,
+        minimum_complex_examples=100,
+        minimum_complex_trading_days=30,
     )
 
 
@@ -153,6 +164,74 @@ def test_no_tune_improvement_retains_sealed_rule() -> None:
     assert result.claim_allowed is False
 
 
+def test_smoothed_probability_can_select_a_stable_preregistered_stratum() -> None:
+    examples = tuple(
+        replace(
+            item,
+            probability_stratum=("supported" if item.feature_values[0][1] > 0.5 else "weak"),
+        )
+        for item in _examples()
+    )
+    result = ResearchSelectiveHypothesisPolicy(
+        estimator_factory=_EmptyFactory(), policy=_policy()
+    ).execute(examples)
+
+    assert result.tune_selected_model is SelectiveModelKind.SMOOTHED_PROBABILITY
+    assert result.deployment_model is SelectiveModelKind.SMOOTHED_PROBABILITY
+    assert result.holdout_selected_metrics.coverage == 0.5
+    assert result.holdout_selected_metrics.useful_rate_when_acted == 1.0
+
+
+def test_complex_models_are_blocked_before_three_thousand_events() -> None:
+    result = ResearchSelectiveHypothesisPolicy(
+        estimator_factory=_ScoreFactory(),
+        policy=replace(
+            _policy(),
+            minimum_complex_examples=3_000,
+            minimum_complex_trading_days=30,
+        ),
+    ).execute(_examples())
+
+    blocked = [
+        item
+        for item in result.tune_candidates
+        if item.model_kind is SelectiveModelKind.LOGISTIC_REGRESSION
+    ]
+    assert result.complex_model_gate_passed is False
+    assert len(blocked) == 1
+    assert blocked[0].reason_codes == ("complex_model_minimum_examples_not_met",)
+
+
+def test_complex_model_gate_opens_at_three_thousand_events_and_thirty_days() -> None:
+    base = _examples()[:60]
+    examples = tuple(
+        replace(
+            item,
+            observation_id=f"{item.observation_id}-{copy}",
+            observed_at=item.observed_at + timedelta(seconds=copy),
+            feature_max_observed_at=item.feature_max_observed_at + timedelta(seconds=copy),
+        )
+        for item in base
+        for copy in range(50)
+    )
+    factory = _ScoreFactory()
+    result = ResearchSelectiveHypothesisPolicy(
+        estimator_factory=factory,
+        policy=replace(
+            _policy(),
+            probability_thresholds=(0.5,),
+            minimum_complex_examples=3_000,
+            minimum_complex_trading_days=30,
+            bootstrap_samples=20,
+        ),
+    ).execute(examples)
+
+    assert result.total_examples == 3_000
+    assert result.total_trading_days == 30
+    assert result.complex_model_gate_passed is True
+    assert len(factory.fit_labels) == 1
+
+
 def test_generic_hypothesis_contract_and_calibration_are_supported() -> None:
     examples = tuple(
         replace(item, hypothesis_id="OTHER-SCIENTIFIC-HYPOTHESIS")
@@ -163,8 +242,14 @@ def test_generic_hypothesis_contract_and_calibration_are_supported() -> None:
     ).execute(examples)
 
     assert result.hypothesis_id == "OTHER-SCIENTIFIC-HYPOTHESIS"
-    assert result.holdout_selected_metrics.brier_score == pytest.approx(0.01)
-    assert result.holdout_selected_metrics.expected_calibration_error == pytest.approx(0.1)
+    assert result.holdout_selected_metrics.brier_score == pytest.approx(1 / 144)
+    assert result.holdout_selected_metrics.expected_calibration_error == pytest.approx(1 / 12)
+    assert result.holdout_selected_metrics.coverage_day_interval is not None
+    assert result.holdout_selected_metrics.useful_rate_day_interval is not None
+    assert (
+        result.holdout_selected_metrics.mean_cost_adjusted_result_day_interval
+        is not None
+    )
     assert sum(
         item.observations for item in result.holdout_selected_metrics.calibration
     ) == result.holdout_selected_metrics.observations
@@ -201,6 +286,14 @@ def test_optional_estimators_are_deterministic() -> None:
             labels=labels,
             seed=123,
         )
+        dependency = (
+            "sklearn"
+            if kind is SelectiveModelKind.LOGISTIC_REGRESSION
+            else "lightgbm"
+        )
+        if importlib.util.find_spec(dependency) is None:
+            assert first is None and second is None
+            continue
         assert first is not None and second is not None
         assert first.predict_probabilities(rows) == pytest.approx(
             second.predict_probabilities(rows)
@@ -226,6 +319,11 @@ def test_artifact_is_immutable_and_reusable(tmp_path: Path) -> None:
     assert (Path(uri) / "leaderboard.csv").is_file()
     assert (Path(uri) / "report.md").is_file()
     assert adapter.persist(result) == uri
+
+    (Path(uri) / "leaderboard.csv").write_text("corrupted", encoding="utf-8")
+    assert adapter.completed_uri(result.run_id, result.input_fingerprint) is None
+    with pytest.raises(RuntimeError, match="immutable"):
+        adapter.persist(result)
 
 
 def test_completed_portfolio_skips_candle_loading() -> None:
