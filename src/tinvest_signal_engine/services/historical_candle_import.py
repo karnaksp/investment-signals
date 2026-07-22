@@ -52,6 +52,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     run.add_argument("--start-day", type=date.fromisoformat)
     run.add_argument("--end-day", type=date.fromisoformat)
     run.add_argument("--max-partitions", type=int)
+    run.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="import only partitions sealed by the current cache manifest",
+    )
     run.add_argument("--dry-run", action="store_true")
     status = subcommands.add_parser("status")
     status.add_argument(
@@ -106,6 +111,7 @@ def _run(
         start_day=args.start_day.isoformat() if args.start_day else None,
         end_day=args.end_day.isoformat() if args.end_day else None,
         max_partitions=args.max_partitions,
+        manifest_only=args.manifest_only,
     )
     try:
         instruments = {

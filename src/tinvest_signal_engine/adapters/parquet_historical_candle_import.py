@@ -51,11 +51,13 @@ class ParquetHistoricalCandleImportSource:
         start_day: str | None = None,
         end_day: str | None = None,
         max_partitions: int | None = None,
+        manifest_only: bool = False,
     ) -> None:
         self._cache_dir = Path(cache_dir).expanduser().resolve()
         self._tickers = frozenset(item.strip().upper() for item in tickers if item.strip())
         self._start_day = start_day
         self._end_day = end_day
+        self._manifest_only = manifest_only
         if max_partitions is not None and max_partitions <= 0:
             raise ValueError("max_partitions must be positive")
         self._max_partitions = max_partitions
@@ -83,16 +85,31 @@ class ParquetHistoricalCandleImportSource:
             descriptor = self._descriptor(path)
             if descriptor is None:
                 continue
+            if (
+                self._manifest_only
+                and descriptor.key.manifest_key not in self._manifest_rows
+            ):
+                continue
             self._paths[descriptor.key] = path
             descriptors.append(descriptor)
         descriptors.sort(key=lambda item: item.key)
         if self._max_partitions is not None:
             descriptors = descriptors[: self._max_partitions]
             self._paths = {item.key: self._paths[item.key] for item in descriptors}
-        if not descriptors:
-            raise ValueError("historical candle cache contains no selected partitions")
         selected_keys = {item.key.manifest_key for item in descriptors}
         covered = len(selected_keys.intersection(self._manifest_rows))
+        if self._manifest_only:
+            expected = sorted(
+                key for key in self._manifest_rows if self._manifest_key_selected(key)
+            )
+            if self._max_partitions is not None:
+                expected = expected[: self._max_partitions]
+            if selected_keys != set(expected):
+                raise ValueError(
+                    "manifest-only historical inventory differs from sealed partitions"
+                )
+        if not descriptors:
+            raise ValueError("historical candle cache contains no selected partitions")
         source_manifest_checksum = "sha256:" + sha256(manifest_bytes).hexdigest()
         frozen = tuple(descriptors)
         self._inventory = HistoricalCandleImportInventory(
@@ -217,6 +234,22 @@ class ParquetHistoricalCandleImportSource:
             file_checksum=_file_checksum(path),
             file_size=size,
         )
+
+    def _manifest_key_selected(self, key: str) -> bool:
+        try:
+            ticker, day = key.split("/", maxsplit=1)
+        except ValueError as error:
+            raise ValueError("historical manifest partition key is invalid") from error
+        ticker = ticker.strip().upper()
+        if not ticker or not _PARTITION.fullmatch(f"date={day}.parquet"):
+            raise ValueError("historical manifest partition key is invalid")
+        if self._tickers and ticker not in self._tickers:
+            return False
+        if self._start_day is not None and day < self._start_day:
+            return False
+        if self._end_day is not None and day > self._end_day:
+            return False
+        return True
 
     def _read(self, path: Path) -> tuple[dict[str, object], ...]:
         if self._duckdb_connection is None:

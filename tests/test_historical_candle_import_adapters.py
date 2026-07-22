@@ -104,6 +104,37 @@ def test_parquet_source_validates_manifest_and_independent_extra_partition(
     assert first.candles[0].source_event_id.startswith("backfill-v1:SBER_TQBR:")
 
 
+def test_parquet_source_manifest_only_ignores_stale_extra_partition(
+    tmp_path: Path,
+) -> None:
+    source = ParquetHistoricalCandleImportSource(
+        _cache_with_extra_partition(tmp_path),
+        manifest_only=True,
+    )
+    try:
+        inventory = source.inventory()
+    finally:
+        source.close()
+
+    assert tuple(
+        item.key.manifest_key for item in inventory.partitions
+    ) == ("SBER/2026-07-01",)
+    assert inventory.manifest_covered_partitions == len(inventory.partitions) == 1
+
+
+def test_parquet_source_manifest_only_rejects_missing_sealed_partition(
+    tmp_path: Path,
+) -> None:
+    cache = _cache_with_extra_partition(tmp_path)
+    (cache / "ticker=SBER" / "date=2026-07-01.parquet").unlink()
+    source = ParquetHistoricalCandleImportSource(cache, manifest_only=True)
+    try:
+        with pytest.raises(ValueError, match="differs from sealed partitions"):
+            source.inventory()
+    finally:
+        source.close()
+
+
 def test_parquet_source_rejects_manifest_row_count_mismatch(tmp_path: Path) -> None:
     _cache_with_extra_partition(tmp_path)
     path = tmp_path / "manifest.json"

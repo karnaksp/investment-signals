@@ -359,6 +359,8 @@ def test_cli_defaults_to_large_clickhouse_batches_and_status_is_aggregate(
     args = parse_args(["run"])
     assert args.batch_size == 50_000
     assert args.partition_group_size == 50
+    assert args.manifest_only is False
+    assert parse_args(["run", "--manifest-only"]).manifest_only is True
     assert main(["status", "--state-dir", str(tmp_path)]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
