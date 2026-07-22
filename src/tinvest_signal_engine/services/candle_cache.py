@@ -86,7 +86,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ca_bundle_path = args.ca_cert.expanduser() if args.ca_cert is not None else None
     if ca_bundle_path is not None and not ca_bundle_path.is_file():
         raise SystemExit(f"Trusted CA bundle does not exist: {ca_bundle_path}")
-    tickers = tuple(item.strip().upper() for item in args.tickers.split(",") if item.strip())
+    tickers = tuple(
+        item.strip().upper() for item in args.tickers.split(",") if item.strip()
+    )
     if args.start_day is not None or args.end_day is not None:
         if args.start_day is None or args.end_day is None:
             raise SystemExit("--start-day and --end-day must be provided together")
@@ -111,13 +113,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         request_interval_seconds=args.request_interval,
         ca_bundle_path=ca_bundle_path,
     )
+    repository = ParquetCandlePartitionRepository(args.cache_dir)
     try:
         receipt = BuildReusableCandleCache(
             source=source,
-            repository=ParquetCandlePartitionRepository(args.cache_dir),
+            repository=repository,
             manifest=JsonCandleCacheManifest(args.cache_dir),
         ).execute(scope)
     finally:
+        repository.close()
         source.close()
     print(
         json.dumps(

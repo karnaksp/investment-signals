@@ -62,7 +62,9 @@ def _use_case(cache_dir: Path, source: _Source) -> BuildReusableCandleCache:
     )
 
 
-def test_cache_resume_skips_valid_partition_and_keeps_fingerprint(tmp_path: Path) -> None:
+def test_cache_resume_skips_valid_partition_and_keeps_fingerprint(
+    tmp_path: Path,
+) -> None:
     day = date(2026, 7, 15)
     key = CandlePartitionKey("SBER", day)
     source = _Source({key.manifest_key: (_candle("SBER", day),)})
@@ -77,7 +79,9 @@ def test_cache_resume_skips_valid_partition_and_keeps_fingerprint(tmp_path: Path
     assert second.written_partitions == 0
     assert second.skipped_partitions == 1
     assert second.inventory.dataset_fingerprint == first.inventory.dataset_fingerprint
-    assert (tmp_path / "ticker=SBER" / "date=2026-07-15.parquet").read_bytes() == first_bytes
+    assert (
+        tmp_path / "ticker=SBER" / "date=2026-07-15.parquet"
+    ).read_bytes() == first_bytes
     compatible_cache = LocalCandleCache(tmp_path)
     assert compatible_cache.describe().dataset_fingerprint == (
         f"sha256:{first.inventory.dataset_fingerprint}"
@@ -93,13 +97,43 @@ def test_corrupted_partition_is_detected_and_replaced(tmp_path: Path) -> None:
     target.write_bytes(b"not parquet")
     source = _Source({key.manifest_key: (_candle("SBER", day),)})
 
-    receipt = _use_case(tmp_path, source).execute(
-        CandleCacheScope(("SBER",), day, day)
-    )
+    receipt = _use_case(tmp_path, source).execute(CandleCacheScope(("SBER",), day, day))
 
     assert receipt.written_partitions == 1
     assert not receipt.failures
     assert ParquetCandlePartitionRepository(tmp_path).inspect(key).valid is True
+
+
+def test_partition_repository_reuses_one_database_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connections: list[object] = []
+
+    class Connection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class DuckDB:
+        @staticmethod
+        def connect(*, database: str) -> Connection:
+            assert database == ":memory:"
+            connection = Connection()
+            connections.append(connection)
+            return connection
+
+    monkeypatch.setattr(candle_cache_adapter, "_duckdb", lambda: DuckDB())
+    repository = ParquetCandlePartitionRepository(tmp_path)
+
+    first = repository._database_connection()
+    second = repository._database_connection()
+    repository.close()
+
+    assert first is second
+    assert len(connections) == 1
+    assert first.closed is True
 
 
 def test_manifest_distinguishes_empty_day_and_records_actual_morning_rows(
@@ -244,10 +278,9 @@ def test_failed_fetch_does_not_change_existing_valid_partition_or_leak_secrets(
     assert receipt.skipped_partitions == 1
     assert len(receipt.failures) == 1
     assert target.read_bytes() == before
-    persisted = (
-        (tmp_path / "manifest.json").read_text(encoding="utf-8")
-        + (tmp_path / "failure-summary.json").read_text(encoding="utf-8")
-    )
+    persisted = (tmp_path / "manifest.json").read_text(encoding="utf-8") + (
+        tmp_path / "failure-summary.json"
+    ).read_text(encoding="utf-8")
     assert secret not in persisted
     assert account not in persisted
     assert uid not in persisted
@@ -260,7 +293,9 @@ def test_failed_fetch_does_not_change_existing_valid_partition_or_leak_secrets(
     assert manifest["quality"]["rows_by_partition"] == {"SBER/2026-07-15": 1}
 
 
-def test_rest_source_keeps_uid_out_of_returned_candles_and_requests_full_session() -> None:
+def test_rest_source_keeps_uid_out_of_returned_candles_and_requests_full_session() -> (
+    None
+):
     uid = "raw-instrument-uid"
     requests: list[httpx.Request] = []
 

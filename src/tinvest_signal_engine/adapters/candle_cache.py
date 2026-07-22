@@ -189,6 +189,12 @@ class ParquetCandlePartitionRepository:
 
     def __init__(self, cache_dir: str | Path) -> None:
         self._cache_dir = Path(cache_dir)
+        self._database: Any | None = None
+
+    def close(self) -> None:
+        database, self._database = self._database, None
+        if database is not None:
+            database.close()
 
     def inspect(self, key: CandlePartitionKey) -> CandlePartitionState:
         path = self._path(key)
@@ -267,36 +273,33 @@ class ParquetCandlePartitionRepository:
             / f"date={key.trading_day.isoformat()}.parquet"
         )
 
-    @staticmethod
-    def _read(path: Path) -> tuple[dict[str, object], ...]:
-        duckdb = _duckdb()
-        connection = duckdb.connect(database=":memory:")
-        try:
-            rows = connection.execute(
-                "SELECT * FROM read_parquet(?)",
-                [str(path)],
-            ).fetchall()
-            columns = tuple(item[0] for item in connection.description)
-            if not set(_FIELDS).issubset(columns):
-                raise ValueError("candle partition schema is incomplete")
-            return tuple(dict(zip(columns, row)) for row in rows)
-        finally:
-            connection.close()
+    def _read(self, path: Path) -> tuple[dict[str, object], ...]:
+        database = self._database_connection()
+        rows = database.execute(
+            "SELECT * FROM read_parquet(?)",
+            [str(path)],
+        ).fetchall()
+        columns = tuple(item[0] for item in database.description)
+        if not set(_FIELDS).issubset(columns):
+            raise ValueError("candle partition schema is incomplete")
+        return tuple(dict(zip(columns, row)) for row in rows)
 
-    @staticmethod
-    def _write(path: Path, records: tuple[Mapping[str, object], ...]) -> None:
+    def _write(
+        self,
+        path: Path,
+        records: tuple[Mapping[str, object], ...],
+    ) -> None:
         csv_path = path.with_suffix(path.suffix + ".csv")
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=_FIELDS)
             writer.writeheader()
             writer.writerows(records)
-        duckdb = _duckdb()
-        connection = duckdb.connect(database=":memory:")
+        database = self._database_connection()
         try:
             if records:
                 source = _sql_literal(csv_path)
                 output = _sql_literal(path)
-                connection.execute(
+                database.execute(
                     f"COPY (SELECT * FROM read_csv_auto('{source}')) "
                     f"TO '{output}' (FORMAT PARQUET)"
                 )
@@ -305,13 +308,17 @@ class ParquetCandlePartitionRepository:
                     f'CAST(NULL AS VARCHAR) AS "{field}"' for field in _FIELDS
                 )
                 output = _sql_literal(path)
-                connection.execute(
+                database.execute(
                     f"COPY (SELECT {projection} WHERE false) "
                     f"TO '{output}' (FORMAT PARQUET)"
                 )
         finally:
-            connection.close()
             csv_path.unlink(missing_ok=True)
+
+    def _database_connection(self) -> Any:
+        if self._database is None:
+            self._database = _duckdb().connect(database=":memory:")
+        return self._database
 
     @staticmethod
     def _validate(
@@ -384,9 +391,7 @@ class JsonCandleCacheManifest:
                     "rows_by_partition": dict(
                         receipt.inventory.morning_rows_by_partition
                     ),
-                    "rows_present": bool(
-                        receipt.inventory.morning_rows_by_partition
-                    ),
+                    "rows_present": bool(receipt.inventory.morning_rows_by_partition),
                 },
             },
             "content_fingerprint": receipt.inventory.dataset_fingerprint,
@@ -439,8 +444,10 @@ def _record(candle: CachedCandle) -> dict[str, object]:
 
 def _cached_candle(record: Mapping[str, object]) -> CachedCandle:
     raw_at = record["at"]
-    at = raw_at if isinstance(raw_at, datetime) else datetime.fromisoformat(
-        str(raw_at).replace("Z", "+00:00")
+    at = (
+        raw_at
+        if isinstance(raw_at, datetime)
+        else datetime.fromisoformat(str(raw_at).replace("Z", "+00:00"))
     )
     if at.tzinfo is None or at.utcoffset() is None:
         at = at.replace(tzinfo=UTC)
@@ -463,7 +470,9 @@ def _update_records_fingerprint(
     records: tuple[Mapping[str, object], ...],
 ) -> None:
     canonical = (_record(_cached_candle(item)) for item in records)
-    for record in sorted(canonical, key=lambda item: (str(item["ticker"]), str(item["at"]))):
+    for record in sorted(
+        canonical, key=lambda item: (str(item["ticker"]), str(item["at"]))
+    ):
         digest.update(
             json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
