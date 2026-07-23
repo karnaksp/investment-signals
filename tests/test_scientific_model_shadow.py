@@ -25,6 +25,7 @@ from tinvest_signal_engine.domain.scientific_model_shadow import (
     ShadowModelExample,
     ShadowModelKind,
     ShadowResultState,
+    ShadowSelectionState,
     ShadowStudyKind,
     ShadowStudyScope,
 )
@@ -181,6 +182,41 @@ def test_fit_uses_only_earliest_chronological_trading_days(tmp_path: Path) -> No
     assert all(max(row[1] for row in fitted) == 5.0 for fitted in factory.fit_rows)
 
 
+def test_action_threshold_is_fixed_before_holdout_outcomes_are_opened(
+    tmp_path: Path,
+) -> None:
+    original = _dataset(("H1",))
+    changed_holdout = replace(
+        original,
+        examples=tuple(
+            replace(
+                item,
+                effect_value=(
+                    -item.effect_value
+                    if item.observation_id.split("-")[-2] in {"8", "9"}
+                    else item.effect_value
+                ),
+            )
+            for item in original.examples
+        ),
+    )
+
+    first = _run(tmp_path / "first", original, _policy(("H1",)))
+    second = _run(tmp_path / "second", changed_holdout, _policy(("H1",)))
+
+    assert first.result is not None
+    assert second.result is not None
+    first_thresholds = {
+        item.model_kind: item.action_probability_threshold
+        for item in first.result.results[0].models
+    }
+    second_thresholds = {
+        item.model_kind: item.action_probability_threshold
+        for item in second.result.results[0].models
+    }
+    assert first_thresholds == second_thresholds
+
+
 def test_same_sealed_input_reuses_byte_identical_artifact(tmp_path: Path) -> None:
     dataset = _dataset(("H1",))
     first = _run(tmp_path, dataset, _policy(("H1",)))
@@ -214,6 +250,140 @@ def test_c1_c4_are_compared_without_changing_causal_gate(tmp_path: Path) -> None
         {model.model_kind for model in item.models} == set(ShadowModelKind)
         for item in execution.result.results
     )
+    assert len(ShadowModelKind) == 4
+
+
+def test_selects_logistic_model_only_after_stable_late_improvement(
+    tmp_path: Path,
+) -> None:
+    execution = _run(tmp_path, _dataset(("C1",)), _policy(("C1",)))
+
+    assert execution.result is not None
+    study = execution.result.results[0]
+    by_kind = {item.model_kind: item for item in study.models}
+    assert study.selection_state is ShadowSelectionState.SELECTED
+    assert study.selected_model_kind is ShadowModelKind.LOGISTIC_REGRESSION
+    assert study.selection_reason_codes == (
+        "complexity_selected_after_stable_improvement",
+    )
+    assert by_kind[ShadowModelKind.SCIENTIFIC_RULE].metrics is not None
+    assert by_kind[ShadowModelKind.SCIENTIFIC_RULE].metrics.coverage == 1.0
+    assert by_kind[ShadowModelKind.LOGISTIC_REGRESSION].validation_metrics is not None
+    assert (
+        by_kind[
+            ShadowModelKind.LOGISTIC_REGRESSION
+        ].validation_metrics.useful_rate_when_acted
+        == 1.0
+    )
+    assert by_kind[ShadowModelKind.LOGISTIC_REGRESSION].metrics is not None
+    assert (
+        by_kind[ShadowModelKind.LOGISTIC_REGRESSION].metrics.useful_rate_when_acted
+        == 1.0
+    )
+
+
+class _UnavailableFactory:
+    def fit(
+        self,
+        *,
+        model_kind: ShadowModelKind,
+        feature_names: tuple[str, ...],
+        rows: Sequence[FeatureRow],
+        labels: Sequence[int],
+        seed: int,
+    ) -> None:
+        del model_kind, feature_names, rows, labels, seed
+        return None
+
+
+def test_abstains_when_no_model_is_stable_on_validation_and_holdout(
+    tmp_path: Path,
+) -> None:
+    execution = _run(
+        tmp_path,
+        _dataset(("C1",)),
+        _policy(("C1",)),
+        _UnavailableFactory(),  # type: ignore[arg-type]
+    )
+
+    assert execution.result is not None
+    study = execution.result.results[0]
+    assert study.selection_state is ShadowSelectionState.ABSTAIN
+    assert study.selected_model_kind is None
+    assert study.selection_reason_codes == (
+        "no_model_stable_on_validation_and_holdout",
+    )
+
+
+def test_keeps_scientific_rule_when_probability_adds_no_stable_value(
+    tmp_path: Path,
+) -> None:
+    source = _dataset(("H1",))
+    dataset = replace(
+        source,
+        examples=tuple(
+            replace(
+                item,
+                effect_value=(-5.0 if item.observation_id.endswith("-3") else 5.0),
+            )
+            for item in source.examples
+        ),
+    )
+    execution = _run(
+        tmp_path,
+        dataset,
+        _policy(("H1",)),
+        _UnavailableFactory(),  # type: ignore[arg-type]
+    )
+
+    assert execution.result is not None
+    study = execution.result.results[0]
+    assert study.selection_state is ShadowSelectionState.SELECTED
+    assert study.selected_model_kind is ShadowModelKind.SCIENTIFIC_RULE
+    assert study.selection_reason_codes == ("simplest_stable_candidate_selected",)
+
+
+def test_rejects_aggregate_gain_that_is_not_stable_across_late_blocks(
+    tmp_path: Path,
+) -> None:
+    source = _dataset(("H1",))
+    dataset = replace(
+        source,
+        examples=tuple(
+            replace(
+                item,
+                effect_value=(
+                    10.0
+                    if item.observation_id.split("-")[-2] == "8"
+                    else (
+                        -1.0
+                        if item.observation_id.split("-")[-2] == "9"
+                        else item.effect_value
+                    )
+                ),
+            )
+            for item in source.examples
+        ),
+    )
+    execution = _run(
+        tmp_path,
+        dataset,
+        _policy(("H1",)),
+        _UnavailableFactory(),  # type: ignore[arg-type]
+    )
+
+    assert execution.result is not None
+    study = execution.result.results[0]
+    rule = next(
+        item
+        for item in study.models
+        if item.model_kind is ShadowModelKind.SCIENTIFIC_RULE
+    )
+    assert rule.metrics is not None
+    assert rule.metrics.mean_effect_when_acted == 4.5
+    assert rule.holdout_positive_stability_blocks == 1
+    assert rule.holdout_total_stability_blocks == 2
+    assert study.selection_state is ShadowSelectionState.ABSTAIN
 
 
 def test_small_sample_is_persisted_as_blocked_by_data(tmp_path: Path) -> None:
@@ -267,6 +437,9 @@ def test_artifact_contains_accuracy_calibration_cost_and_abstention(
     assert "abstention_rate" in leaderboard
     assert "cost_model_version" in leaderboard
     assert "observed_useful_rate" in calibration
+    selection = Path(execution.artifact_uri, "selection.csv").read_text()
+    assert "selection_state" in selection
+    assert "claim_allowed" in selection
     assert manifest["causal_evidence_gate_unchanged"] is True
     assert manifest["claim_allowed"] is False
 

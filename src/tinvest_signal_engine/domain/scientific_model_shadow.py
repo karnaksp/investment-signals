@@ -18,6 +18,7 @@ class ShadowStudyKind(str, Enum):
 
 
 class ShadowModelKind(str, Enum):
+    SCIENTIFIC_RULE = "scientific_rule"
     BASE_RATE = "base_rate"
     LOGISTIC_REGRESSION = "logistic_regression"
     GRADIENT_BOOSTING = "gradient_boosting"
@@ -26,6 +27,11 @@ class ShadowModelKind(str, Enum):
 class ShadowResultState(str, Enum):
     READY = "ready"
     BLOCKED_BY_DATA = "blocked_by_data"
+
+
+class ShadowSelectionState(str, Enum):
+    SELECTED = "selected"
+    ABSTAIN = "abstain"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,12 +195,42 @@ class ShadowModelEvaluation:
     state: ShadowResultState
     metrics: ShadowModelMetrics | None
     reason_codes: tuple[str, ...]
+    validation_metrics: ShadowModelMetrics | None = None
+    action_probability_threshold: float | None = None
+    holdout_positive_stability_blocks: int | None = None
+    holdout_total_stability_blocks: int | None = None
 
     def __post_init__(self) -> None:
         if self.state is ShadowResultState.READY and self.metrics is None:
             raise ValueError("ready shadow model requires metrics")
         if self.state is ShadowResultState.BLOCKED_BY_DATA and not self.reason_codes:
             raise ValueError("blocked shadow model requires a reason")
+        if self.state is ShadowResultState.READY and self.validation_metrics is None:
+            raise ValueError("ready shadow model requires validation metrics")
+        if (
+            self.state is ShadowResultState.READY
+            and self.action_probability_threshold is None
+        ):
+            raise ValueError("ready shadow model requires an action threshold")
+        if (
+            self.action_probability_threshold is not None
+            and not 0.0 <= self.action_probability_threshold <= 1.0
+        ):
+            raise ValueError("shadow action threshold must be in [0, 1]")
+        stability = (
+            self.holdout_positive_stability_blocks,
+            self.holdout_total_stability_blocks,
+        )
+        if self.state is ShadowResultState.READY and any(
+            value is None for value in stability
+        ):
+            raise ValueError("ready shadow model requires temporal stability")
+        if self.state is ShadowResultState.READY and not (
+            0
+            <= (self.holdout_positive_stability_blocks or 0)
+            <= (self.holdout_total_stability_blocks or 0)
+        ):
+            raise ValueError("shadow temporal stability counts are invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +246,26 @@ class ShadowStudyResult:
     feature_names: tuple[str, ...]
     models: tuple[ShadowModelEvaluation, ...]
     reason_codes: tuple[str, ...]
+    selection_state: ShadowSelectionState = ShadowSelectionState.ABSTAIN
+    selected_model_kind: ShadowModelKind | None = None
+    selection_reason_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            self.selection_state is ShadowSelectionState.SELECTED
+            and self.selected_model_kind is None
+        ):
+            raise ValueError("selected shadow study requires a model")
+        if (
+            self.selection_state is ShadowSelectionState.ABSTAIN
+            and self.selected_model_kind is not None
+        ):
+            raise ValueError("abstaining shadow study cannot select a model")
+        if (
+            self.selection_state is ShadowSelectionState.ABSTAIN
+            and not self.selection_reason_codes
+        ):
+            raise ValueError("abstaining shadow study requires a reason")
 
 
 @dataclass(frozen=True, slots=True)

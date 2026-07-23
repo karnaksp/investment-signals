@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
+from math import ceil
 from typing import Protocol, Sequence
 
 from tinvest_signal_engine.domain.hypothesis_evidence import (
@@ -21,6 +22,7 @@ from tinvest_signal_engine.domain.scientific_model_shadow import (
     ShadowModelMetrics,
     ShadowPortfolioResult,
     ShadowResultState,
+    ShadowSelectionState,
     ShadowStudyResult,
 )
 
@@ -82,6 +84,19 @@ class ShadowComparisonPolicy:
     minimum_total_trading_days: int = 30
     minimum_holdout_trading_days: int = 5
     action_probability_threshold: float = 0.60
+    candidate_action_thresholds: tuple[float, ...] = (
+        0.60,
+        0.65,
+        0.70,
+        0.75,
+        0.80,
+        0.85,
+        0.90,
+    )
+    minimum_model_coverage: float = 0.10
+    minimum_complexity_useful_rate_improvement: float = 0.02
+    stability_blocks: int = 5
+    minimum_positive_stability_fraction: float = 0.80
     calibration_bins: int = 10
     seed: int = 20260722
 
@@ -100,12 +115,34 @@ class ShadowComparisonPolicy:
             self.minimum_holdout_examples,
             self.minimum_total_trading_days,
             self.minimum_holdout_trading_days,
+            self.stability_blocks,
             self.calibration_bins,
         )
         if any(value <= 0 for value in counts):
             raise ValueError("shadow sample requirements must be positive")
         if not 0.0 <= self.action_probability_threshold <= 1.0:
             raise ValueError("shadow action threshold must be in [0, 1]")
+        if (
+            not self.candidate_action_thresholds
+            or tuple(sorted(set(self.candidate_action_thresholds)))
+            != self.candidate_action_thresholds
+            or any(
+                not self.action_probability_threshold <= value <= 1.0
+                for value in self.candidate_action_thresholds
+            )
+        ):
+            raise ValueError(
+                "shadow candidate thresholds must be sorted, unique and no lower "
+                "than the minimum action threshold"
+            )
+        if not 0.0 < self.minimum_model_coverage <= 1.0:
+            raise ValueError("shadow minimum model coverage must be in (0, 1]")
+        if not 0.0 <= self.minimum_complexity_useful_rate_improvement <= 1.0:
+            raise ValueError("shadow complexity improvement must be in [0, 1]")
+        if not 0.0 < self.minimum_positive_stability_fraction <= 1.0:
+            raise ValueError(
+                "shadow minimum positive stability fraction must be in (0, 1]"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,10 +295,19 @@ class RunScientificModelShadowComparison:
         validation_rows = _matrix(validation, feature_names)
         holdout_rows = _matrix(holdout, feature_names)
         seed = _study_seed(scope.key, self._policy.seed)
+        # Beta(1, 1) smoothing prevents small samples from receiving a
+        # misleading probability of exactly zero or one.
         train_rate = (sum(labels) + 1.0) / (len(labels) + 2.0)
         models: list[ShadowModelEvaluation] = []
         for model_kind in ShadowModelKind:
-            if model_kind is ShadowModelKind.BASE_RATE:
+            if model_kind is ShadowModelKind.SCIENTIFIC_RULE:
+                # Every row in this dataset is an event already matched by the
+                # pre-registered scientific rule.  The rule is therefore the
+                # mandatory deterministic reference and acts on every row.
+                validation_probabilities = tuple(1.0 for _ in validation)
+                holdout_probabilities = tuple(1.0 for _ in holdout)
+                threshold = 0.5
+            elif model_kind is ShadowModelKind.BASE_RATE:
                 validation_raw = tuple(train_rate for _ in validation)
                 holdout_raw = tuple(train_rate for _ in holdout)
             else:
@@ -288,23 +334,49 @@ class RunScientificModelShadowComparison:
                 holdout_raw = _checked_probabilities(
                     estimator.predict_probabilities(holdout_rows), len(holdout)
                 )
-            calibrator = _fit_calibrator(
-                validation_raw,
-                tuple(int(item.useful) for item in validation),
-                self._policy.calibration_bins,
+            if model_kind is not ShadowModelKind.SCIENTIFIC_RULE:
+                calibrator = _fit_calibrator(
+                    validation_raw,
+                    tuple(int(item.useful) for item in validation),
+                    self._policy.calibration_bins,
+                )
+                validation_probabilities = calibrator.apply(validation_raw)
+                holdout_probabilities = calibrator.apply(holdout_raw)
+                threshold = _select_action_threshold(
+                    validation,
+                    validation_probabilities,
+                    thresholds=self._policy.candidate_action_thresholds,
+                    minimum_coverage=self._policy.minimum_model_coverage,
+                    calibration_bins=self._policy.calibration_bins,
+                )
+            validation_metrics = _metrics(
+                validation,
+                validation_probabilities,
+                threshold=threshold,
+                calibration_bins=self._policy.calibration_bins,
             )
-            probabilities = calibrator.apply(holdout_raw)
+            holdout_metrics = _metrics(
+                holdout,
+                holdout_probabilities,
+                threshold=threshold,
+                calibration_bins=self._policy.calibration_bins,
+            )
+            positive_blocks, total_blocks = _temporal_stability(
+                holdout,
+                holdout_probabilities,
+                threshold=threshold,
+                blocks=self._policy.stability_blocks,
+            )
             models.append(
                 ShadowModelEvaluation(
                     model_kind=model_kind,
                     state=ShadowResultState.READY,
-                    metrics=_metrics(
-                        holdout,
-                        probabilities,
-                        threshold=self._policy.action_probability_threshold,
-                        calibration_bins=self._policy.calibration_bins,
-                    ),
+                    metrics=holdout_metrics,
                     reason_codes=(),
+                    validation_metrics=validation_metrics,
+                    action_probability_threshold=threshold,
+                    holdout_positive_stability_blocks=positive_blocks,
+                    holdout_total_stability_blocks=total_blocks,
                 )
             )
         study_state = (
@@ -317,6 +389,16 @@ class RunScientificModelShadowComparison:
             if study_state is ShadowResultState.READY
             else ("one_or_more_models_blocked_by_data",)
         )
+        selection_state, selected_model_kind, selection_reasons = _select_model(
+            models,
+            minimum_coverage=self._policy.minimum_model_coverage,
+            minimum_complexity_improvement=(
+                self._policy.minimum_complexity_useful_rate_improvement
+            ),
+            minimum_positive_stability_fraction=(
+                self._policy.minimum_positive_stability_fraction
+            ),
+        )
         return _study_result(
             scope,
             feature_names,
@@ -326,6 +408,9 @@ class RunScientificModelShadowComparison:
             tuple(models),
             study_state,
             study_reasons,
+            selection_state=selection_state,
+            selected_model_kind=selected_model_kind,
+            selection_reason_codes=selection_reasons,
         )
 
     def _blocked_reasons(
@@ -371,7 +456,13 @@ def _study_result(
     models: tuple[ShadowModelEvaluation, ...],
     state: ShadowResultState,
     reasons: tuple[str, ...],
+    *,
+    selection_state: ShadowSelectionState = ShadowSelectionState.ABSTAIN,
+    selected_model_kind: ShadowModelKind | None = None,
+    selection_reason_codes: tuple[str, ...] = (),
 ) -> ShadowStudyResult:
+    if selection_state is ShadowSelectionState.ABSTAIN and not selection_reason_codes:
+        selection_reason_codes = reasons or ("model_comparison_blocked",)
     return ShadowStudyResult(
         scope=scope,
         state=state,
@@ -384,7 +475,211 @@ def _study_result(
         feature_names=feature_names,
         models=models,
         reason_codes=reasons,
+        selection_state=selection_state,
+        selected_model_kind=selected_model_kind,
+        selection_reason_codes=selection_reason_codes,
     )
+
+
+def _select_action_threshold(
+    examples: Sequence[ShadowModelExample],
+    probabilities: Sequence[float],
+    *,
+    thresholds: Sequence[float],
+    minimum_coverage: float,
+    calibration_bins: int,
+) -> float:
+    """Choose abstention on validation only; the holdout remains unopened."""
+
+    candidates: list[tuple[float, ShadowModelMetrics]] = []
+    for threshold in thresholds:
+        metrics = _metrics(
+            examples,
+            probabilities,
+            threshold=threshold,
+            calibration_bins=calibration_bins,
+        )
+        if metrics.coverage >= minimum_coverage and metrics.acted_observations:
+            candidates.append((threshold, metrics))
+    if not candidates:
+        return float(thresholds[0])
+    return max(
+        candidates,
+        key=lambda item: (
+            item[1].useful_rate_when_acted or 0.0,
+            item[1].mean_effect_when_acted or float("-inf"),
+            item[1].coverage,
+            -item[0],
+        ),
+    )[0]
+
+
+def _select_model(
+    models: Sequence[ShadowModelEvaluation],
+    *,
+    minimum_coverage: float,
+    minimum_complexity_improvement: float,
+    minimum_positive_stability_fraction: float,
+) -> tuple[ShadowSelectionState, ShadowModelKind | None, tuple[str, ...]]:
+    """Keep the least complex stable model unless complexity earns its place."""
+
+    ordered = (
+        ShadowModelKind.SCIENTIFIC_RULE,
+        ShadowModelKind.BASE_RATE,
+        ShadowModelKind.LOGISTIC_REGRESSION,
+        ShadowModelKind.GRADIENT_BOOSTING,
+    )
+    by_kind = {model.model_kind: model for model in models}
+    stable: list[ShadowModelEvaluation] = []
+    for index, kind in enumerate(ordered):
+        candidate = by_kind.get(kind)
+        if candidate is None or not _is_stable_candidate(
+            candidate,
+            minimum_coverage=minimum_coverage,
+            minimum_positive_stability_fraction=(minimum_positive_stability_fraction),
+        ):
+            continue
+        simpler_ready = tuple(
+            by_kind[simpler]
+            for simpler in ordered[:index]
+            if simpler in by_kind
+            and by_kind[simpler].state is ShadowResultState.READY
+            and by_kind[simpler].metrics is not None
+            and by_kind[simpler].validation_metrics is not None
+            and by_kind[simpler].metrics.acted_observations > 0
+            and by_kind[simpler].validation_metrics.acted_observations > 0
+        )
+        if simpler_ready and not all(
+            _earns_additional_complexity(
+                candidate,
+                reference,
+                minimum_improvement=minimum_complexity_improvement,
+            )
+            for reference in simpler_ready
+        ):
+            continue
+        stable.append(candidate)
+    if not stable:
+        return (
+            ShadowSelectionState.ABSTAIN,
+            None,
+            ("no_model_stable_on_validation_and_holdout",),
+        )
+
+    selected = stable[0]
+    complexity_won = selected.model_kind is not ShadowModelKind.SCIENTIFIC_RULE
+    for candidate in stable[1:]:
+        if _earns_additional_complexity(
+            candidate,
+            selected,
+            minimum_improvement=minimum_complexity_improvement,
+        ):
+            selected = candidate
+            complexity_won = True
+    return (
+        ShadowSelectionState.SELECTED,
+        selected.model_kind,
+        (
+            "complexity_selected_after_stable_improvement"
+            if complexity_won
+            else "simplest_stable_candidate_selected",
+        ),
+    )
+
+
+def _is_stable_candidate(
+    model: ShadowModelEvaluation,
+    *,
+    minimum_coverage: float,
+    minimum_positive_stability_fraction: float,
+) -> bool:
+    if (
+        model.state is not ShadowResultState.READY
+        or model.metrics is None
+        or model.validation_metrics is None
+        or model.holdout_positive_stability_blocks is None
+        or model.holdout_total_stability_blocks is None
+        or model.holdout_total_stability_blocks == 0
+        or model.holdout_positive_stability_blocks
+        < ceil(
+            model.holdout_total_stability_blocks * minimum_positive_stability_fraction
+        )
+    ):
+        return False
+    for metrics in (model.validation_metrics, model.metrics):
+        if (
+            metrics.coverage < minimum_coverage
+            or not metrics.acted_observations
+            or metrics.useful_rate_when_acted is None
+            or metrics.useful_rate_when_acted < 0.5
+            or metrics.mean_effect_when_acted is None
+            or metrics.mean_effect_when_acted <= 0.0
+        ):
+            return False
+    return True
+
+
+def _temporal_stability(
+    examples: Sequence[ShadowModelExample],
+    probabilities: Sequence[float],
+    *,
+    threshold: float,
+    blocks: int,
+) -> tuple[int, int]:
+    """Measure late-period stability without using it to fit or recalibrate."""
+
+    checked = _checked_probabilities(probabilities, len(examples))
+    days = tuple(sorted({item.trading_day for item in examples}))
+    total_blocks = min(blocks, len(days))
+    if not total_blocks:
+        return 0, 0
+    day_block = {
+        day: min(index * total_blocks // len(days), total_blocks - 1)
+        for index, day in enumerate(days)
+    }
+    selected: list[list[ShadowModelExample]] = [[] for _ in range(total_blocks)]
+    for example, probability in zip(examples, checked, strict=True):
+        if probability >= threshold:
+            selected[day_block[example.trading_day]].append(example)
+    positive = sum(
+        bool(rows)
+        and sum(item.useful for item in rows) / len(rows) >= 0.5
+        and sum(item.effect_value for item in rows) / len(rows) > 0.0
+        for rows in selected
+    )
+    return positive, total_blocks
+
+
+def _earns_additional_complexity(
+    candidate: ShadowModelEvaluation,
+    reference: ShadowModelEvaluation,
+    *,
+    minimum_improvement: float,
+) -> bool:
+    if (
+        candidate.metrics is None
+        or candidate.validation_metrics is None
+        or reference.metrics is None
+        or reference.validation_metrics is None
+    ):
+        return False
+    for candidate_metrics, reference_metrics in (
+        (candidate.validation_metrics, reference.validation_metrics),
+        (candidate.metrics, reference.metrics),
+    ):
+        if (
+            candidate_metrics.useful_rate_when_acted is None
+            or reference_metrics.useful_rate_when_acted is None
+            or candidate_metrics.mean_effect_when_acted is None
+            or reference_metrics.mean_effect_when_acted is None
+            or candidate_metrics.useful_rate_when_acted
+            < reference_metrics.useful_rate_when_acted + minimum_improvement
+            or candidate_metrics.mean_effect_when_acted
+            < reference_metrics.mean_effect_when_acted
+            or candidate_metrics.brier_score > reference_metrics.brier_score
+        ):
+            return False
+    return True
 
 
 def _matrix(

@@ -30,8 +30,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="research-compare-scientific-shadow-models",
         description=(
-            "Reproducibly compare a base rate, logistic regression and "
-            "gradient boosting on sealed portfolio results. No network access."
+            "Reproducibly compare the scientific rule, a smoothed probability, "
+            "regularized logistic regression and shallow gradient boosting on "
+            "sealed portfolio results. No network access."
         ),
     )
     parser.add_argument("--input-dir", type=Path, required=True)
@@ -45,7 +46,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--minimum-holdout-examples", type=int, default=50)
     parser.add_argument("--minimum-trading-days", type=int, default=30)
     parser.add_argument("--action-probability", type=float, default=0.60)
+    parser.add_argument("--minimum-coverage", type=float, default=0.10)
+    parser.add_argument(
+        "--minimum-complexity-improvement",
+        type=float,
+        default=0.02,
+    )
     return parser.parse_args(argv)
+
+
+def _candidate_thresholds(minimum: float) -> tuple[float, ...]:
+    values = {minimum}
+    values.update(
+        value / 100.0 for value in range(60, 91, 5) if value / 100.0 >= minimum
+    )
+    return tuple(sorted(values))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -60,6 +75,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             minimum_holdout_examples=args.minimum_holdout_examples,
             minimum_total_trading_days=args.minimum_trading_days,
             action_probability_threshold=args.action_probability,
+            candidate_action_thresholds=_candidate_thresholds(args.action_probability),
+            minimum_model_coverage=args.minimum_coverage,
+            minimum_complexity_useful_rate_improvement=(
+                args.minimum_complexity_improvement
+            ),
         ),
     ).execute()
     payload: dict[str, object] = {

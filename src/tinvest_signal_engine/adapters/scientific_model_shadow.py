@@ -342,6 +342,7 @@ class ImmutableJsonShadowArtifactAdapter:
             ),
             "model-results.json": _json_bytes(result),
             "leaderboard.csv": _csv_bytes(_leaderboard(result)),
+            "selection.csv": _csv_bytes(_selection_rows(result)),
             "calibration.csv": _csv_bytes(_calibration_rows(result)),
             "report.md": _report(result).encode("utf-8"),
         }
@@ -372,6 +373,7 @@ def _leaderboard(result: ShadowPortfolioResult) -> list[dict[str, object]]:
     for study in result.results:
         for model in study.models:
             metrics = model.metrics
+            validation = model.validation_metrics
             rows.append(
                 {
                     "study_id": study.scope.study_id,
@@ -380,7 +382,26 @@ def _leaderboard(result: ShadowPortfolioResult) -> list[dict[str, object]]:
                     "horizon_seconds": study.scope.horizon_seconds,
                     "model": model.model_kind.value,
                     "state": model.state.value,
+                    "selected": model.model_kind is study.selected_model_kind,
+                    "action_probability_threshold": (
+                        model.action_probability_threshold
+                    ),
                     "holdout_examples": study.holdout_examples,
+                    "holdout_positive_stability_blocks": (
+                        model.holdout_positive_stability_blocks
+                    ),
+                    "holdout_total_stability_blocks": (
+                        model.holdout_total_stability_blocks
+                    ),
+                    "validation_coverage": (
+                        validation.coverage if validation else None
+                    ),
+                    "validation_useful_rate_when_acted": (
+                        validation.useful_rate_when_acted if validation else None
+                    ),
+                    "validation_mean_cost_adjusted_effect": (
+                        validation.mean_effect_when_acted if validation else None
+                    ),
                     "accuracy": metrics.accuracy if metrics else None,
                     "coverage": metrics.coverage if metrics else None,
                     "abstention_rate": metrics.abstention_rate if metrics else None,
@@ -401,6 +422,27 @@ def _leaderboard(result: ShadowPortfolioResult) -> list[dict[str, object]]:
                 }
             )
     return rows
+
+
+def _selection_rows(result: ShadowPortfolioResult) -> list[dict[str, object]]:
+    return [
+        {
+            "study_id": study.scope.study_id,
+            "study_version": study.scope.study_version,
+            "study_kind": study.scope.study_kind.value,
+            "horizon_seconds": study.scope.horizon_seconds,
+            "selection_state": study.selection_state.value,
+            "selected_model": (
+                study.selected_model_kind.value
+                if study.selected_model_kind is not None
+                else None
+            ),
+            "selection_reason_codes": "|".join(study.selection_reason_codes),
+            "causal_evidence_gate_unchanged": True,
+            "claim_allowed": False,
+        }
+        for study in result.results
+    ]
 
 
 def _calibration_rows(result: ShadowPortfolioResult) -> list[dict[str, object]]:
@@ -436,9 +478,38 @@ def _report(result: ShadowPortfolioResult) -> str:
         f"- Отпечаток входа: `{result.input_fingerprint}`",
         f"- Недостающие исследования: `{', '.join(result.missing_study_ids) or 'нет'}`",
         "",
-        "| Исследование | Горизонт | Модель | Состояние | Точность | Охват | Воздержание | Полезны при действии | Средний результат после издержек |",
-        "|---|---:|---|---|---:|---:|---:|---:|---:|",
+        "Выбор выполняется отдельно для каждого исследования. Сложная модель "
+        "заменяет более простую только при устойчивом улучшении на проверочной "
+        "и окончательной частях. Если ни один вариант не проходит требования, "
+        "решение — воздержаться.",
+        "",
+        "| Исследование | Горизонт | Решение | Выбранная модель | Причина |",
+        "|---|---:|---|---|---|",
     ]
+    for row in _selection_rows(result):
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    str(row["study_id"]),
+                    str(row["horizon_seconds"]),
+                    _selection_label(str(row["selection_state"])),
+                    _model_label(row["selected_model"]),
+                    _reason_labels(str(row["selection_reason_codes"])),
+                )
+            )
+            + " |"
+        )
+    lines.extend(
+        (
+            "",
+            "| Исследование | Горизонт | Модель | Выбрана | Порог действия | "
+            "Охват на проверке | Полезны на проверке | Охват на окончательной "
+            "части | Устойчивые временные блоки | Воздержание | Полезны при "
+            "действии | Средний результат после издержек |",
+            "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        )
+    )
     for row in _leaderboard(result):
         lines.append(
             "| "
@@ -446,10 +517,16 @@ def _report(result: ShadowPortfolioResult) -> str:
                 (
                     str(row["study_id"]),
                     str(row["horizon_seconds"]),
-                    str(row["model"]),
-                    str(row["state"]),
-                    _number(row["accuracy"], percent=True),
+                    _model_label(row["model"]),
+                    "да" if row["selected"] else "нет",
+                    _number(row["action_probability_threshold"]),
+                    _number(row["validation_coverage"], percent=True),
+                    _number(row["validation_useful_rate_when_acted"], percent=True),
                     _number(row["coverage"], percent=True),
+                    (
+                        f"{row['holdout_positive_stability_blocks']}/"
+                        f"{row['holdout_total_stability_blocks']}"
+                    ),
                     _number(row["abstention_rate"], percent=True),
                     _number(row["useful_rate_when_acted"], percent=True),
                     _number(row["mean_cost_adjusted_effect"]),
@@ -465,6 +542,35 @@ def _report(result: ShadowPortfolioResult) -> str:
         )
     )
     return "\n".join(lines)
+
+
+def _model_label(value: object) -> str:
+    labels = {
+        "scientific_rule": "научное правило",
+        "base_rate": "сглаженная вероятностная оценка",
+        "logistic_regression": "регуляризованная логистическая модель",
+        "gradient_boosting": "неглубокое усиление деревьев",
+        None: "нет",
+    }
+    return labels.get(value, str(value))
+
+
+def _selection_label(value: str) -> str:
+    return "выбрана модель" if value == "selected" else "воздержаться"
+
+
+def _reason_labels(value: str) -> str:
+    labels = {
+        "simplest_stable_candidate_selected": "выбран простейший устойчивый вариант",
+        "complexity_selected_after_stable_improvement": (
+            "сложность оправдана устойчивым улучшением"
+        ),
+        "no_model_stable_on_validation_and_holdout": (
+            "нет устойчивого варианта на проверочной и окончательной частях"
+        ),
+        "model_comparison_blocked": "сравнение заблокировано данными",
+    }
+    return ", ".join(labels.get(item, item) for item in value.split("|") if item)
 
 
 def _prospective_run_dirs(root: Path) -> tuple[Path, ...]:
