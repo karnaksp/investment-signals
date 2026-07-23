@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -10,10 +9,9 @@ from hashlib import sha256
 import json
 from math import log, pi
 from statistics import median
-from typing import Mapping, Protocol, Sequence
+from typing import Literal, Mapping, Protocol, Sequence
 
 from tinvest_signal_engine.adapters.clickhouse_prospective_scientific_observations import (
-    _clickhouse_string_array_parameter,
     _json_each_row,
 )
 from tinvest_signal_engine.application.prospective_live_shadow import (
@@ -39,7 +37,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
 from tinvest_signal_engine.domain.scientific_candles import ScientificCandle
 
 
-_SNAPSHOT_CANDLES_SQL = """
+_INSTRUMENT_CANDLES_SQL = """
 SELECT
     instrument_id,
     ticker,
@@ -61,29 +59,30 @@ SELECT
     schema_version,
     record_version
 FROM scientific_candles_1m
-PREWHERE instrument_id IN {instrument_ids:Array(String)}
+PREWHERE instrument_id = {instrument_id:String}
   AND trading_day >= toDate(parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC'))
 WHERE candle_at >= parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC')
   AND candle_at < parseDateTime64BestEffort({candle_until:String}, 6, 'UTC')
   AND source_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
   AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
-ORDER BY instrument_id, candle_at, record_version
-LIMIT 2500000
+ORDER BY trading_day, candle_at, record_version
+LIMIT 125000
 SETTINGS max_execution_time = 30,
-         max_rows_to_read = 5000000,
-         max_bytes_to_read = 2000000000,
+         max_rows_to_read = 150000,
+         max_bytes_to_read = 250000000,
+         max_result_rows = 125000,
+         max_memory_usage = 134217728,
+         max_threads = 1,
          timeout_before_checking_execution_speed = 0
 FORMAT JSONEachRow
 """.strip()
 
-_OUTCOME_CANDLES_SQL = (
-    _SNAPSHOT_CANDLES_SQL.replace(
-        "instrument_id IN {instrument_ids:Array(String)}",
-        "instrument_id = {instrument_id:String}",
-    )
-    .replace("LIMIT 2500000", "LIMIT 100000")
-    .replace("max_rows_to_read = 5000000", "max_rows_to_read = 250000")
-    .replace("max_bytes_to_read = 2000000000", "max_bytes_to_read = 250000000")
+_SHORT_OUTCOME_CANDLES_SQL = (
+    _INSTRUMENT_CANDLES_SQL.replace("LIMIT 125000", "LIMIT 4096")
+    .replace("max_rows_to_read = 150000", "max_rows_to_read = 8192")
+    .replace("max_bytes_to_read = 250000000", "max_bytes_to_read = 16000000")
+    .replace("max_result_rows = 125000", "max_result_rows = 4096")
+    .replace("max_memory_usage = 134217728", "max_memory_usage = 33554432")
 )
 
 
@@ -122,22 +121,37 @@ class ClickHouseProspectiveLiveSnapshotSource:
         as_of: datetime,
         policy: ProspectiveScientificPolicy,
         limit: int,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> tuple[ProspectivePortfolioSnapshot, ...]:
         cutoff = _aware_utc(as_of, "as_of")
         if limit <= 0:
             raise ValueError("snapshot limit must be positive")
-        rows = _load_candles(
-            self._client,
-            as_of=cutoff,
-            lookback_start=cutoff - timedelta(days=self._lookback_days),
-            instrument_ids=self._instrument_ids[:limit],
+        selected = (
+            self._instrument_ids
+            if instrument_ids is None
+            else tuple(dict.fromkeys(item.strip() for item in instrument_ids))
         )
-        grouped: defaultdict[str, list[ScientificCandle]] = defaultdict(list)
-        for item in rows:
-            if item.complete:
-                grouped[item.instrument_id].append(item)
+        if not selected or any(
+            not item or item not in self._instrument_ids for item in selected
+        ):
+            raise ValueError("snapshot instruments must be configured and non-empty")
         snapshots: list[ProspectivePortfolioSnapshot] = []
-        for candles in grouped.values():
+        # One bounded ClickHouse response is materialized at a time.  A 120-day
+        # portfolio response for 25 instruments exceeds the production worker's
+        # memory budget even though every individual series comfortably fits.
+        for instrument_id in selected[:limit]:
+            candles = tuple(
+                item
+                for item in _load_candles(
+                    self._client,
+                    as_of=cutoff,
+                    lookback_start=cutoff - timedelta(days=self._lookback_days),
+                    candle_until=cutoff,
+                    instrument_id=instrument_id,
+                    query_kind="history",
+                )
+                if item.complete
+            )
             ordered = tuple(sorted(candles, key=lambda item: item.candle_at))
             candidates = tuple(
                 index
@@ -188,10 +202,21 @@ class ClickHouseProspectiveLiveOutcomeSource:
                 as_of=cutoff,
                 lookback_start=(
                     observation.feature.observed_at
-                    - timedelta(days=self._lookback_days)
+                    - (
+                        timedelta(days=self._lookback_days)
+                        if observation.feature.target
+                        is TargetMetric.FUTURE_REALIZED_VARIANCE
+                        else timedelta(minutes=1)
+                    )
                 ),
                 candle_until=observation.target_at,
                 instrument_id=observation.instrument_id,
+                query_kind=(
+                    "history"
+                    if observation.feature.target
+                    is TargetMetric.FUTURE_REALIZED_VARIANCE
+                    else "short_outcome"
+                ),
             )
             if item.instrument_id == observation.instrument_id
             and item.complete
@@ -227,25 +252,23 @@ def _load_candles(
     *,
     as_of: datetime,
     lookback_start: datetime,
-    candle_until: datetime | None = None,
-    instrument_ids: tuple[str, ...] | None = None,
-    instrument_id: str | None = None,
+    candle_until: datetime,
+    instrument_id: str,
+    query_kind: Literal["history", "short_outcome"],
 ) -> tuple[ScientificCandle, ...]:
-    if (instrument_ids is None) == (instrument_id is None):
-        raise ValueError("select either snapshot instruments or one outcome instrument")
+    if not instrument_id.strip():
+        raise ValueError("instrument_id must not be empty")
     parameters = {
         "as_of": _clickhouse_datetime(as_of),
-        "candle_until": _clickhouse_datetime(candle_until or as_of),
+        "candle_until": _clickhouse_datetime(candle_until),
         "lookback_start": _clickhouse_datetime(lookback_start),
+        "instrument_id": instrument_id,
     }
-    if instrument_id is not None:
-        parameters["instrument_id"] = instrument_id
-        sql = _OUTCOME_CANDLES_SQL
-    else:
-        parameters["instrument_ids"] = _clickhouse_string_array_parameter(
-            instrument_ids
-        )
-        sql = _SNAPSHOT_CANDLES_SQL
+    sql = (
+        _INSTRUMENT_CANDLES_SQL
+        if query_kind == "history"
+        else _SHORT_OUTCOME_CANDLES_SQL
+    )
     payload = client._request(
         sql,
         parameters=parameters,

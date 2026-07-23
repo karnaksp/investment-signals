@@ -69,12 +69,70 @@ class ProspectiveLiveShadowPassResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ProspectiveSnapshotBatch:
+    slot_at: datetime
+    instrument_ids: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class ProspectiveSnapshotBatchSchedule:
+    """Process every configured instrument without materializing the portfolio."""
+
+    instrument_ids: tuple[str, ...]
+    batch_size: int = 1
+    slot_minutes: int = 30
+    _slot_at: datetime | None = None
+    _cursor: int = 0
+
+    def __post_init__(self) -> None:
+        normalized = tuple(dict.fromkeys(item.strip() for item in self.instrument_ids))
+        if not normalized or any(not item for item in normalized):
+            raise ValueError("snapshot schedule instruments must be non-empty")
+        if self.batch_size <= 0:
+            raise ValueError("snapshot schedule batch_size must be positive")
+        if self.slot_minutes <= 0 or 60 % self.slot_minutes:
+            raise ValueError("snapshot schedule slot_minutes must divide one hour")
+        self.instrument_ids = normalized
+
+    def pending(self, *, now: datetime, limit: int) -> ProspectiveSnapshotBatch | None:
+        cutoff = _aware_utc(now)
+        if limit <= 0:
+            raise ValueError("snapshot schedule limit must be positive")
+        current_slot = cutoff.replace(
+            minute=(cutoff.minute // self.slot_minutes) * self.slot_minutes,
+            second=0,
+            microsecond=0,
+        )
+        if self._slot_at is None:
+            self._slot_at = current_slot
+        elif self._cursor >= len(self.instrument_ids) and current_slot > self._slot_at:
+            self._slot_at = current_slot
+            self._cursor = 0
+        if self._cursor >= len(self.instrument_ids):
+            return None
+        size = min(self.batch_size, limit)
+        return ProspectiveSnapshotBatch(
+            slot_at=self._slot_at,
+            instrument_ids=self.instrument_ids[self._cursor : self._cursor + size],
+        )
+
+    def complete(self, batch: ProspectiveSnapshotBatch) -> None:
+        expected = self.instrument_ids[
+            self._cursor : self._cursor + len(batch.instrument_ids)
+        ]
+        if batch.slot_at != self._slot_at or batch.instrument_ids != expected:
+            raise ValueError("snapshot batch is stale or out of order")
+        self._cursor += len(batch.instrument_ids)
+
+
+@dataclass(frozen=True, slots=True)
 class ClickHouseProspectiveLiveShadowRuntime:
     recorder: RecordProspectivePortfolioSnapshot
     outcome_worker: ProcessProspectiveLiveOutcomes
     snapshot_source: ClickHouseProspectiveLiveSnapshotSource
     store: ClickHouseProspectiveLiveShadowStore
     policy: ProspectiveScientificPolicy
+    snapshot_schedule: ProspectiveSnapshotBatchSchedule
 
     def run_once(
         self,
@@ -85,13 +143,18 @@ class ClickHouseProspectiveLiveShadowRuntime:
     ) -> ProspectiveLiveShadowPassResult:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
+        snapshot_batch = self.snapshot_schedule.pending(
+            now=now,
+            limit=snapshot_limit,
+        )
         snapshots = (
             self.snapshot_source.load_snapshots(
                 as_of=now,
                 policy=self.policy,
-                limit=snapshot_limit,
+                limit=len(snapshot_batch.instrument_ids),
+                instrument_ids=snapshot_batch.instrument_ids,
             )
-            if now.astimezone(timezone.utc).minute % 30 == 0
+            if snapshot_batch is not None
             else ()
         )
         ingested: list[ProspectivePortfolioIngestResult] = []
@@ -102,6 +165,8 @@ class ClickHouseProspectiveLiveShadowRuntime:
                     "production live-shadow pass must seal six observations"
                 )
             ingested.append(result)
+        if snapshot_batch is not None:
+            self.snapshot_schedule.complete(snapshot_batch)
         outcome_result = self.outcome_worker.run_once(now=now, limit=outcome_limit)
         return ProspectiveLiveShadowPassResult(
             snapshots=len(snapshots),
@@ -120,6 +185,7 @@ def build_clickhouse_prospective_live_shadow_runtime(
     password: str,
     instrument_ids: tuple[str, ...],
     timeout_seconds: float = 15.0,
+    snapshot_query_batch_size: int = 1,
     policy: ProspectiveScientificPolicy = PRODUCTION_LIVE_POLICY,
     outcome_policy_version: str = DEFAULT_LIVE_OUTCOME_POLICY_VERSION,
 ) -> ClickHouseProspectiveLiveShadowRuntime:
@@ -154,6 +220,10 @@ def build_clickhouse_prospective_live_shadow_runtime(
         ),
         store=store,
         policy=policy,
+        snapshot_schedule=ProspectiveSnapshotBatchSchedule(
+            instrument_ids=instrument_ids,
+            batch_size=snapshot_query_batch_size,
+        ),
     )
 
 
@@ -163,6 +233,10 @@ def main() -> None:
     if password is None:
         raise ValueError("CLICKHOUSE_PASSWORD or CLICKHOUSE_PASSWORD_FILE is required")
     snapshot_limit = _env_int("PROSPECTIVE_LIVE_SNAPSHOT_BATCH_SIZE", 25)
+    snapshot_query_batch_size = _env_int(
+        "PROSPECTIVE_LIVE_SNAPSHOT_QUERY_BATCH_SIZE",
+        1,
+    )
     runtime = build_clickhouse_prospective_live_shadow_runtime(
         base_url=_required_env("CLICKHOUSE_HTTP_URL"),
         database=(os.getenv("CLICKHOUSE_DATABASE") or "signal_engine").strip(),
@@ -170,6 +244,7 @@ def main() -> None:
         password=password,
         instrument_ids=_instrument_ids(snapshot_limit),
         timeout_seconds=_env_float("PROSPECTIVE_LIVE_CLICKHOUSE_TIMEOUT_SECONDS", 15.0),
+        snapshot_query_batch_size=snapshot_query_batch_size,
         outcome_policy_version=(
             os.getenv(
                 "PROSPECTIVE_LIVE_OUTCOME_POLICY_VERSION",
@@ -343,6 +418,12 @@ def _env_optional_int(name: str) -> int | None:
     if value <= 0:
         raise ValueError(f"{name} must be positive")
     return value
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("snapshot schedule now must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 if __name__ == "__main__":

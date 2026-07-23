@@ -44,6 +44,7 @@ from tinvest_signal_engine.domain.prospective_live_shadow import (
     build_live_outcome,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
+    TargetMetric,
     directional_outcome,
 )
 from tinvest_signal_engine.domain.prospective_scientific_observations import (
@@ -55,6 +56,7 @@ from tinvest_signal_engine.domain.scientific_candles import (
 )
 from tinvest_signal_engine.services.prospective_live_shadow_worker import (
     PRODUCTION_LIVE_POLICY,
+    ProspectiveSnapshotBatchSchedule,
     _instrument_ids,
     build_clickhouse_prospective_live_shadow_runtime,
     run_worker_loop,
@@ -226,18 +228,14 @@ def _snapshot() -> ProspectivePortfolioSnapshot:
     )
 
 
-def _live_observation():
+def _live_observation(*, target: TargetMetric = TargetMetric.FORWARD_RETURN):
     store = InMemoryProspectiveLiveShadowStore()
     result = RecordProspectivePortfolioSnapshot(
         store=store,
         policy=PRODUCTION_LIVE_POLICY,
     ).execute(_snapshot())
     assert len(result.observation_ids) == 6
-    return next(
-        item
-        for item in store.observations()
-        if item.feature.target.value == "forward_return"
-    )
+    return next(item for item in store.observations() if item.feature.target is target)
 
 
 def _live_outcome(observation):
@@ -386,15 +384,18 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
     assert snapshot.source_event_ids[-1] == "candle-119"
     assert client.calls[0][1]["as_of"] == "2026-07-20 09:30:02.000000"
     sql, parameters = client.calls[0]
-    assert "PREWHERE instrument_id IN" in sql
+    assert "PREWHERE instrument_id =" in sql
     assert "trading_day >=" in sql
-    assert "LIMIT 2500000" in sql
-    assert "max_rows_to_read = 5000000" in sql
-    assert "max_bytes_to_read = 2000000000" in sql
+    assert "LIMIT 125000" in sql
+    assert "max_rows_to_read = 150000" in sql
+    assert "max_bytes_to_read = 250000000" in sql
+    assert "max_result_rows = 125000" in sql
+    assert "max_memory_usage = 134217728" in sql
+    assert "max_threads = 1" in sql
     assert "max_execution_time = 30" in sql
     assert "timeout_before_checking_execution_speed = 0" in sql
     assert parameters["lookback_start"] < parameters["as_of"]
-    assert parameters["instrument_ids"] == "['SBER_TQBR']"
+    assert parameters["instrument_id"] == "SBER_TQBR"
     store = InMemoryProspectiveLiveShadowStore()
     result = RecordProspectivePortfolioSnapshot(
         store=store,
@@ -428,10 +429,15 @@ def test_outcome_source_reads_as_of_now_but_seals_evidence_at_target() -> None:
     assert client.calls[0][1]["as_of"] == as_of.strftime("%Y-%m-%d %H:%M:%S.%f")
     sql, parameters = client.calls[0]
     assert "PREWHERE instrument_id =" in sql
-    assert "LIMIT 100000" in sql
-    assert "max_rows_to_read = 250000" in sql
+    assert "LIMIT 4096" in sql
+    assert "max_rows_to_read = 8192" in sql
+    assert "max_bytes_to_read = 16000000" in sql
+    assert "max_result_rows = 4096" in sql
+    assert "max_memory_usage = 33554432" in sql
     assert parameters["instrument_id"] == "SBER_TQBR"
-    assert parameters["lookback_start"] < parameters["as_of"]
+    assert parameters["lookback_start"] == (
+        observation.feature.observed_at - timedelta(minutes=1)
+    ).strftime("%Y-%m-%d %H:%M:%S.%f")
     assert parameters["candle_until"] == observation.target_at.strftime(
         "%Y-%m-%d %H:%M:%S.%f"
     )
@@ -440,6 +446,83 @@ def test_outcome_source_reads_as_of_now_but_seals_evidence_at_target() -> None:
             observation,
             as_of=observation.target_at - timedelta(seconds=1),
         )
+
+
+def test_har_outcome_keeps_bounded_historical_baseline_window() -> None:
+    observation = _live_observation(target=TargetMetric.FUTURE_REALIZED_VARIANCE)
+    first = OBSERVED_AT - timedelta(minutes=120)
+    count_through_target = 120 + observation.feature.horizon_seconds // 60
+    candles = tuple(
+        _candle(first + timedelta(minutes=index), index)
+        for index in range(count_through_target + 2)
+    )
+    client = _CandleClient(tuple(_candle_row(item) for item in candles))
+
+    ClickHouseProspectiveLiveOutcomeSource(client).load(
+        observation,
+        as_of=observation.target_at + timedelta(minutes=2),
+    )
+
+    sql, parameters = client.calls[0]
+    assert "LIMIT 125000" in sql
+    assert "max_rows_to_read = 150000" in sql
+    assert parameters["lookback_start"] == (
+        observation.feature.observed_at - timedelta(days=120)
+    ).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def test_snapshot_schedule_does_not_require_exact_half_hour_poll() -> None:
+    instruments = tuple(f"INSTRUMENT_{index}" for index in range(5))
+    schedule = ProspectiveSnapshotBatchSchedule(
+        instrument_ids=instruments,
+        batch_size=2,
+    )
+
+    first = schedule.pending(
+        now=datetime(2026, 7, 20, 9, 37, tzinfo=UTC),
+        limit=25,
+    )
+    assert first is not None
+    assert first.slot_at == datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
+    assert first.instrument_ids == instruments[:2]
+    assert (
+        schedule.pending(
+            now=datetime(2026, 7, 20, 9, 38, tzinfo=UTC),
+            limit=25,
+        )
+        == first
+    )
+
+    schedule.complete(first)
+    second = schedule.pending(
+        now=datetime(2026, 7, 20, 9, 39, tzinfo=UTC),
+        limit=25,
+    )
+    assert second is not None
+    assert second.instrument_ids == instruments[2:4]
+    schedule.complete(second)
+    third = schedule.pending(
+        now=datetime(2026, 7, 20, 9, 40, tzinfo=UTC),
+        limit=25,
+    )
+    assert third is not None
+    assert third.instrument_ids == instruments[4:]
+    schedule.complete(third)
+    assert (
+        schedule.pending(
+            now=datetime(2026, 7, 20, 9, 59, tzinfo=UTC),
+            limit=25,
+        )
+        is None
+    )
+
+    next_slot = schedule.pending(
+        now=datetime(2026, 7, 20, 10, 7, tzinfo=UTC),
+        limit=25,
+    )
+    assert next_slot is not None
+    assert next_slot.slot_at == datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+    assert next_slot.instrument_ids == instruments[:2]
 
 
 def test_production_composition_wires_all_twenty_five_instruments() -> None:
@@ -455,6 +538,8 @@ def test_production_composition_wires_all_twenty_five_instruments() -> None:
 
     assert runtime.snapshot_source._instrument_ids == instrument_ids
     assert runtime.store._live_instrument_ids == instrument_ids
+    assert runtime.snapshot_schedule.instrument_ids == instrument_ids
+    assert runtime.snapshot_schedule.batch_size == 1
     assert runtime.policy.jump_horizons_seconds == (900,)
 
 
