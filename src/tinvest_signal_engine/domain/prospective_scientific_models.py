@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
 from hashlib import sha256
-from math import exp, isfinite, log
+from math import ceil, exp, isfinite, log
 from typing import Iterable
 
 
@@ -139,6 +139,57 @@ class ProspectiveScientificPolicy:
     jump_variance_percentile: float = 0.95
     jump_variance_horizon_seconds: int = 1800
     round_trip_cost_bps: float = 10.0
+
+    def required_history_trading_days_by_hypothesis(
+        self,
+    ) -> tuple[tuple[ProspectiveHypothesis, int], ...]:
+        """Return the sealed history budget behind every prospective formula.
+
+        HAR samples every half-hour.  Eighteen usable anchors per complete
+        trading day is a conservative floor for the main MOEX session after
+        excluding anchors whose forward target crosses the session boundary.
+        Pair residuals use minute observations; 360 usable minutes is the
+        corresponding conservative floor.
+        """
+
+        har_days = ceil(self.har_minimum_training_points / 18)
+        pair_days = ceil(self.pair_min_training_points / 360)
+        requirements = {
+            ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION: (
+                self.morning_history_days
+            ),
+            ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION: (
+                self.morning_history_days
+            ),
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2: (
+                self.jump_history_days
+            ),
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2: (
+                self.jump_history_days
+            ),
+            ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: (
+                self.phase_recurrence_history_days
+            ),
+            ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: 1,
+            ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: (
+                self.volume_history_days
+            ),
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: pair_days,
+            ProspectiveHypothesis.HAR_VOLATILITY_V2: har_days,
+            ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: (
+                self.semivariance_history_days
+            ),
+            ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: (
+                self.jump_variance_history_days
+            ),
+        }
+        return tuple(sorted(requirements.items(), key=lambda item: item[0].value))
+
+    @property
+    def required_history_trading_days(self) -> int:
+        return max(
+            days for _, days in self.required_history_trading_days_by_hypothesis()
+        )
 
     def __post_init__(self) -> None:
         if not self.version.strip():

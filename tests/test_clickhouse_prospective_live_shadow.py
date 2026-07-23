@@ -17,6 +17,9 @@ from tinvest_signal_engine.adapters.clickhouse_resilience import (
     TransientClickHouseError,
 )
 from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
+    _CANDLE_COLUMNS,
+    _calendar_lookback_days,
+    _compact_json_each_row,
     ClickHouseProspectiveLiveOutcomeSource,
     ClickHouseProspectiveLiveSnapshotSource,
 )
@@ -44,6 +47,8 @@ from tinvest_signal_engine.domain.prospective_live_shadow import (
     build_live_outcome,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
+    ProspectiveHypothesis,
+    ProspectiveScientificPolicy,
     TargetMetric,
     directional_outcome,
 )
@@ -103,7 +108,13 @@ class _CandleClient:
     def _request(self, sql, *, parameters):
         self.calls.append((sql, dict(parameters)))
         return b"".join(
-            (json.dumps(row, separators=(",", ":")) + "\n").encode()
+            (
+                json.dumps(
+                    [row[column] for column in _CANDLE_COLUMNS],
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
             for row in self.rows
         )
 
@@ -386,14 +397,21 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
     sql, parameters = client.calls[0]
     assert "PREWHERE instrument_id =" in sql
     assert "trading_day >=" in sql
-    assert "LIMIT 125000" in sql
-    assert "max_rows_to_read = 150000" in sql
-    assert "max_bytes_to_read = 250000000" in sql
-    assert "max_result_rows = 125000" in sql
-    assert "max_memory_usage = 134217728" in sql
+    assert "ORDER BY trading_day DESC, candle_at DESC" in sql
+    assert "LIMIT 75001" in sql
+    assert "max_rows_to_read = 100000" in sql
+    assert "max_bytes_to_read = 134217728" in sql
+    assert "max_result_rows = 75001" in sql
+    assert "max_result_bytes = 33554432" in sql
+    assert "result_overflow_mode = 'throw'" in sql
+    assert "max_memory_usage = 100663296" in sql
     assert "max_threads = 1" in sql
     assert "max_execution_time = 30" in sql
     assert "timeout_before_checking_execution_speed = 0" in sql
+    assert "FORMAT JSONCompactEachRow" in sql
+    assert parameters["lookback_start"] == (
+        RECORDED_AT - timedelta(days=98)
+    ).strftime("%Y-%m-%d %H:%M:%S.%f")
     assert parameters["lookback_start"] < parameters["as_of"]
     assert parameters["instrument_id"] == "SBER_TQBR"
     store = InMemoryProspectiveLiveShadowStore()
@@ -429,11 +447,14 @@ def test_outcome_source_reads_as_of_now_but_seals_evidence_at_target() -> None:
     assert client.calls[0][1]["as_of"] == as_of.strftime("%Y-%m-%d %H:%M:%S.%f")
     sql, parameters = client.calls[0]
     assert "PREWHERE instrument_id =" in sql
-    assert "LIMIT 4096" in sql
+    assert "LIMIT 4097" in sql
     assert "max_rows_to_read = 8192" in sql
-    assert "max_bytes_to_read = 16000000" in sql
-    assert "max_result_rows = 4096" in sql
+    assert "max_bytes_to_read = 16777216" in sql
+    assert "max_result_rows = 4097" in sql
+    assert "max_result_bytes = 8388608" in sql
+    assert "result_overflow_mode = 'throw'" in sql
     assert "max_memory_usage = 33554432" in sql
+    assert "FORMAT JSONCompactEachRow" in sql
     assert parameters["instrument_id"] == "SBER_TQBR"
     assert parameters["lookback_start"] == (
         observation.feature.observed_at - timedelta(minutes=1)
@@ -464,11 +485,96 @@ def test_har_outcome_keeps_bounded_historical_baseline_window() -> None:
     )
 
     sql, parameters = client.calls[0]
-    assert "LIMIT 125000" in sql
-    assert "max_rows_to_read = 150000" in sql
+    assert "LIMIT 75001" in sql
+    assert "max_rows_to_read = 100000" in sql
     assert parameters["lookback_start"] == (
-        observation.feature.observed_at - timedelta(days=120)
+        observation.feature.observed_at - timedelta(days=98)
     ).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def test_policy_seals_sufficient_history_for_every_supported_hypothesis() -> None:
+    policy = ProspectiveScientificPolicy()
+    requirements = dict(policy.required_history_trading_days_by_hypothesis())
+
+    assert set(requirements) == set(ProspectiveHypothesis)
+    assert requirements == {
+        ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION: 40,
+        ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION: 40,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2: 40,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2: 40,
+        ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: 20,
+        ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: 1,
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: 40,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: 2,
+        ProspectiveHypothesis.HAR_VOLATILITY_V2: 56,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: 40,
+        ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: 60,
+    }
+    assert policy.required_history_trading_days == 60
+    assert _calendar_lookback_days(policy) == 98
+
+
+def test_history_query_span_follows_policy_instead_of_fixed_snapshot_age() -> None:
+    policy = ProspectiveScientificPolicy(jump_variance_history_days=75)
+
+    assert policy.required_history_trading_days == 75
+    assert _calendar_lookback_days(policy) == 119
+
+
+def test_compact_candle_decoder_enforces_byte_row_and_shape_bounds() -> None:
+    valid = json.dumps([None] * len(_CANDLE_COLUMNS)).encode() + b"\n"
+
+    assert len(
+        tuple(
+            _compact_json_each_row(
+                valid,
+                max_payload_bytes=len(valid),
+                max_rows=1,
+            )
+        )
+    ) == 1
+    with pytest.raises(ValueError, match="byte limit"):
+        tuple(
+            _compact_json_each_row(
+                valid,
+                max_payload_bytes=len(valid) - 1,
+                max_rows=1,
+            )
+        )
+    with pytest.raises(ValueError, match="row limit"):
+        tuple(
+            _compact_json_each_row(
+                valid + valid,
+                max_payload_bytes=len(valid) * 2,
+                max_rows=1,
+            )
+        )
+    malformed = json.dumps([None] * (len(_CANDLE_COLUMNS) - 1)).encode()
+    with pytest.raises(ValueError, match="invalid JSONCompactEachRow"):
+        tuple(
+            _compact_json_each_row(
+                malformed,
+                max_payload_bytes=len(malformed),
+                max_rows=1,
+            )
+        )
+
+
+def test_snapshot_source_rejects_candle_metadata_from_after_as_of() -> None:
+    candle = _candle(OBSERVED_AT - timedelta(minutes=1), 1)
+    row = _candle_row(candle)
+    row["received_at"] = (RECORDED_AT + timedelta(microseconds=1)).isoformat()
+    client = _CandleClient((row,))
+
+    with pytest.raises(ValueError, match="beyond cutoff"):
+        ClickHouseProspectiveLiveSnapshotSource(
+            client,
+            instrument_ids=("SBER_TQBR",),
+        ).load_snapshots(
+            as_of=RECORDED_AT,
+            policy=PRODUCTION_LIVE_POLICY,
+            limit=1,
+        )
 
 
 def test_snapshot_schedule_does_not_require_exact_half_hour_poll() -> None:

@@ -6,14 +6,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from io import BytesIO
 import json
-from math import log, pi
+from math import ceil, log, pi
 from statistics import median
-from typing import Literal, Mapping, Protocol, Sequence
+from typing import Iterator, Literal, Mapping, Protocol, Sequence
 
-from tinvest_signal_engine.adapters.clickhouse_prospective_scientific_observations import (
-    _json_each_row,
-)
 from tinvest_signal_engine.application.prospective_live_shadow import (
     HarFeatureInput,
     JumpFeatureInput,
@@ -36,6 +34,35 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
 )
 from tinvest_signal_engine.domain.scientific_candles import ScientificCandle
 
+
+_CANDLE_COLUMNS = (
+    "instrument_id",
+    "ticker",
+    "exchange",
+    "trading_day",
+    "candle_at",
+    "open_price",
+    "high_price",
+    "low_price",
+    "close_price",
+    "volume",
+    "is_complete",
+    "source_kind",
+    "source_at",
+    "received_at",
+    "source_event_id",
+    "payload_fingerprint",
+    "has_gap",
+    "schema_version",
+    "record_version",
+)
+_TRADING_DAYS_PER_WEEK = 5
+_CALENDAR_DAYS_PER_WEEK = 7
+_EXCHANGE_HOLIDAY_BUFFER_DAYS = 14
+_HISTORY_RESULT_ROW_LIMIT = 75_000
+_HISTORY_RESULT_BYTE_LIMIT = 32 * 1024 * 1024
+_SHORT_RESULT_ROW_LIMIT = 4_096
+_SHORT_RESULT_BYTE_LIMIT = 8 * 1024 * 1024
 
 _INSTRUMENT_CANDLES_SQL = """
 SELECT
@@ -65,24 +92,27 @@ WHERE candle_at >= parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC')
   AND candle_at < parseDateTime64BestEffort({candle_until:String}, 6, 'UTC')
   AND source_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
   AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
-ORDER BY trading_day, candle_at, record_version
-LIMIT 125000
+ORDER BY trading_day DESC, candle_at DESC, record_version DESC
+LIMIT 75001
 SETTINGS max_execution_time = 30,
-         max_rows_to_read = 150000,
-         max_bytes_to_read = 250000000,
-         max_result_rows = 125000,
-         max_memory_usage = 134217728,
+         max_rows_to_read = 100000,
+         max_bytes_to_read = 134217728,
+         max_result_rows = 75001,
+         max_result_bytes = 33554432,
+         result_overflow_mode = 'throw',
+         max_memory_usage = 100663296,
          max_threads = 1,
          timeout_before_checking_execution_speed = 0
-FORMAT JSONEachRow
+FORMAT JSONCompactEachRow
 """.strip()
 
 _SHORT_OUTCOME_CANDLES_SQL = (
-    _INSTRUMENT_CANDLES_SQL.replace("LIMIT 125000", "LIMIT 4096")
-    .replace("max_rows_to_read = 150000", "max_rows_to_read = 8192")
-    .replace("max_bytes_to_read = 250000000", "max_bytes_to_read = 16000000")
-    .replace("max_result_rows = 125000", "max_result_rows = 4096")
-    .replace("max_memory_usage = 134217728", "max_memory_usage = 33554432")
+    _INSTRUMENT_CANDLES_SQL.replace("LIMIT 75001", "LIMIT 4097")
+    .replace("max_rows_to_read = 100000", "max_rows_to_read = 8192")
+    .replace("max_bytes_to_read = 134217728", "max_bytes_to_read = 16777216")
+    .replace("max_result_rows = 75001", "max_result_rows = 4097")
+    .replace("max_result_bytes = 33554432", "max_result_bytes = 8388608")
+    .replace("max_memory_usage = 100663296", "max_memory_usage = 33554432")
 )
 
 
@@ -104,16 +134,12 @@ class ClickHouseProspectiveLiveSnapshotSource:
         client: _ClickHouseRequester,
         *,
         instrument_ids: tuple[str, ...],
-        lookback_days: int = 120,
     ) -> None:
         normalized = tuple(dict.fromkeys(item.strip() for item in instrument_ids))
         if not normalized or any(not item for item in normalized):
             raise ValueError("snapshot instrument_ids must be non-empty and unique")
-        if lookback_days <= 0:
-            raise ValueError("snapshot lookback must be positive")
         self._client = client
         self._instrument_ids = normalized
-        self._lookback_days = lookback_days
 
     def load_snapshots(
         self,
@@ -136,16 +162,15 @@ class ClickHouseProspectiveLiveSnapshotSource:
         ):
             raise ValueError("snapshot instruments must be configured and non-empty")
         snapshots: list[ProspectivePortfolioSnapshot] = []
-        # One bounded ClickHouse response is materialized at a time.  A 120-day
-        # portfolio response for 25 instruments exceeds the production worker's
-        # memory budget even though every individual series comfortably fits.
+        lookback_days = _calendar_lookback_days(policy)
+        # One strictly bounded compact response is materialized at a time.
         for instrument_id in selected[:limit]:
             candles = tuple(
                 item
                 for item in _load_candles(
                     self._client,
                     as_of=cutoff,
-                    lookback_start=cutoff - timedelta(days=self._lookback_days),
+                    lookback_start=cutoff - timedelta(days=lookback_days),
                     candle_until=cutoff,
                     instrument_id=instrument_id,
                     query_kind="history",
@@ -176,15 +201,15 @@ class ClickHouseProspectiveLiveOutcomeSource:
         client: _ClickHouseRequester,
         *,
         ewma_alpha: float = 0.10,
-        lookback_days: int = 120,
+        policy: ProspectiveScientificPolicy | None = None,
     ) -> None:
         if not 0.0 < ewma_alpha < 1.0:
             raise ValueError("ewma_alpha must be in (0, 1)")
-        if lookback_days <= 0:
-            raise ValueError("outcome lookback must be positive")
         self._client = client
         self._ewma_alpha = ewma_alpha
-        self._lookback_days = lookback_days
+        self._history_lookback_days = _calendar_lookback_days(
+            policy or ProspectiveScientificPolicy()
+        )
 
     def load(
         self,
@@ -203,7 +228,7 @@ class ClickHouseProspectiveLiveOutcomeSource:
                 lookback_start=(
                     observation.feature.observed_at
                     - (
-                        timedelta(days=self._lookback_days)
+                        timedelta(days=self._history_lookback_days)
                         if observation.feature.target
                         is TargetMetric.FUTURE_REALIZED_VARIANCE
                         else timedelta(minutes=1)
@@ -273,8 +298,17 @@ def _load_candles(
         sql,
         parameters=parameters,
     )
+    payload_limit, row_limit = (
+        (_HISTORY_RESULT_BYTE_LIMIT, _HISTORY_RESULT_ROW_LIMIT)
+        if query_kind == "history"
+        else (_SHORT_RESULT_BYTE_LIMIT, _SHORT_RESULT_ROW_LIMIT)
+    )
     selected: dict[tuple[str, datetime], _SeriesPoint] = {}
-    for row in _json_each_row(payload):
+    for row in _compact_json_each_row(
+        payload,
+        max_payload_bytes=payload_limit,
+        max_rows=row_limit,
+    ):
         point = _series_point(row, cutoff=as_of)
         key = (point.candle.instrument_id, point.candle.candle_at)
         existing = selected.get(key)
@@ -292,6 +326,41 @@ def _load_candles(
             key=lambda item: (item.candle.instrument_id, item.candle.candle_at),
         )
     )
+
+
+def _calendar_lookback_days(policy: ProspectiveScientificPolicy) -> int:
+    """Convert the sealed trading-day requirement into a bounded query span."""
+
+    trading_days = policy.required_history_trading_days
+    weekday_span = ceil(
+        trading_days * _CALENDAR_DAYS_PER_WEEK / _TRADING_DAYS_PER_WEEK
+    )
+    return weekday_span + _EXCHANGE_HOLIDAY_BUFFER_DAYS
+
+
+def _compact_json_each_row(
+    payload: bytes,
+    *,
+    max_payload_bytes: int,
+    max_rows: int,
+) -> Iterator[dict[str, object]]:
+    """Decode a bounded JSONCompactEachRow candle response."""
+
+    if max_payload_bytes <= 0 or max_rows <= 0:
+        raise ValueError("compact response bounds must be positive")
+    if len(payload) > max_payload_bytes:
+        raise ValueError("ClickHouse candle response exceeds byte limit")
+    row_count = 0
+    for raw_line in BytesIO(payload):
+        if not raw_line.strip():
+            continue
+        row_count += 1
+        if row_count > max_rows:
+            raise ValueError("ClickHouse candle response exceeds row limit")
+        values = json.loads(raw_line)
+        if not isinstance(values, list) or len(values) != len(_CANDLE_COLUMNS):
+            raise ValueError("invalid JSONCompactEachRow candle record")
+        yield dict(zip(_CANDLE_COLUMNS, values, strict=True))
 
 
 def _snapshot(

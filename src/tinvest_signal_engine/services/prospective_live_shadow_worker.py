@@ -210,6 +210,7 @@ def build_clickhouse_prospective_live_shadow_runtime(
             source=ClickHouseProspectiveLiveOutcomeSource(
                 store,
                 ewma_alpha=policy.har_ewma_alpha,
+                policy=policy,
             ),
             policy=policy,
             outcome_policy_version=outcome_policy_version,
