@@ -540,12 +540,14 @@ def test_outcome_source_reads_as_of_now_but_seals_evidence_at_target() -> None:
     sql, parameters = client.calls[0]
     assert "PREWHERE instrument_id =" in sql
     assert "LIMIT 4097" in sql
-    assert "max_rows_to_read = 8192" in sql
-    assert "max_bytes_to_read = 16777216" in sql
+    assert "max_rows_to_read = 32768" in sql
+    assert "max_bytes_to_read = 33554432" in sql
     assert "max_result_rows = 4097" in sql
     assert "max_result_bytes = 8388608" in sql
     assert "result_overflow_mode = 'throw'" in sql
     assert "max_memory_usage = 33554432" in sql
+    assert "max_execution_time = 30" in sql
+    assert "timeout_before_checking_execution_speed = 0" in sql
     assert "FORMAT JSONCompactEachRow" in sql
     assert parameters["instrument_id"] == "SBER_TQBR"
     assert parameters["lookback_start"] == (
