@@ -399,8 +399,8 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
     assert "trading_day >=" in sql
     assert "ORDER BY trading_day DESC, candle_at DESC" in sql
     assert "LIMIT 75001" in sql
-    assert "max_rows_to_read = 100000" in sql
-    assert "max_bytes_to_read = 134217728" in sql
+    assert "max_rows_to_read = 200000" in sql
+    assert "max_bytes_to_read = 268435456" in sql
     assert "max_result_rows = 75001" in sql
     assert "max_result_bytes = 33554432" in sql
     assert "result_overflow_mode = 'throw'" in sql
@@ -486,7 +486,7 @@ def test_har_outcome_keeps_bounded_historical_baseline_window() -> None:
 
     sql, parameters = client.calls[0]
     assert "LIMIT 75001" in sql
-    assert "max_rows_to_read = 100000" in sql
+    assert "max_rows_to_read = 200000" in sql
     assert parameters["lookback_start"] == (
         observation.feature.observed_at - timedelta(days=98)
     ).strftime("%Y-%m-%d %H:%M:%S.%f")

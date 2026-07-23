@@ -95,8 +95,8 @@ WHERE candle_at >= parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC')
 ORDER BY trading_day DESC, candle_at DESC, record_version DESC
 LIMIT 75001
 SETTINGS max_execution_time = 30,
-         max_rows_to_read = 100000,
-         max_bytes_to_read = 134217728,
+         max_rows_to_read = 200000,
+         max_bytes_to_read = 268435456,
          max_result_rows = 75001,
          max_result_bytes = 33554432,
          result_overflow_mode = 'throw',
@@ -108,8 +108,8 @@ FORMAT JSONCompactEachRow
 
 _SHORT_OUTCOME_CANDLES_SQL = (
     _INSTRUMENT_CANDLES_SQL.replace("LIMIT 75001", "LIMIT 4097")
-    .replace("max_rows_to_read = 100000", "max_rows_to_read = 8192")
-    .replace("max_bytes_to_read = 134217728", "max_bytes_to_read = 16777216")
+    .replace("max_rows_to_read = 200000", "max_rows_to_read = 8192")
+    .replace("max_bytes_to_read = 268435456", "max_bytes_to_read = 16777216")
     .replace("max_result_rows = 75001", "max_result_rows = 4097")
     .replace("max_result_bytes = 33554432", "max_result_bytes = 8388608")
     .replace("max_memory_usage = 100663296", "max_memory_usage = 33554432")
