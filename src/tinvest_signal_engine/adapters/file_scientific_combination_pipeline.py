@@ -6,10 +6,12 @@ from dataclasses import asdict, fields
 from datetime import date, datetime
 from enum import Enum
 from hashlib import sha256
+import heapq
 from itertools import groupby
 import json
 import os
 from pathlib import Path
+import shutil
 from typing import Any, Iterable, Mapping
 
 from tinvest_signal_engine.application.prospective_scientific_models import (
@@ -100,6 +102,62 @@ class FileProspectiveScientificPartitionStage:
             "partition_hashes": partition_hashes,
             "partition_count": len(partition_hashes),
             "observation_count": len(report.features),
+        }
+        _write_once_or_verify(
+            run_dir / "completion.json", _json_bytes(completion)
+        )
+        self._verify_source(run_dir)
+        self._references[hypothesis] = run_dir
+
+    def stage_rows(
+        self,
+        *,
+        dataset_fingerprint: str,
+        report_fingerprint: str,
+        split: ChronologicalSplit,
+        policy: ProspectiveScientificPolicy,
+        hypothesis: ProspectiveHypothesis,
+        cost_model_version: str,
+        rows: Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]],
+    ) -> None:
+        """Stage a globally ordered report without retaining a whole day."""
+
+        if not cost_model_version.strip():
+            raise ValueError("cost_model_version must not be empty")
+        existing = self._references.get(hypothesis)
+        run_dir = self._root / report_fingerprint.removeprefix("sha256:")
+        if existing is not None and existing != run_dir:
+            raise ValueError("one hypothesis cannot stage two report versions")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema": _SOURCE_SCHEMA,
+            "dataset_fingerprint": dataset_fingerprint,
+            "report_fingerprint": report_fingerprint,
+            "hypothesis": hypothesis.value,
+            "hypothesis_version": hypothesis.version,
+            "cost_model_version": cost_model_version,
+            "split": _json_value(split),
+            "policy": _json_value(policy),
+        }
+        _write_once_or_verify(run_dir / "manifest.json", _json_bytes(manifest))
+        partition_hashes: dict[str, str] = {}
+        observation_count = 0
+        previous_day: date | None = None
+        for trading_day, day_rows in groupby(rows, key=lambda item: item[0].trading_day):
+            if previous_day is not None and trading_day <= previous_day:
+                raise ValueError("staged report must be ordered by trading day")
+            previous_day = trading_day
+            relative = f"partitions/{trading_day.isoformat()}.json"
+            path = run_dir / relative
+            count = _write_row_array_once_or_verify(path, day_rows)
+            observation_count += count
+            partition_hashes[relative] = _file_hash(path)
+        completion = {
+            "schema": _SOURCE_SCHEMA,
+            "manifest_hash": _file_hash(run_dir / "manifest.json"),
+            "partition_hashes": partition_hashes,
+            "partition_count": len(partition_hashes),
+            "observation_count": observation_count,
         }
         _write_once_or_verify(
             run_dir / "completion.json", _json_bytes(completion)
@@ -202,6 +260,93 @@ class FileProspectiveScientificPartitionStage:
             if not path.is_file() or _file_hash(path) != expected:
                 raise ValueError("prospective partition failed verification")
         return completion
+
+
+class FileProspectiveScientificRowSpool:
+    """External merge spool retaining at most one derived row per ticker."""
+
+    def __init__(self, root: str | Path) -> None:
+        self._root = Path(root)
+        if self._root.exists():
+            shutil.rmtree(self._root)
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._paths: list[Path] = []
+        self._observation_count = 0
+        self._latest_target_at: datetime | None = None
+
+    @property
+    def observation_count(self) -> int:
+        return self._observation_count
+
+    @property
+    def latest_target_at(self) -> datetime | None:
+        return self._latest_target_at
+
+    def stage_partition(
+        self,
+        rows: Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]],
+    ) -> None:
+        path = self._root / f"{len(self._paths):04d}.jsonl"
+        previous_key: tuple[object, ...] | None = None
+        count = 0
+        with path.open("xb") as handle:
+            for feature, outcome in rows:
+                if feature.observation_id != outcome.observation_id:
+                    raise ValueError("feature and outcome identities must remain aligned")
+                key = _prospective_row_key((feature, outcome))
+                if previous_key is not None and key < previous_key:
+                    raise ValueError("spooled ticker rows must be ordered")
+                previous_key = key
+                handle.write(
+                    json.dumps(
+                        {
+                            "feature": _json_value(feature),
+                            "outcome": _json_value(outcome),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                count += 1
+                if (
+                    self._latest_target_at is None
+                    or outcome.target_at > self._latest_target_at
+                ):
+                    self._latest_target_at = outcome.target_at
+        if count:
+            self._paths.append(path)
+            self._observation_count += count
+        else:
+            path.unlink()
+
+    def iter_rows(
+        self,
+    ) -> Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+        iterators = tuple(self._iter_file(path) for path in self._paths)
+        yield from heapq.merge(*iterators, key=_prospective_row_key)
+
+    def close(self) -> None:
+        shutil.rmtree(self._root, ignore_errors=True)
+
+    def __enter__(self) -> FileProspectiveScientificRowSpool:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    @staticmethod
+    def _iter_file(
+        path: Path,
+    ) -> Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                payload = json.loads(line)
+                yield (
+                    _feature_from_json(payload["feature"]),
+                    _outcome_from_json(payload["outcome"]),
+                )
 
 
 class FileScientificCombinationStreamingArtifacts:
@@ -433,6 +578,60 @@ def _json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _prospective_row_key(
+    row: tuple[ProspectiveFeature, ProspectiveOutcome],
+) -> tuple[object, ...]:
+    feature = row[0]
+    return (
+        feature.observed_at,
+        feature.ticker,
+        feature.hypothesis.value,
+        feature.horizon_seconds,
+    )
+
+
+def _write_row_array_once_or_verify(
+    path: Path,
+    rows: Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]],
+) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    count = 0
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(b"[")
+            for feature, outcome in rows:
+                if feature.observation_id != outcome.observation_id:
+                    raise ValueError("feature and outcome identities must remain aligned")
+                if count:
+                    handle.write(b",")
+                handle.write(
+                    json.dumps(
+                        {
+                            "feature": _json_value(feature),
+                            "outcome": _json_value(outcome),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+                count += 1
+            handle.write(b"]\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            if _file_hash(path) != _file_hash(temporary):
+                raise ValueError(f"immutable evidence artifact differs: {path.name}")
+            temporary.unlink()
+        else:
+            os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return count
+
+
 def _write_once_or_verify(path: Path, payload: bytes) -> None:
     if path.exists():
         if path.read_bytes() != payload:
@@ -450,7 +649,11 @@ def _write_once_or_verify(path: Path, payload: bytes) -> None:
 
 
 def _file_hash(path: Path) -> str:
-    return "sha256:" + sha256(path.read_bytes()).hexdigest()
+    digest = sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 
 
 def _fingerprint(value: Any) -> str:

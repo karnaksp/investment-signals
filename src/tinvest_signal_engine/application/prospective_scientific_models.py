@@ -9,7 +9,7 @@ from hashlib import sha256
 import json
 from math import log, pi, sqrt
 from statistics import fmean, median, pstdev
-from typing import Iterable, Protocol, Sequence, TypeVar
+from typing import Callable, Iterable, Protocol, Sequence, TypeVar
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.domain.historical_hypothesis_replay import HistoricalCandle
@@ -131,6 +131,142 @@ class PartitionedProspectiveCandleCachePort(Protocol):
     """Application-owned port for bounded, ticker-partitioned candle access."""
 
     def iter_ticker_partitions(self) -> Iterable[tuple[HistoricalCandle, ...]]: ...
+
+
+ProspectiveRow = tuple[ProspectiveFeature, ProspectiveOutcome]
+
+
+def partitioned_prospective_split(
+    cache: PartitionedProspectiveCandleCachePort,
+) -> ChronologicalSplit:
+    """Scan bounded candle partitions and seal the global chronological split."""
+
+    all_days: set[date] = set()
+    seen_tickers: set[str] = set()
+    for raw_partition in cache.iter_ticker_partitions():
+        rows = tuple(item for item in raw_partition if item.complete)
+        if not rows:
+            continue
+        ticker = rows[0].ticker
+        if ticker in seen_tickers or any(item.ticker != ticker for item in rows):
+            raise ValueError("partitioned candles require one unique ticker partition")
+        if any(left.at >= right.at for left, right in zip(rows, rows[1:])):
+            raise ValueError("partitioned candles must be strictly time ordered")
+        seen_tickers.add(ticker)
+        all_days.update(_trading_day(item.at) for item in rows)
+    if not all_days:
+        raise ValueError("prospective research requires complete candles")
+    return chronological_split_60_20_20(tuple(sorted(all_days)))
+
+
+def iter_independent_prospective_row_partitions(
+    cache: PartitionedProspectiveCandleCachePort,
+    *,
+    request: ProspectiveScientificRequest,
+) -> Iterable[tuple[ProspectiveRow, ...]]:
+    """Yield one ticker's derived rows for models without cross-ticker state.
+
+    This is the bounded production path for the dense H3V2/H4V2 jump models.
+    The caller owns external ordering and durable staging; this application
+    use case never retains rows from more than one ticker.
+    """
+
+    if len(request.selected_hypotheses) != 1:
+        raise ValueError("partitioned replay requires exactly one hypothesis")
+    hypothesis = request.selected_hypotheses[0]
+    if hypothesis not in {
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+    }:
+        raise ValueError("hypothesis requires the materialized replay path")
+    selected = frozenset((hypothesis,))
+    seen_tickers: set[str] = set()
+    emitted = False
+    for raw_partition in cache.iter_ticker_partitions():
+        rows = tuple(item for item in raw_partition if item.complete)
+        if not rows:
+            continue
+        ticker = rows[0].ticker
+        if ticker in seen_tickers or any(item.ticker != ticker for item in rows):
+            raise ValueError("partitioned candles require one unique ticker partition")
+        if any(left.at >= right.at for left, right in zip(rows, rows[1:])):
+            raise ValueError("partitioned candles must be strictly time ordered")
+        seen_tickers.add(ticker)
+        derived = tuple(_jump_rows({ticker: rows}, selected, request.policy))
+        if derived:
+            emitted = True
+            yield derived
+    if not seen_tickers:
+        raise ValueError("prospective research requires complete candles")
+    if not emitted:
+        return
+
+
+def prospective_report_fingerprint_from_rows(
+    *,
+    dataset_fingerprint: str,
+    request: ProspectiveScientificRequest,
+    rows: Callable[[], Iterable[ProspectiveRow]],
+) -> str:
+    """Hash an externally ordered report without materialising its row graph."""
+
+    if not dataset_fingerprint.startswith("sha256:"):
+        raise ValueError("dataset_fingerprint must use sha256")
+    digest = sha256()
+
+    def emit(value: object) -> None:
+        digest.update(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        )
+
+    digest.update(b'{"dataset_fingerprint":')
+    emit(dataset_fingerprint)
+    digest.update(b',"features":[')
+    first = True
+    for feature, outcome in rows():
+        if feature.observation_id != outcome.observation_id:
+            raise ValueError("feature and outcome identities must remain aligned")
+        if not first:
+            digest.update(b",")
+        first = False
+        emit(
+            (
+                feature.observation_id,
+                feature.decision.value,
+                tuple(
+                    (value.name, value.unit.value, value.value)
+                    for value in feature.feature_values
+                ),
+            )
+        )
+    digest.update(b'],"har_v2":null,"market_universe":')
+    emit(request.market_universe)
+    digest.update(b',"outcomes":[')
+    first = True
+    for feature, outcome in rows():
+        if feature.observation_id != outcome.observation_id:
+            raise ValueError("feature and outcome identities must remain aligned")
+        if not first:
+            digest.update(b",")
+        first = False
+        emit(
+            (
+                outcome.observation_id,
+                outcome.available,
+                tuple(
+                    (value.name, value.unit.value, value.value)
+                    for value in outcome.measurements
+                ),
+            )
+        )
+    digest.update(b'],"pair_candidates":')
+    emit(request.pair_candidates)
+    digest.update(b',"pairs":[],"policy":')
+    emit(request.policy.version)
+    digest.update(b',"selected":')
+    emit([item.value for item in request.selected_hypotheses])
+    digest.update(b"}")
+    return "sha256:" + digest.hexdigest()
 
 
 def build_prospective_scientific_research(

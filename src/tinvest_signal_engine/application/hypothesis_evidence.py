@@ -64,16 +64,20 @@ class BuildMatchedControls:
         if len(candidate_ids) != len(candidates):
             raise ValueError("candidate point_ids must be unique")
 
+        candidates_by_key: defaultdict[tuple[object, ...], list[StudyPoint]] = (
+            defaultdict(list)
+        )
+        for candidate in candidates:
+            candidates_by_key[candidate.matching_key].append(candidate)
         used_controls: set[str] = set()
         groups: list[MatchedControlGroup] = []
         unmatched: list[str] = []
         for event in sorted(events, key=lambda item: (item.occurred_at, item.point_id)):
             eligible = [
                 candidate
-                for candidate in candidates
+                for candidate in candidates_by_key[event.matching_key]
                 if candidate.point_id not in event_ids
                 and candidate.point_id not in used_controls
-                and candidate.matching_key == event.matching_key
                 and candidate.cost_model_version == event.cost_model_version
                 and not self._scenario_overlap(event, candidate)
             ]

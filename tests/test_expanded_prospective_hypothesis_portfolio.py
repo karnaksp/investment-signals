@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from tinvest_signal_engine.adapters import (
+    file_scientific_combination_pipeline as file_pipeline,
+)
+from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import (
+    FileProspectiveScientificRowSpool,
+)
+from tinvest_signal_engine.application.prospective_scientific_evidence import (
+    AssessProspectiveScientificEvidence,
+)
 from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificRequest,
     build_partitioned_prospective_scientific_research,
     build_prospective_scientific_research,
+    iter_independent_prospective_row_partitions,
+    partitioned_prospective_split,
+    prospective_report_fingerprint_from_rows,
 )
 from tinvest_signal_engine.domain.historical_hypothesis_replay import HistoricalCandle
 from tinvest_signal_engine.domain.prospective_scientific_models import (
@@ -433,3 +446,100 @@ def test_partitioned_replay_matches_monolithic_without_loading_full_dataset(
     assert actual.report_fingerprint == expected.report_fingerprint
     assert cache.load_calls == 0
     assert cache.yielded_sizes == [len(partition) for partition in partitions]
+
+
+@pytest.mark.parametrize(
+    "hypothesis",
+    (
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+    ),
+)
+def test_dense_jump_replay_spools_rows_with_exact_report_and_evidence_equivalence(
+    hypothesis: ProspectiveHypothesis,
+    tmp_path: Path,
+) -> None:
+    partitions = tuple(
+        _full_session_partition(ticker)
+        for ticker in ("SBER", "GAZP", "LKOH")
+    )
+    request = ProspectiveScientificRequest(selected_hypotheses=(hypothesis,))
+    dataset_fingerprint = "sha256:" + "8" * 64
+    expected = build_prospective_scientific_research(
+        tuple(item for partition in partitions for item in partition),
+        dataset_fingerprint=dataset_fingerprint,
+        request=request,
+    )
+    cache = _PartitionOnlyCache(partitions)
+    split = partitioned_prospective_split(cache)
+
+    with FileProspectiveScientificRowSpool(tmp_path / hypothesis.value) as spool:
+        for rows in iter_independent_prospective_row_partitions(
+            cache,
+            request=request,
+        ):
+            spool.stage_partition(rows)
+        actual_rows = tuple(spool.iter_rows())
+        actual_fingerprint = prospective_report_fingerprint_from_rows(
+            dataset_fingerprint=dataset_fingerprint,
+            request=request,
+            rows=spool.iter_rows,
+        )
+        actual_evidence = AssessProspectiveScientificEvidence().prepare_rows(
+            spool.iter_rows(),
+            hypothesis=hypothesis,
+            split=split,
+            policy=request.policy,
+            dataset_fingerprint=dataset_fingerprint,
+            cost_model_version="cost-v1",
+        )
+
+    expected_evidence = AssessProspectiveScientificEvidence().prepare(
+        expected,
+        hypothesis,
+        "cost-v1",
+    )
+    assert actual_rows == tuple(zip(expected.features, expected.outcomes, strict=True))
+    assert actual_fingerprint == expected.report_fingerprint
+    assert actual_evidence == expected_evidence
+    assert cache.load_calls == 0
+    assert cache.yielded_sizes == [
+        *(len(partition) for partition in partitions),
+        *(len(partition) for partition in partitions),
+    ]
+
+
+def test_external_merge_spool_decodes_only_one_pending_row_per_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hypothesis = ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2
+    partitions = tuple(
+        _full_session_partition(ticker, days=2)
+        for ticker in ("SBER", "GAZP", "LKOH", "ROSN")
+    )
+    cache = _PartitionOnlyCache(partitions)
+    request = ProspectiveScientificRequest(selected_hypotheses=(hypothesis,))
+
+    with FileProspectiveScientificRowSpool(tmp_path / "retention") as spool:
+        for rows in iter_independent_prospective_row_partitions(
+            cache,
+            request=request,
+        ):
+            spool.stage_partition(rows)
+        decoded = 0
+        original = file_pipeline._feature_from_json
+
+        def counted(payload):
+            nonlocal decoded
+            decoded += 1
+            return original(payload)
+
+        monkeypatch.setattr(file_pipeline, "_feature_from_json", counted)
+        consumed = 0
+        for _ in spool.iter_rows():
+            consumed += 1
+            assert decoded - consumed <= len(partitions)
+
+        assert consumed == spool.observation_count
+        assert decoded == consumed

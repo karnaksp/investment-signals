@@ -51,6 +51,7 @@ from tinvest_signal_engine.adapters.r2_extension_replay import (
 )
 from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import (
     FileProspectiveScientificPartitionStage,
+    FileProspectiveScientificRowSpool,
     FileScientificCombinationStreamingArtifacts,
 )
 from tinvest_signal_engine.application.historical_hypothesis_replay import (
@@ -69,6 +70,9 @@ from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificRequest,
     build_partitioned_prospective_scientific_research,
     build_prospective_scientific_research,
+    iter_independent_prospective_row_partitions,
+    partitioned_prospective_split,
+    prospective_report_fingerprint_from_rows,
 )
 from tinvest_signal_engine.application.prospective_portfolio_extensions import (
     BuildR2ExtensionReplay,
@@ -913,23 +917,122 @@ class LocalHypothesisPortfolioRunner:
                 else None
             )
 
-            def reports() -> Any:
-                for hypothesis in requested_prospective:
-                    report = build_one(hypothesis)
-                    if (
-                        combination_source is not None
-                        and hypothesis in COMBINATION_SOURCE_HYPOTHESES
-                    ):
-                        combination_source.stage(
-                            report,
-                            cost_model_version=request.cost_model.version,
+            bounded_hypotheses = {
+                ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+                ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+            }
+            bounded_split = (
+                partitioned_prospective_split(candle_cache)  # type: ignore[arg-type]
+                if partitioned
+                and any(item in bounded_hypotheses for item in requested_prospective)
+                else None
+            )
+            prepared_replays = []
+            for hypothesis in requested_prospective:
+                if partitioned and hypothesis in bounded_hypotheses:
+                    scientific_request = ProspectiveScientificRequest(
+                        selected_hypotheses=(hypothesis,),
+                        policy=policy,
+                    )
+                    assert bounded_split is not None
+                    split = bounded_split
+                    spool_root = (
+                        self._artifact_root
+                        / "prospective-spool"
+                        / run_fingerprint.removeprefix("sha256:")
+                        / hypothesis.value
+                    )
+                    with FileProspectiveScientificRowSpool(spool_root) as spool:
+                        for row_partition in (
+                            iter_independent_prospective_row_partitions(
+                                candle_cache,  # type: ignore[arg-type]
+                                request=scientific_request,
+                            )
+                        ):
+                            spool.stage_partition(row_partition)
+                        report_fingerprint = (
+                            prospective_report_fingerprint_from_rows(
+                                dataset_fingerprint=descriptor.dataset_fingerprint,
+                                request=scientific_request,
+                                rows=spool.iter_rows,
+                            )
                         )
-                    yield report
+                        if (
+                            combination_source is not None
+                            and hypothesis in COMBINATION_SOURCE_HYPOTHESES
+                        ):
+                            combination_source.stage_rows(
+                                dataset_fingerprint=descriptor.dataset_fingerprint,
+                                report_fingerprint=report_fingerprint,
+                                split=split,
+                                policy=policy,
+                                hypothesis=hypothesis,
+                                cost_model_version=request.cost_model.version,
+                                rows=spool.iter_rows(),
+                            )
+                        latest_target_at = spool.latest_target_at
+                        generated_at = (
+                            latest_target_at.isoformat()
+                            if latest_target_at is not None
+                            else datetime.combine(
+                                max(split.holdout_days),
+                                datetime.min.time(),
+                                tzinfo=timezone.utc,
+                            ).isoformat()
+                        )
+                        prepared_replays.append(
+                            self._prospective_artifacts.prepare_rows(
+                                spool.iter_rows(),
+                                hypothesis=hypothesis,
+                                dataset_fingerprint=descriptor.dataset_fingerprint,
+                                report_fingerprint=report_fingerprint,
+                                split=split,
+                                policy=policy,
+                                generated_at=generated_at,
+                                cost_model_version=request.cost_model.version,
+                            )
+                        )
+                    continue
 
-            artifact = self._prospective_artifacts.save_portfolio(
-                reports(),
-                requested_prospective,
-                cost_model_version=request.cost_model.version,
+                report = build_one(hypothesis)
+                if (
+                    combination_source is not None
+                    and hypothesis in COMBINATION_SOURCE_HYPOTHESES
+                ):
+                    combination_source.stage(
+                        report,
+                        cost_model_version=request.cost_model.version,
+                    )
+                prepare_report = getattr(
+                    self._prospective_artifacts, "prepare_report", None
+                )
+                prepared_replays.append(
+                    prepare_report(
+                        report,
+                        hypothesis,
+                        cost_model_version=request.cost_model.version,
+                    )
+                    if callable(prepare_report)
+                    else report
+                )
+                if callable(prepare_report):
+                    del report
+
+            save_prepared = getattr(
+                self._prospective_artifacts, "save_prepared_portfolio", None
+            )
+            artifact = (
+                save_prepared(
+                    prepared_replays,
+                    requested_prospective,
+                    cost_model_version=request.cost_model.version,
+                )
+                if callable(save_prepared)
+                else self._prospective_artifacts.save_portfolio(
+                    iter(prepared_replays),
+                    requested_prospective,
+                    cost_model_version=request.cost_model.version,
+                )
             )
             engines.append(
                 {

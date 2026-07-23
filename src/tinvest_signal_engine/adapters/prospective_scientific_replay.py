@@ -27,7 +27,9 @@ from tinvest_signal_engine.domain.hypothesis_evidence import (
     EvidenceDiagnosticsV2,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
+    ProspectiveFeature,
     ProspectiveHypothesis,
+    ProspectiveOutcome,
     ProspectiveScientificPolicy,
 )
 
@@ -60,6 +62,17 @@ class ProspectiveScientificReplayArtifact:
 
 @dataclass(frozen=True, slots=True)
 class _ReportSummary:
+    dataset_fingerprint: str
+    report_fingerprint: str
+    split: ChronologicalSplit
+    policy: ProspectiveScientificPolicy
+    generated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedProspectiveScientificReplay:
+    hypothesis: ProspectiveHypothesis
+    evidence: PreparedProspectiveEvidence
     dataset_fingerprint: str
     report_fingerprint: str
     split: ChronologicalSplit
@@ -109,54 +122,123 @@ class ProspectiveScientificReplayArtifactAdapter:
         portfolio does not keep six full feature/outcome graphs in memory.
         """
 
+        entries: list[PreparedProspectiveScientificReplay] = []
+        for report in reports:
+            included = tuple(
+                hypothesis
+                for hypothesis in requested_hypotheses
+                if hypothesis in report.selected_hypotheses
+                and all(item.hypothesis is not hypothesis for item in entries)
+            )
+            if not included:
+                raise ValueError("research report adds no requested hypothesis")
+            for hypothesis in included:
+                entries.append(
+                    PreparedProspectiveScientificReplay(
+                        hypothesis=hypothesis,
+                        evidence=self._evidence_gate.prepare(
+                            report,
+                            hypothesis,
+                            cost_model_version,
+                        ),
+                        dataset_fingerprint=report.dataset_fingerprint,
+                        report_fingerprint=report.report_fingerprint,
+                        split=report.split,
+                        policy=report.policy,
+                        generated_at=_deterministic_generated_at(report),
+                    )
+                )
+        return self.save_prepared_portfolio(
+            entries,
+            requested_hypotheses,
+            cost_model_version=cost_model_version,
+        )
+
+    def prepare_report(
+        self,
+        report: ProspectiveScientificReport,
+        hypothesis: ProspectiveHypothesis,
+        *,
+        cost_model_version: str,
+    ) -> PreparedProspectiveScientificReplay:
+        return PreparedProspectiveScientificReplay(
+            hypothesis=hypothesis,
+            evidence=self._evidence_gate.prepare(
+                report,
+                hypothesis,
+                cost_model_version,
+            ),
+            dataset_fingerprint=report.dataset_fingerprint,
+            report_fingerprint=report.report_fingerprint,
+            split=report.split,
+            policy=report.policy,
+            generated_at=_deterministic_generated_at(report),
+        )
+
+    def prepare_rows(
+        self,
+        rows: Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]],
+        *,
+        hypothesis: ProspectiveHypothesis,
+        dataset_fingerprint: str,
+        report_fingerprint: str,
+        split: ChronologicalSplit,
+        policy: ProspectiveScientificPolicy,
+        generated_at: str,
+        cost_model_version: str,
+    ) -> PreparedProspectiveScientificReplay:
+        return PreparedProspectiveScientificReplay(
+            hypothesis=hypothesis,
+            evidence=self._evidence_gate.prepare_rows(
+                rows,
+                hypothesis=hypothesis,
+                split=split,
+                policy=policy,
+                dataset_fingerprint=dataset_fingerprint,
+                cost_model_version=cost_model_version,
+            ),
+            dataset_fingerprint=dataset_fingerprint,
+            report_fingerprint=report_fingerprint,
+            split=split,
+            policy=policy,
+            generated_at=generated_at,
+        )
+
+    def save_prepared_portfolio(
+        self,
+        entries: Sequence[PreparedProspectiveScientificReplay],
+        requested_hypotheses: Sequence[ProspectiveHypothesis],
+        *,
+        cost_model_version: str,
+    ) -> ProspectiveScientificReplayArtifact:
         selected = tuple(sorted(set(requested_hypotheses), key=lambda item: item.value))
         if not selected:
             raise ValueError("at least one prospective hypothesis is required")
         if not cost_model_version.strip():
             raise ValueError("cost_model_version must not be empty")
-
-        prepared: list[PreparedProspectiveEvidence] = []
-        summaries: dict[ProspectiveHypothesis, _ReportSummary] = {}
-        portfolio_dataset_fingerprint: str | None = None
-        portfolio_policy: ProspectiveScientificPolicy | None = None
-        for report in reports:
-            included = tuple(
-                hypothesis
-                for hypothesis in selected
-                if hypothesis in report.selected_hypotheses
-                and hypothesis not in summaries
-            )
-            if not included:
-                raise ValueError("research report adds no requested hypothesis")
-            if portfolio_dataset_fingerprint is None:
-                portfolio_dataset_fingerprint = report.dataset_fingerprint
-                portfolio_policy = report.policy
-            elif (
-                report.dataset_fingerprint != portfolio_dataset_fingerprint
-                or report.policy != portfolio_policy
-            ):
-                raise ValueError("portfolio reports must share dataset and policy")
-            summary = _ReportSummary(
-                dataset_fingerprint=report.dataset_fingerprint,
-                report_fingerprint=report.report_fingerprint,
-                split=report.split,
-                policy=report.policy,
-                generated_at=_deterministic_generated_at(report),
-            )
-            for hypothesis in included:
-                prepared.append(
-                    self._evidence_gate.prepare(
-                        report,
-                        hypothesis,
-                        cost_model_version,
-                    )
-                )
-                summaries[hypothesis] = summary
-        unavailable = set(selected) - set(summaries)
+        by_hypothesis = {item.hypothesis: item for item in entries}
+        if len(by_hypothesis) != len(entries):
+            raise ValueError("prepared prospective hypotheses must be unique")
+        unavailable = set(selected) - set(by_hypothesis)
         if unavailable:
             raise ValueError("requested hypothesis is absent from research reports")
-        if portfolio_dataset_fingerprint is None or portfolio_policy is None:
-            raise ValueError("at least one research report is required")
+        dataset_fingerprints = {item.dataset_fingerprint for item in entries}
+        policies = {item.policy for item in entries}
+        if len(dataset_fingerprints) != 1 or len(policies) != 1:
+            raise ValueError("portfolio reports must share dataset and policy")
+        portfolio_dataset_fingerprint = next(iter(dataset_fingerprints))
+        portfolio_policy = next(iter(policies))
+        prepared = [by_hypothesis[item].evidence for item in selected]
+        summaries = {
+            hypothesis: _ReportSummary(
+                dataset_fingerprint=by_hypothesis[hypothesis].dataset_fingerprint,
+                report_fingerprint=by_hypothesis[hypothesis].report_fingerprint,
+                split=by_hypothesis[hypothesis].split,
+                policy=by_hypothesis[hypothesis].policy,
+                generated_at=by_hypothesis[hypothesis].generated_at,
+            )
+            for hypothesis in selected
+        }
 
         report_fingerprints = tuple(
             summaries[hypothesis].report_fingerprint for hypothesis in selected

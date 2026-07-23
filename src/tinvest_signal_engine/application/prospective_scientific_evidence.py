@@ -7,11 +7,12 @@ independent holdout contributes effect values to the evidence portfolio.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.application.hypothesis_evidence import (
@@ -25,6 +26,7 @@ from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificReport,
 )
 from tinvest_signal_engine.domain.hypothesis_evidence import (
+    ChronologicalSplit,
     DatasetPartition,
     EvidenceBundle,
     EvidenceReasonCount,
@@ -35,6 +37,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveFeature,
     ProspectiveHypothesis,
     ProspectiveOutcome,
+    ProspectiveScientificPolicy,
     TargetMetric,
 )
 from tinvest_signal_engine.domain.trading_phases import (
@@ -330,6 +333,37 @@ class AssessProspectiveScientificEvidence:
         )
         return PreparedProspectiveEvidence(request=request, coverage=coverage)
 
+    def prepare_rows(
+        self,
+        rows: Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]],
+        *,
+        hypothesis: ProspectiveHypothesis,
+        split: ChronologicalSplit,
+        policy: ProspectiveScientificPolicy,
+        dataset_fingerprint: str,
+        cost_model_version: str,
+    ) -> PreparedProspectiveEvidence:
+        """Prepare dense independent models from an externally ordered stream."""
+
+        if hypothesis not in {
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        }:
+            raise ValueError("streaming evidence is sealed for H3V2/H4V2 only")
+        if not cost_model_version.strip():
+            raise ValueError("cost_model_version must not be empty")
+        request, coverage = self._request_from_rows(
+            rows,
+            hypothesis,
+            split=split,
+            policy=policy,
+            dataset_fingerprint=dataset_fingerprint,
+            cost_model_version=cost_model_version,
+            event_thresholds={},
+            volatility_cutoffs={},
+        )
+        return PreparedProspectiveEvidence(request=request, coverage=coverage)
+
     def assess_prepared(
         self,
         prepared: Sequence[PreparedProspectiveEvidence],
@@ -366,20 +400,38 @@ class AssessProspectiveScientificEvidence:
         )
         event_thresholds = _event_thresholds(hypothesis, validation)
         volatility_cutoffs = _volatility_cutoffs(hypothesis, validation)
+        return self._request_from_rows(
+            zip(report.features, report.outcomes, strict=True),
+            hypothesis,
+            split=report.split,
+            policy=report.policy,
+            dataset_fingerprint=report.dataset_fingerprint,
+            cost_model_version=cost_model_version,
+            event_thresholds=event_thresholds,
+            volatility_cutoffs=volatility_cutoffs,
+        )
 
+    def _request_from_rows(
+        self,
+        rows: Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]],
+        hypothesis: ProspectiveHypothesis,
+        *,
+        split: ChronologicalSplit,
+        policy: ProspectiveScientificPolicy,
+        dataset_fingerprint: str,
+        cost_model_version: str,
+        event_thresholds: Mapping[tuple[str, str, int], float],
+        volatility_cutoffs: Mapping[tuple[str, str, int], tuple[float, float]],
+    ) -> tuple[EvidenceRequest, ProspectiveEvidenceCoverage]:
         events: list[StudyPoint] = []
         candidates: list[StudyPoint] = []
         diagnostic_reasons: Counter[str] = Counter()
         holdout_count = 0
         available_holdout_count = 0
-        for feature, outcome in zip(
-            report.features,
-            report.outcomes,
-            strict=True,
-        ):
+        for feature, outcome in rows:
             if (
                 feature.hypothesis is not hypothesis
-                or report.split.partition_for(feature.trading_day)
+                or split.partition_for(feature.trading_day)
                 is not DatasetPartition.HOLDOUT
             ):
                 continue
@@ -391,7 +443,7 @@ class AssessProspectiveScientificEvidence:
             effect = _effect_value(
                 feature,
                 outcome,
-                round_trip_cost_bps=report.policy.round_trip_cost_bps,
+                round_trip_cost_bps=policy.round_trip_cost_bps,
             )
             if effect is None:
                 diagnostic_reasons[f"feature_{feature.reason.value}"] += 1
@@ -408,20 +460,7 @@ class AssessProspectiveScientificEvidence:
             )
             (events if treated else candidates).append(point)
 
-        candidates_with_exclusions = tuple(
-            replace(
-                candidate,
-                nearby_scenario_ids=tuple(
-                    event.scenario_id
-                    for event in events
-                    if event.scenario_id is not None
-                    and event.instrument_id == candidate.instrument_id
-                    and abs(event.occurred_at - candidate.occurred_at)
-                    <= timedelta(minutes=5)
-                ),
-            )
-            for candidate in candidates
-        )
+        candidates_with_exclusions = _with_scenario_exclusions(candidates, events)
         matched = self._controls.execute(events, candidates_with_exclusions)
         coverage = ProspectiveEvidenceCoverage(
             hypothesis_id=hypothesis.value,
@@ -436,7 +475,7 @@ class AssessProspectiveScientificEvidence:
             EvidenceRequest(
                 hypothesis_id=hypothesis.value,
                 hypothesis_version=hypothesis.version,
-                dataset_fingerprint=report.dataset_fingerprint,
+                dataset_fingerprint=dataset_fingerprint,
                 groups=matched.groups,
                 expected_eligible_events=len(events),
                 unmatched_event_ids=matched.unmatched_event_ids,
@@ -453,6 +492,45 @@ class AssessProspectiveScientificEvidence:
             ),
             coverage,
         )
+
+
+def _with_scenario_exclusions(
+    candidates: Sequence[StudyPoint],
+    events: Sequence[StudyPoint],
+) -> tuple[StudyPoint, ...]:
+    """Attach the same five-minute exclusions with an indexed time window."""
+
+    by_instrument: defaultdict[str, list[StudyPoint]] = defaultdict(list)
+    for event in events:
+        if event.scenario_id is not None:
+            by_instrument[event.instrument_id].append(event)
+    indexed = {
+        instrument: (
+            tuple(item.occurred_at for item in ordered),
+            tuple(item.scenario_id for item in ordered),
+        )
+        for instrument, values in by_instrument.items()
+        for ordered in (
+            tuple(sorted(values, key=lambda item: (item.occurred_at, item.point_id))),
+        )
+    }
+    window = timedelta(minutes=5)
+    enriched: list[StudyPoint] = []
+    for candidate in candidates:
+        times, scenario_ids = indexed.get(candidate.instrument_id, ((), ()))
+        start = bisect_left(times, candidate.occurred_at - window)
+        stop = bisect_right(times, candidate.occurred_at + window)
+        enriched.append(
+            replace(
+                candidate,
+                nearby_scenario_ids=tuple(
+                    scenario_id
+                    for scenario_id in scenario_ids[start:stop]
+                    if scenario_id is not None
+                ),
+            )
+        )
+    return tuple(enriched)
 
 
 def _event_thresholds(
