@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from random import random
+from threading import Event
+import time
+from typing import Any, Callable
 
 from psycopg import connect
 
+from tinvest_signal_engine.adapters.clickhouse_resilience import (
+    BoundedExponentialBackoff,
+    TransientClickHouseError,
+)
+from tinvest_signal_engine.adapters.dependency_recovery import (
+    DependencyRecoveryMetrics,
+    NoopDependencyRecoveryMetrics,
+    record_dependency_recovered,
+    wait_for_dependency,
+)
 from tinvest_signal_engine.adapters.clickhouse_reference_ticks import (
     ClickHouseReferenceTickReader,
 )
@@ -18,12 +30,19 @@ from tinvest_signal_engine.adapters.postgres_signal_outcomes import (
     PostgresDirectionalSignalOutcomeCandidateSource,
     PostgresSignalOutcomeStore,
 )
+from tinvest_signal_engine.adapters.reliability_metrics import (
+    PrometheusReliabilityMetrics,
+    start_reliability_metrics_server,
+)
 from tinvest_signal_engine.application.signal_outcomes import (
     DirectionalSignalOutcomeBatchProcessor,
 )
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.signal_outcomes import DirectionalOutcomePolicy
 from tinvest_signal_engine.logging_utils import configure_logging
+from tinvest_signal_engine.services.graceful_shutdown import (
+    graceful_shutdown_event,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -62,28 +81,78 @@ def main() -> None:
     )
     batch_size = _env_int("SIGNAL_OUTCOME_WORKER_BATCH_SIZE", 100)
     poll_seconds = _env_float("SIGNAL_OUTCOME_WORKER_POLL_SECONDS", 5.0)
+    start_reliability_metrics_server(settings.metrics_listen_port)
+    metrics = PrometheusReliabilityMetrics()
 
     logger.info("Starting automatic signal outcome worker")
-    try:
-        while True:
+    with graceful_shutdown_event(
+        logger=logger,
+        worker="signal_outcome_worker",
+    ) as stop_event:
+        run_worker_loop(
+            worker,
+            batch_size=batch_size,
+            poll_seconds=poll_seconds,
+            stop_event=stop_event,
+            metrics=metrics,
+        )
+
+
+def run_worker_loop(
+    worker: DirectionalSignalOutcomeBatchProcessor,
+    *,
+    batch_size: int,
+    poll_seconds: float,
+    stop_event: Event,
+    metrics: DependencyRecoveryMetrics | None = None,
+    backoff: BoundedExponentialBackoff = BoundedExponentialBackoff(),
+    now: Callable[[], datetime] = lambda: datetime.now(tz=timezone.utc),
+    random_value: Callable[[], float] = random,
+) -> None:
+    """Process due outcomes while ClickHouse recovers and shutdown stays responsive."""
+
+    recovery_metrics = metrics or NoopDependencyRecoveryMetrics()
+    consecutive_failures = 0
+    while not stop_event.is_set():
+        try:
             result = worker.process_due(
-                now=datetime.now(tz=timezone.utc),
+                now=now(),
                 limit=batch_size,
             )
-            if result.scanned:
-                logger.info(
-                    "Processed signal outcome batch",
-                    extra={
-                        "scanned": result.scanned,
-                        "stored": result.stored,
-                        "pending": result.pending,
-                        "reason_counts": dict(result.reason_counts),
-                    },
-                )
-            if result.scanned == 0:
-                time.sleep(poll_seconds)
-    except KeyboardInterrupt:
-        logger.info("Signal outcome worker stopped by user")
+        except TransientClickHouseError as error:
+            consecutive_failures += 1
+            if wait_for_dependency(
+                worker="signal_outcome_worker",
+                error=error,
+                consecutive_failures=consecutive_failures,
+                stop_event=stop_event,
+                backoff=backoff,
+                metrics=recovery_metrics,
+                logger=logger,
+                random_value=random_value,
+            ):
+                break
+            continue
+        record_dependency_recovered(
+            worker="signal_outcome_worker",
+            operation="reference_tick_select",
+            consecutive_failures=consecutive_failures,
+            metrics=recovery_metrics,
+            logger=logger,
+        )
+        consecutive_failures = 0
+        if result.scanned:
+            logger.info(
+                "Processed signal outcome batch",
+                extra={
+                    "scanned": result.scanned,
+                    "stored": result.stored,
+                    "pending": result.pending,
+                    "reason_counts": dict(result.reason_counts),
+                },
+            )
+        if result.scanned == 0:
+            stop_event.wait(poll_seconds)
 
 
 def outcome_policy_from_env() -> DirectionalOutcomePolicy:

@@ -12,10 +12,17 @@ from tinvest_signal_engine.adapters.kafka_reference_ticks import (
     ReferenceTickKafkaRuntime,
     build_reference_tick_consumer,
 )
+from tinvest_signal_engine.adapters.reliability_metrics import (
+    PrometheusReliabilityMetrics,
+    start_reliability_metrics_server,
+)
 from tinvest_signal_engine.application.reference_ticks import ReferenceTickProcessor
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.kafka_wire_config import validate_kafka_wire_settings
 from tinvest_signal_engine.logging_utils import configure_logging
+from tinvest_signal_engine.services.graceful_shutdown import (
+    graceful_shutdown_event,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +38,8 @@ def main() -> None:
         raise RuntimeError("CLICKHOUSE_USERNAME is required")
     if not settings.clickhouse_http_password:
         raise RuntimeError("CLICKHOUSE_PASSWORD or CLICKHOUSE_PASSWORD_FILE is required")
+    start_reliability_metrics_server(settings.metrics_listen_port)
+    metrics = PrometheusReliabilityMetrics()
 
     store = ClickHouseReferenceTickStore(
         base_url=settings.clickhouse_http_url,
@@ -50,9 +59,14 @@ def main() -> None:
             value_format=settings.kafka_raw_value_format,
         ),
         processor=ReferenceTickProcessor(store),
+        metrics=metrics,
     )
     logger.info("Starting reference tick writer")
-    runtime.run()
+    with graceful_shutdown_event(
+        logger=logger,
+        worker="reference_tick_writer",
+    ) as stop_event:
+        runtime.run(stop_event=stop_event)
 
 
 if __name__ == "__main__":

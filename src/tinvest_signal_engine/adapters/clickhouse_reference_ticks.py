@@ -11,6 +11,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from tinvest_signal_engine.adapters.clickhouse_resilience import (
+    transient_clickhouse_error,
+)
 from tinvest_signal_engine.domain.reference_ticks import ReferenceTick
 
 
@@ -53,6 +56,47 @@ INSERT INTO market_reference_ticks
     bid_quantity, ask_quantity,
     has_valid_book, has_last_price, has_trade
 )
+SELECT
+    incoming.instrument_id,
+    incoming.event_at,
+    incoming.received_at,
+    incoming.event_id,
+    incoming.source_kind,
+    incoming.bid_price,
+    incoming.ask_price,
+    incoming.last_price,
+    incoming.trade_price,
+    incoming.bid_quantity,
+    incoming.ask_quantity,
+    incoming.has_valid_book,
+    incoming.has_last_price,
+    incoming.has_trade
+FROM input(
+    'instrument_id String,
+     event_at DateTime64(9, \\'UTC\\'),
+     received_at DateTime64(9, \\'UTC\\'),
+     event_id UUID,
+     source_kind String,
+     bid_price Decimal(18, 9),
+     ask_price Decimal(18, 9),
+     last_price Decimal(18, 9),
+     trade_price Decimal(18, 9),
+     bid_quantity UInt64,
+     ask_quantity UInt64,
+     has_valid_book UInt8,
+     has_last_price UInt8,
+     has_trade UInt8'
+) AS incoming
+LEFT ANTI JOIN
+(
+    SELECT instrument_id, event_at, event_id
+    FROM market_reference_ticks
+    WHERE event_at >= parseDateTime64BestEffort({batch_start:String}, 9, 'UTC')
+      AND event_at <= parseDateTime64BestEffort({batch_end:String}, 9, 'UTC')
+) AS stored
+ON stored.instrument_id = incoming.instrument_id
+   AND stored.event_at = incoming.event_at
+   AND stored.event_id = incoming.event_id
 FORMAT JSONEachRow
 """.strip()
 
@@ -125,24 +169,35 @@ class ClickHouseReferenceTickStore:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 response.read()
-        except HTTPError as error:
+        except (HTTPError, URLError, TimeoutError, ConnectionResetError) as error:
+            transient = transient_clickhouse_error(
+                error,
+                operation="reference_tick_insert",
+            )
+            if transient is not None:
+                raise transient from error
             raise RuntimeError(
                 f"ClickHouse reference tick insert failed with status {error.code}"
-            ) from error
-        except URLError as error:
-            raise RuntimeError(
-                "ClickHouse reference tick insert connection failed"
             ) from error
 
     def persist_many(self, ticks: tuple[ReferenceTick, ...]) -> None:
         if not ticks:
             return
+        ticks = _unique_ticks(ticks)
         rows = "\n".join(
             json.dumps(_json_row(tick), ensure_ascii=True, separators=(",", ":"))
             for tick in ticks
         )
+        batch_start = min(tick.event_at for tick in ticks).isoformat()
+        batch_end = max(tick.event_at for tick in ticks).isoformat()
+        query = {
+            "database": self._database,
+            "date_time_input_format": "best_effort",
+            "param_batch_start": batch_start,
+            "param_batch_end": batch_end,
+        }
         request = Request(
-            f"{self._base_url}/?{urlencode({'database': self._database, 'date_time_input_format': 'best_effort'})}",
+            f"{self._base_url}/?{urlencode(query)}",
             data=(BATCH_INSERT_REFERENCE_TICKS_SQL + "\n" + rows + "\n").encode(
                 "utf-8"
             ),
@@ -156,13 +211,16 @@ class ClickHouseReferenceTickStore:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 response.read()
-        except HTTPError as error:
+        except (HTTPError, URLError, TimeoutError, ConnectionResetError) as error:
+            transient = transient_clickhouse_error(
+                error,
+                operation="reference_tick_batch_insert",
+            )
+            if transient is not None:
+                raise transient from error
             raise RuntimeError(
-                f"ClickHouse reference tick batch insert failed with status {error.code}"
-            ) from error
-        except URLError as error:
-            raise RuntimeError(
-                "ClickHouse reference tick batch insert connection failed"
+                "ClickHouse reference tick batch insert failed "
+                f"with status {error.code}"
             ) from error
 
 
@@ -183,6 +241,18 @@ def _parameters(tick: ReferenceTick) -> Mapping[str, str]:
         "has_last_price": "1" if tick.has_last_price else "0",
         "has_trade": "1" if tick.has_trade else "0",
     }
+
+
+def _unique_ticks(
+    ticks: tuple[ReferenceTick, ...],
+) -> tuple[ReferenceTick, ...]:
+    selected: dict[UUID, ReferenceTick] = {}
+    for tick in ticks:
+        current = selected.get(tick.event_id)
+        if current is not None and current != tick:
+            raise ValueError("conflicting reference ticks share event_id")
+        selected[tick.event_id] = tick
+    return tuple(selected.values())
 
 
 def _json_row(tick: ReferenceTick) -> Mapping[str, object]:
@@ -267,13 +337,15 @@ class ClickHouseReferenceTickReader:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 payload = response.read().decode("utf-8")
-        except HTTPError as error:
+        except (HTTPError, URLError, TimeoutError, ConnectionResetError) as error:
+            transient = transient_clickhouse_error(
+                error,
+                operation="reference_tick_select",
+            )
+            if transient is not None:
+                raise transient from error
             raise RuntimeError(
                 f"ClickHouse reference tick select failed with status {error.code}"
-            ) from error
-        except URLError as error:
-            raise RuntimeError(
-                "ClickHouse reference tick select connection failed"
             ) from error
         return tuple(
             _tick_from_row(json.loads(line))

@@ -4,11 +4,23 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
-from typing import Any
+from random import random
+from threading import Event
+from typing import Any, Callable
 
 from kafka import KafkaConsumer
 from kafka.structs import OffsetAndMetadata, TopicPartition
 
+from tinvest_signal_engine.adapters.clickhouse_resilience import (
+    BoundedExponentialBackoff,
+    TransientClickHouseError,
+)
+from tinvest_signal_engine.adapters.dependency_recovery import (
+    DependencyRecoveryMetrics,
+    NoopDependencyRecoveryMetrics,
+    record_dependency_recovered,
+    wait_for_dependency,
+)
 from tinvest_signal_engine.application.scientific_candles import (
     NormalizedCandleEvent,
     ScientificCandleJournalProcessor,
@@ -40,14 +52,25 @@ def build_scientific_candle_consumer(
 
 class ScientificCandleKafkaRuntime:
     def __init__(
-        self, *, consumer: Any, processor: ScientificCandleJournalProcessor
+        self,
+        *,
+        consumer: Any,
+        processor: ScientificCandleJournalProcessor,
+        backoff: BoundedExponentialBackoff = BoundedExponentialBackoff(),
+        metrics: DependencyRecoveryMetrics | None = None,
+        random_value: Callable[[], float] = random,
     ) -> None:
         self._consumer = consumer
         self._processor = processor
+        self._backoff = backoff
+        self._metrics = metrics or NoopDependencyRecoveryMetrics()
+        self._random_value = random_value
 
-    def run(self) -> None:
+    def run(self, *, stop_event: Event | None = None) -> None:
+        stop = stop_event or Event()
+        consecutive_failures = 0
         try:
-            while True:
+            while not stop.is_set():
                 polled = self._consumer.poll(timeout_ms=1_000, max_records=500)
                 messages = tuple(
                     message
@@ -80,9 +103,37 @@ class ScientificCandleKafkaRuntime:
                             raw.get("event_id"),
                             error,
                         )
-                self._processor.process_many(tuple(events))
+                while not stop.is_set():
+                    try:
+                        self._processor.process_many(tuple(events))
+                    except TransientClickHouseError as error:
+                        consecutive_failures += 1
+                        if wait_for_dependency(
+                            worker="scientific_candle_writer",
+                            error=error,
+                            consecutive_failures=consecutive_failures,
+                            stop_event=stop,
+                            backoff=self._backoff,
+                            metrics=self._metrics,
+                            logger=logger,
+                            random_value=self._random_value,
+                        ):
+                            break
+                        continue
+                    record_dependency_recovered(
+                        worker="scientific_candle_writer",
+                        operation="scientific_candle_insert",
+                        consecutive_failures=consecutive_failures,
+                        metrics=self._metrics,
+                        logger=logger,
+                    )
+                    consecutive_failures = 0
+                    break
+                if stop.is_set():
+                    break
                 self._commit(messages)
         except KeyboardInterrupt:
+            stop.set()
             logger.info("Scientific candle writer stopped by user")
         finally:
             self._consumer.close()

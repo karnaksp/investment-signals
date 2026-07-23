@@ -15,6 +15,10 @@ from typing import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from tinvest_signal_engine.adapters.clickhouse_resilience import (
+    transient_clickhouse_error,
+)
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.domain.prospective_live_shadow import (
@@ -420,13 +424,16 @@ class ClickHouseProspectiveScientificStore:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 return response.read()
-        except HTTPError as error:
+        except (HTTPError, URLError, TimeoutError, ConnectionResetError) as error:
+            transient = transient_clickhouse_error(
+                error,
+                operation="scientific_evidence_request",
+            )
+            if transient is not None:
+                raise transient from error
             raise RuntimeError(
-                f"ClickHouse scientific evidence request failed with status {error.code}"
-            ) from error
-        except (URLError, TimeoutError, ConnectionResetError) as error:
-            raise RuntimeError(
-                "ClickHouse scientific evidence connection failed"
+                "ClickHouse scientific evidence request failed "
+                f"with status {error.code}"
             ) from error
 
 

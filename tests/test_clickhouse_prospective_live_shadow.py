@@ -3,12 +3,19 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from io import BytesIO
 import json
 from pathlib import Path
+from threading import Event
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from tinvest_signal_engine.adapters.clickhouse_resilience import (
+    BoundedExponentialBackoff,
+    TransientClickHouseError,
+)
 from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
     ClickHouseProspectiveLiveOutcomeSource,
     ClickHouseProspectiveLiveSnapshotSource,
@@ -126,6 +133,78 @@ def test_live_worker_retries_after_transient_dependency_failure(caplog) -> None:
     assert runtime.calls == 2
     assert sleeps == [0.25]
     assert "retrying after dependency recovery" in caplog.text
+
+
+def test_live_worker_uses_bounded_backoff_for_classified_clickhouse_failure() -> None:
+    class Runtime:
+        calls = 0
+
+        def run_once(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise TransientClickHouseError(
+                    operation="scientific_evidence_request",
+                    reason_code="http_500",
+                )
+            raise KeyboardInterrupt
+
+    class RecordingEvent(Event):
+        waits: list[float]
+
+        def __init__(self):
+            super().__init__()
+            self.waits = []
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            return False
+
+    runtime = Runtime()
+    stop = RecordingEvent()
+
+    with pytest.raises(KeyboardInterrupt):
+        run_worker_loop(
+            runtime,  # type: ignore[arg-type]
+            snapshot_limit=25,
+            outcome_limit=100,
+            poll_seconds=60,
+            stop_event=stop,
+            backoff=BoundedExponentialBackoff(
+                base_seconds=0.25,
+                maximum_seconds=1,
+            ),
+            now=lambda: OBSERVED_AT,
+            random_value=lambda: 0.5,
+        )
+
+    assert runtime.calls == 2
+    assert stop.waits == [0.25]
+
+
+def test_live_store_classifies_clickhouse_500_without_response_body(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.clickhouse_prospective_scientific_observations.urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(
+            HTTPError(
+                request.full_url,
+                500,
+                "server error",
+                {},
+                BytesIO(b"secret-response-body"),
+            )
+        ),
+    )
+
+    with pytest.raises(TransientClickHouseError) as raised:
+        _clickhouse_store().pending_observations(
+            outcome_policy_version="prospective-live-outcomes-v1",
+            limit=7,
+        )
+
+    assert raised.value.reason_code == "http_500"
+    assert "secret" not in str(raised.value)
 
 
 def _snapshot() -> ProspectivePortfolioSnapshot:

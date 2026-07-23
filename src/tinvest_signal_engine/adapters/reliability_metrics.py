@@ -85,6 +85,17 @@ _observation_attempt_number = Histogram(
     ("outcome",),
     buckets=(1, 2, 3, 4, 5, 8, 13, 21),
 )
+_dependency_attempts = Counter(
+    "clickhouse_dependency_attempts_total",
+    "Bounded ClickHouse dependency recovery attempts",
+    ("worker", "operation", "outcome", "reason_code"),
+)
+_dependency_backoff = Histogram(
+    "clickhouse_dependency_backoff_seconds",
+    "Interruptible delay before a ClickHouse dependency retry",
+    ("worker", "operation"),
+    buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30),
+)
 
 
 class PrometheusReliabilityMetrics:
@@ -154,6 +165,27 @@ class PrometheusReliabilityMetrics:
     ) -> None:
         _observation_publication.labels(outcome=outcome).inc()
         _observation_attempt_number.labels(outcome=outcome).observe(attempt_count)
+
+    def dependency_attempted(
+        self,
+        *,
+        worker: str,
+        operation: str,
+        outcome: str,
+        reason_code: str,
+        delay_seconds: float,
+    ) -> None:
+        _dependency_attempts.labels(
+            worker=worker,
+            operation=operation,
+            outcome=outcome,
+            reason_code=reason_code,
+        ).inc()
+        if delay_seconds > 0:
+            _dependency_backoff.labels(
+                worker=worker,
+                operation=operation,
+            ).observe(delay_seconds)
 
 
 def start_reliability_metrics_server(

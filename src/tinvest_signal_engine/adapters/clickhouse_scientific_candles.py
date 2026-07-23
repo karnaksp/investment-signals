@@ -8,6 +8,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from tinvest_signal_engine.adapters.clickhouse_resilience import (
+    transient_clickhouse_error,
+)
 from tinvest_signal_engine.domain.scientific_candles import ScientificCandle
 
 
@@ -63,13 +66,15 @@ class ClickHouseScientificCandleStore:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 response.read()
-        except HTTPError as error:
+        except (HTTPError, URLError, TimeoutError, ConnectionResetError) as error:
+            transient = transient_clickhouse_error(
+                error,
+                operation="scientific_candle_insert",
+            )
+            if transient is not None:
+                raise transient from error
             raise RuntimeError(
                 f"ClickHouse scientific candle insert failed with status {error.code}"
-            ) from error
-        except URLError as error:
-            raise RuntimeError(
-                "ClickHouse scientific candle insert connection failed"
             ) from error
 
 
