@@ -32,7 +32,10 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     TargetMetric,
     fit_har_v2_parameters,
 )
-from tinvest_signal_engine.domain.scientific_candles import ScientificCandle
+from tinvest_signal_engine.domain.scientific_candles import (
+    ScientificCandle,
+    scientific_candle_fingerprint,
+)
 
 
 _CANDLE_COLUMNS = (
@@ -699,29 +702,83 @@ def _series_point(row: Mapping[str, object], *, cutoff: datetime) -> _SeriesPoin
     fingerprint = str(row["payload_fingerprint"])
     if not fingerprint.startswith("sha256:"):
         fingerprint = "sha256:" + fingerprint
+    raw_prices = tuple(
+        Decimal(str(row[column]))
+        for column in ("open_price", "high_price", "low_price", "close_price")
+    )
+    # Decimal(18, 9) is rendered by ClickHouse with its storage scale.  Stream
+    # fingerprints were sealed from T-Invest quotations before persistence, so
+    # e.g. Decimal("280.1") returns as Decimal("280.100000000").  Try the exact
+    # transport representation first, then the sole lossless normalization
+    # introduced by that storage boundary.  A fingerprint must still match one
+    # of those complete payloads; arbitrary or corrupted rows remain rejected.
+    normalized_prices = tuple(_without_storage_scale(value) for value in raw_prices)
+    price_candidates = (raw_prices, normalized_prices)
+    instrument_id = str(row["instrument_id"])
+    ticker = str(row["ticker"])
+    exchange = str(row["exchange"])
+    volume = int(row["volume"])
+    complete = _boolean(row["is_complete"])
+    source_kind = str(row["source_kind"])
+    source_event_id = str(row["source_event_id"])
+    has_gap = _boolean(row["has_gap"])
+    schema_version = str(row["schema_version"])
+    prices = next(
+        (
+            candidate
+            for candidate in price_candidates
+            if scientific_candle_fingerprint(
+                instrument_id=instrument_id,
+                ticker=ticker,
+                exchange=exchange,
+                candle_at=candle_at,
+                open_price=candidate[0],
+                high_price=candidate[1],
+                low_price=candidate[2],
+                close_price=candidate[3],
+                volume=volume,
+                complete=complete,
+                source_kind=source_kind,
+                source_at=source_at,
+                source_event_id=source_event_id,
+                has_gap=has_gap,
+                schema_version=schema_version,
+            )
+            == fingerprint
+        ),
+        None,
+    )
+    if prices is None:
+        raise ValueError("candle payload fingerprint does not match content")
     return _SeriesPoint(
         candle=ScientificCandle(
-            instrument_id=str(row["instrument_id"]),
-            ticker=str(row["ticker"]),
-            exchange=str(row["exchange"]),
+            instrument_id=instrument_id,
+            ticker=ticker,
+            exchange=exchange,
             trading_day=date.fromisoformat(str(row["trading_day"])),
             candle_at=candle_at,
-            open_price=Decimal(str(row["open_price"])),
-            high_price=Decimal(str(row["high_price"])),
-            low_price=Decimal(str(row["low_price"])),
-            close_price=Decimal(str(row["close_price"])),
-            volume=int(row["volume"]),
-            complete=_boolean(row["is_complete"]),
-            source_kind=str(row["source_kind"]),
+            open_price=prices[0],
+            high_price=prices[1],
+            low_price=prices[2],
+            close_price=prices[3],
+            volume=volume,
+            complete=complete,
+            source_kind=source_kind,
             source_at=source_at,
             received_at=received_at,
-            source_event_id=str(row["source_event_id"]),
+            source_event_id=source_event_id,
             payload_fingerprint=fingerprint,
-            has_gap=_boolean(row["has_gap"]),
-            schema_version=str(row["schema_version"]),
+            has_gap=has_gap,
+            schema_version=schema_version,
         ),
         record_version=int(row["record_version"]),
     )
+
+
+def _without_storage_scale(value: Decimal) -> Decimal:
+    """Remove only insignificant ClickHouse Decimal trailing zeroes."""
+
+    return Decimal(format(value.normalize(), "f"))
 
 
 def _observed_at(candle: ScientificCandle) -> datetime:

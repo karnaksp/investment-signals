@@ -426,6 +426,48 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
     )
 
 
+def test_snapshot_source_accepts_clickhouse_decimal_storage_scale() -> None:
+    first = OBSERVED_AT - timedelta(minutes=120)
+    candles = tuple(
+        _canonical_price_candle(first + timedelta(minutes=index), index)
+        for index in range(120)
+    )
+    rows = []
+    for candle in candles:
+        row = _candle_row(candle)
+        for column in ("open_price", "high_price", "low_price", "close_price"):
+            row[column] = format(Decimal(str(row[column])), ".9f")
+        rows.append(row)
+
+    snapshots = ClickHouseProspectiveLiveSnapshotSource(
+        _CandleClient(tuple(rows)),
+        instrument_ids=("SBER_TQBR",),
+    ).load_snapshots(
+        as_of=RECORDED_AT,
+        policy=PRODUCTION_LIVE_POLICY,
+        limit=1,
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].observed_at == OBSERVED_AT
+
+
+def test_snapshot_source_rejects_tampered_scaled_decimal() -> None:
+    candle = _candle(OBSERVED_AT - timedelta(minutes=1), 1)
+    row = _candle_row(candle)
+    row["close_price"] = format(candle.close_price + Decimal("0.01"), ".9f")
+
+    with pytest.raises(ValueError, match="fingerprint does not match content"):
+        ClickHouseProspectiveLiveSnapshotSource(
+            _CandleClient((row,)),
+            instrument_ids=("SBER_TQBR",),
+        ).load_snapshots(
+            as_of=RECORDED_AT,
+            policy=PRODUCTION_LIVE_POLICY,
+            limit=1,
+        )
+
+
 def test_outcome_source_reads_as_of_now_but_seals_evidence_at_target() -> None:
     observation = _live_observation()
     first = OBSERVED_AT - timedelta(minutes=120)
@@ -724,6 +766,37 @@ def _candle(candle_at: datetime, index: int) -> ScientificCandle:
         "source_kind": "stream",
         "source_at": source_at,
         "source_event_id": source_event_id,
+        "has_gap": False,
+        "schema_version": "scientific-candle-v1",
+    }
+    return ScientificCandle(
+        **fields,
+        trading_day=candle_at.date(),
+        received_at=source_at,
+        payload_fingerprint=scientific_candle_fingerprint(**fields),
+    )
+
+
+def _canonical_price_candle(candle_at: datetime, index: int) -> ScientificCandle:
+    def quotation(value: Decimal) -> Decimal:
+        return Decimal(format(value.normalize(), "f"))
+
+    price = quotation(Decimal("100") + Decimal(index) / 100)
+    source_at = candle_at + timedelta(seconds=59)
+    fields = {
+        "instrument_id": "SBER_TQBR",
+        "ticker": "SBER",
+        "exchange": "MOEX",
+        "candle_at": candle_at,
+        "open_price": price,
+        "high_price": quotation(price + Decimal("0.01")),
+        "low_price": quotation(price - Decimal("0.01")),
+        "close_price": price,
+        "volume": 100 + index,
+        "complete": True,
+        "source_kind": "stream",
+        "source_at": source_at,
+        "source_event_id": f"candle-{index}",
         "has_gap": False,
         "schema_version": "scientific-candle-v1",
     }
