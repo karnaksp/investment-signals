@@ -90,7 +90,7 @@ INTERMEDIATE_SCIENTIFIC_CANDLE_EVIDENCE_POLICY = EvidenceGatePolicy(
     false_discovery_rate=0.05,
     required_positive_stability_blocks=3,
     maximum_instrument_share=0.40,
-    minimum_coverage=0.10,
+    minimum_common_support_coverage=0.10,
 )
 
 

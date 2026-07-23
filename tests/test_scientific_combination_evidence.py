@@ -106,7 +106,7 @@ def test_small_selective_coverage_is_blocked_instead_of_claimed_as_quality() -> 
 
     assert result.statistical_state is CombinationStatisticalState.BLOCKED_DATA
     assert "minimum_eligible_events_not_met" in result.evidence.reason_codes
-    assert "minimum_coverage_not_met" in result.evidence.reason_codes
+    assert "minimum_coverage_not_met" not in result.evidence.reason_codes
     assert result.evidence.mean_lift_bps is None
 
 
@@ -299,7 +299,7 @@ def _policy() -> EvidenceGatePolicy:
         false_discovery_rate=0.05,
         required_positive_stability_blocks=4,
         maximum_instrument_share=0.75,
-        minimum_coverage=0.10,
+        minimum_common_support_coverage=0.10,
     )
 
 

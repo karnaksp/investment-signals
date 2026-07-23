@@ -182,6 +182,12 @@ class EvidenceRequest:
             raise ValueError("matched event ids must be unique")
         if set(event_ids) & set(self.unmatched_event_ids):
             raise ValueError("an event cannot be both matched and unmatched")
+        if len(self.groups) + len(self.unmatched_event_ids) != (
+            self.expected_eligible_events
+        ):
+            raise ValueError(
+                "matched and unmatched events must account for every eligible event"
+            )
         if (
             self.diagnostics_input is not None
             and len(self.groups) > self.diagnostics_input.eligible_event_count
@@ -253,7 +259,11 @@ class EvidenceGatePolicy:
     false_discovery_rate: float = 0.05
     required_positive_stability_blocks: int = 4
     maximum_instrument_share: float = 0.50
-    minimum_coverage: float = 0.10
+    # Minimum share of triggered events that remains on common support after
+    # every event has received the full matched-control set.  Signal prevalence
+    # is reported separately and must not invalidate a scientifically sound
+    # rare-event study.
+    minimum_common_support_coverage: float = 0.10
 
     def __post_init__(self) -> None:
         if self.minimum_trading_days <= 0 or self.minimum_eligible_events <= 0:
@@ -264,8 +274,10 @@ class EvidenceGatePolicy:
             raise ValueError("false_discovery_rate must be between zero and one")
         if not 0.0 < self.maximum_instrument_share < 1.0:
             raise ValueError("maximum_instrument_share must be between zero and one")
-        if not 0.0 < self.minimum_coverage <= 1.0:
-            raise ValueError("minimum_coverage must be in (0, 1]")
+        if not 0.0 < self.minimum_common_support_coverage <= 1.0:
+            raise ValueError(
+                "minimum_common_support_coverage must be in (0, 1]"
+            )
 
 
 class AssessEvidencePortfolio:
@@ -310,27 +322,23 @@ class AssessEvidencePortfolio:
 
     def _calculate(self, request: EvidenceRequest) -> EvidenceBundle:
         groups = request.groups
+        matched_event_count = len(groups)
         trading_days = {group.event.trading_day for group in groups}
         cost_versions = {group.event.cost_model_version for group in groups}
         bad_control_count = any(
             len(group.controls) != self._policy.controls_per_event for group in groups
         )
         reasons: list[str] = []
-        if request.expected_eligible_events < self._policy.minimum_eligible_events:
+        if matched_event_count < self._policy.minimum_eligible_events:
             reasons.append("minimum_eligible_events_not_met")
         if (
-            request.total_available_observations is not None
-            and request.expected_eligible_events / request.total_available_observations
-            < self._policy.minimum_coverage
+            request.expected_eligible_events
+            and matched_event_count / request.expected_eligible_events
+            < self._policy.minimum_common_support_coverage
         ):
             reasons.append("minimum_coverage_not_met")
         if len(trading_days) < self._policy.minimum_trading_days:
             reasons.append("minimum_trading_days_not_met")
-        if (
-            request.unmatched_event_ids
-            or len(groups) != request.expected_eligible_events
-        ):
-            reasons.append("matched_controls_incomplete")
         if bad_control_count:
             reasons.append("controls_per_event_not_met")
         if len(cost_versions) != 1 or not all(cost_versions):
@@ -341,9 +349,12 @@ class AssessEvidencePortfolio:
             for point in (group.event, *group.controls)
         ):
             reasons.append("independent_holdout_required")
+        reuse_statistics = (
+            request.control_reuse_statistics
+            or _control_reuse_statistics(groups)
+        )
         if (
-            request.control_reuse_statistics is not None
-            and request.control_reuse_statistics.independent_clusters
+            reuse_statistics.independent_clusters
             < request.minimum_independent_control_clusters
         ):
             reasons.append("minimum_independent_control_clusters_not_met")
@@ -375,7 +386,7 @@ class AssessEvidencePortfolio:
         )
         diagnostics = _evidence_diagnostics_v2(
             request,
-            matched_event_count=len(groups),
+            matched_event_count=matched_event_count,
             reason_codes=reason_codes,
             primary=primary,
             descriptive_only=blocked,

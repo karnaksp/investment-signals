@@ -44,14 +44,14 @@ PROSPECTIVE_SCIENTIFIC_EVIDENCE_POLICY = EvidenceGatePolicy(
     false_discovery_rate=0.05,
     required_positive_stability_blocks=4,
     maximum_instrument_share=0.50,
-    minimum_coverage=0.10,
+    minimum_common_support_coverage=0.10,
 )
 
 # H12 was the last formula added to this portfolio and was sealed on
 # 2026-07-22.  A combined portfolio claim therefore starts no earlier than the
 # next trading day; older observations remain useful only for research.
 PROSPECTIVE_PRIMARY_HOLDOUT_START = date(2026, 7, 23)
-PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA = "prospective-scientific-evidence-v1.1.0"
+PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA = "prospective-scientific-evidence-v1.2.0"
 
 
 @dataclass(frozen=True, slots=True)

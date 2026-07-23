@@ -570,12 +570,19 @@ def test_evidence_v2_funnel_ratios_preserve_count_identities(
 
 
 def test_low_coverage_blocks_an_otherwise_positive_result() -> None:
+    complete = _request("h-low-coverage", [5.0] * 30)
+    groups = complete.groups[:29]
     request = replace(
-        _request("h-low-coverage", [5.0] * 30),
-        total_available_observations=3_001,
+        complete,
+        groups=groups,
+        unmatched_event_ids=tuple(
+            f"unmatched-{index}" for index in range(300 - len(groups))
+        ),
     )
 
-    (bundle,) = AssessEvidencePortfolio(_fast_policy()).execute((request,))
+    (bundle,) = AssessEvidencePortfolio(
+        _fast_policy(minimum_trading_days=1, minimum_eligible_events=1)
+    ).execute((request,))
 
     assert bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
     assert bundle.reason_codes == ("minimum_coverage_not_met",)
@@ -583,7 +590,22 @@ def test_low_coverage_blocks_an_otherwise_positive_result() -> None:
     assert bundle.raw_p_value is None
 
 
-def test_incomplete_controls_and_mixed_cost_versions_block_the_gate() -> None:
+def test_rare_complete_events_are_not_blocked_by_signal_prevalence() -> None:
+    request = replace(
+        _request("h-rare-complete", [5.0] * 30),
+        total_available_observations=30_000,
+    )
+
+    (bundle,) = AssessEvidencePortfolio(_fast_policy()).execute((request,))
+
+    assert bundle.decision is EvidenceDecision.PASSED
+    assert bundle.reason_codes == ()
+    assert bundle.diagnostics_v2 is not None
+    assert bundle.diagnostics_v2.event_prevalence == pytest.approx(0.01)
+    assert bundle.diagnostics_v2.match_coverage == 1.0
+
+
+def test_unmatched_events_are_excluded_but_mixed_cost_versions_still_block() -> None:
     request = _request("h-costs", [5.0] * 30)
     groups = list(request.groups)
     groups[-1] = _group(
@@ -597,13 +619,34 @@ def test_incomplete_controls_and_mixed_cost_versions_block_the_gate() -> None:
         request,
         groups=tuple(groups),
         unmatched_event_ids=("missing-event",),
+        expected_eligible_events=request.expected_eligible_events + 1,
     )
 
     (bundle,) = AssessEvidencePortfolio(_fast_policy()).execute((blocked,))
 
     assert bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
-    assert "matched_controls_incomplete" in bundle.reason_codes
     assert "versioned_cost_model_required" in bundle.reason_codes
+    assert "matched_controls_incomplete" not in bundle.reason_codes
+    assert bundle.diagnostics_v2 is not None
+    assert bundle.diagnostics_v2.match_coverage == pytest.approx(300 / 301)
+
+
+def test_unmatched_events_do_not_block_sufficient_common_support() -> None:
+    request = _request("h-common-support", [5.0] * 30)
+    assessed = replace(
+        request,
+        unmatched_event_ids=("missing-event",),
+        expected_eligible_events=request.expected_eligible_events + 1,
+    )
+
+    (bundle,) = AssessEvidencePortfolio(_fast_policy()).execute((assessed,))
+
+    assert bundle.decision is EvidenceDecision.PASSED
+    assert bundle.reason_codes == ()
+    assert bundle.eligible_events == 301
+    assert bundle.matched_events == 300
+    assert bundle.diagnostics_v2 is not None
+    assert bundle.diagnostics_v2.match_coverage == pytest.approx(300 / 301)
 
 
 def test_non_holdout_evidence_cannot_pass_independent_gate() -> None:

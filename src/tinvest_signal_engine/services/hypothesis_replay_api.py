@@ -268,6 +268,21 @@ class ReplayEvidenceDiagnosticsV2Response(BaseModel):
     descriptive_only: bool
 
 
+class ReplayControlMatchingResponse(BaseModel):
+    """Auditable common-support and control-dependence summary."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    selection_policy_version: str = Field(min_length=1)
+    maximum_control_reuse: int = Field(ge=1)
+    distinct_controls: int = Field(ge=0)
+    maximum_observed_control_reuse: int = Field(ge=0)
+    mean_control_reuse: float = Field(ge=0.0)
+    independent_control_clusters: int = Field(ge=0)
+    minimum_independent_control_clusters: int = Field(ge=1)
+    inference_unit: Literal["trading_day", "control_dependency_cluster"]
+
+
 class ReplayEvidenceResponse(BaseModel):
     """Strict product-facing aggregate for one requested hypothesis."""
 
@@ -308,6 +323,7 @@ class ReplayEvidenceResponse(BaseModel):
     maximum_period_share: float | None = Field(default=None, ge=0.0, le=1.0)
     abstention_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     diagnostics_v2: ReplayEvidenceDiagnosticsV2Response | None = None
+    control_matching: ReplayControlMatchingResponse | None = None
     horizons: tuple["ReplayHorizonEvidenceResponse", ...]
     claim_family: str = Field(default="directional", min_length=1)
     effect_unit: str = Field(default="cost_adjusted_signed_return_bps", min_length=1)

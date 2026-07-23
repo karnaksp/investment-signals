@@ -34,7 +34,7 @@ def test_intermediate_policy_matches_preregistered_product_gate() -> None:
     assert policy.minimum_trading_days == 20
     assert policy.minimum_eligible_events == 200
     assert policy.controls_per_event == 5
-    assert policy.minimum_coverage == 0.10
+    assert policy.minimum_common_support_coverage == 0.10
     assert policy.required_positive_stability_blocks == 3
     assert policy.maximum_instrument_share == 0.40
 

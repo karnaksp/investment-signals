@@ -132,7 +132,7 @@ def test_assess_prepared_requires_a_non_empty_global_family() -> None:
         gate.assess_prepared(())
 
 
-def test_fdr_is_shared_and_incomplete_controls_fail_closed() -> None:
+def test_fdr_is_shared_and_unmatched_events_are_excluded_from_the_gate() -> None:
     report, _ = _variance_portfolio_report(include_nearby=False)
     assessment = AssessProspectiveScientificEvidence(_fast_policy()).execute(
         report,
@@ -152,7 +152,8 @@ def test_fdr_is_shared_and_incomplete_controls_fail_closed() -> None:
     assert h7.adjusted_q_value is not None
     assert h16.adjusted_q_value is not None
     assert h17.decision is EvidenceDecision.BLOCKED_BY_DATA
-    assert "matched_controls_incomplete" in h17.reason_codes
+    assert "minimum_coverage_not_met" in h17.reason_codes
+    assert "matched_controls_incomplete" not in h17.reason_codes
     assert (
         assessment.coverage_for(
             ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE
@@ -180,7 +181,7 @@ def test_selected_hypotheses_use_bounded_reuse_and_fail_closed_on_one_cluster(
         bootstrap_samples=100,
         required_positive_stability_blocks=1,
         maximum_instrument_share=0.99,
-        minimum_coverage=0.10,
+        minimum_common_support_coverage=0.10,
     )
     assessment = AssessProspectiveScientificEvidence(gate_policy).execute(
         report,
@@ -251,7 +252,7 @@ def test_h15_primary_effect_beats_best_and_therefore_mean_benchmark() -> None:
             bootstrap_samples=100,
             required_positive_stability_blocks=1,
             maximum_instrument_share=0.99,
-            minimum_coverage=0.10,
+            minimum_common_support_coverage=0.10,
         )
     ).execute(
         report,
@@ -289,7 +290,7 @@ def test_h3_h4_effect_is_cost_adjusted_directional_basis_points() -> None:
             bootstrap_samples=100,
             required_positive_stability_blocks=1,
             maximum_instrument_share=0.99,
-            minimum_coverage=0.10,
+            minimum_common_support_coverage=0.10,
         )
     ).execute(
         report,
@@ -385,7 +386,7 @@ def test_adapter_is_deterministic_typed_and_immutable(tmp_path: Path) -> None:
     manifest = json.loads(
         (Path(first.artifact_uri) / "manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest["artifact_schema"] == "prospective-scientific-evidence-v1.1.0"
+    assert manifest["artifact_schema"] == "prospective-scientific-evidence-v1.2.0"
 
     evidence_path.write_text("[]\n", encoding="utf-8")
     with pytest.raises(ValueError, match="immutable prospective replay artifact"):
@@ -502,7 +503,7 @@ def _fast_policy() -> EvidenceGatePolicy:
         false_discovery_rate=0.05,
         required_positive_stability_blocks=4,
         maximum_instrument_share=0.75,
-        minimum_coverage=0.10,
+        minimum_common_support_coverage=0.10,
     )
 
 

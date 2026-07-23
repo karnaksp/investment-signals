@@ -160,6 +160,7 @@ def test_health_readiness_and_completed_result(tmp_path: Path) -> None:
 def test_replay_evidence_contract_preserves_v2_diagnostics_and_legacy_rows() -> None:
     legacy = ReplayEvidenceResponse.model_validate(_fake_evidence("H1"))
     assert legacy.diagnostics_v2 is None
+    assert legacy.control_matching is None
 
     row = dict(_fake_evidence("H7V3"))
     row["diagnostics_v2"] = {
@@ -182,6 +183,18 @@ def test_replay_evidence_contract_preserves_v2_diagnostics_and_legacy_rows() -> 
         },
         "primary_p_value": 0.03125,
         "descriptive_only": True,
+    }
+    row["control_matching"] = {
+        "selection_policy_version": (
+            "bounded-control-reuse-5-rarity-first-exact-strata-exclusion-5m-v2"
+        ),
+        "maximum_control_reuse": 5,
+        "distinct_controls": 11,
+        "maximum_observed_control_reuse": 2,
+        "mean_control_reuse": 1.36,
+        "independent_control_clusters": 9,
+        "minimum_independent_control_clusters": 8,
+        "inference_unit": "control_dependency_cluster",
     }
 
     encoded = ReplayEvidenceResponse.model_validate(row).model_dump(mode="json")
@@ -206,6 +219,18 @@ def test_replay_evidence_contract_preserves_v2_diagnostics_and_legacy_rows() -> 
         },
         "primary_p_value": 0.03125,
         "descriptive_only": True,
+    }
+    assert encoded["control_matching"] == {
+        "selection_policy_version": (
+            "bounded-control-reuse-5-rarity-first-exact-strata-exclusion-5m-v2"
+        ),
+        "maximum_control_reuse": 5,
+        "distinct_controls": 11,
+        "maximum_observed_control_reuse": 2,
+        "mean_control_reuse": 1.36,
+        "independent_control_clusters": 9,
+        "minimum_independent_control_clusters": 8,
+        "inference_unit": "control_dependency_cluster",
     }
 
 
