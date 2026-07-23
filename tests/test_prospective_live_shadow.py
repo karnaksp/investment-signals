@@ -138,6 +138,7 @@ def _snapshot(*, sufficient: bool = True) -> ProspectivePortfolioSnapshot:
 class _OutcomeSource:
     def __init__(self, *, available: bool = True) -> None:
         self.available = available
+        self.evidence_fingerprint = EVIDENCE
         self.calls = 0
 
     def load(self, observation, *, as_of):
@@ -164,7 +165,7 @@ class _OutcomeSource:
             target_at=observation.target_at,
             available=self.available,
             actual_value=actual,
-            evidence_fingerprint=EVIDENCE,
+            evidence_fingerprint=self.evidence_fingerprint,
             ewma_baseline=ewma,
             phase_baseline=phase,
         )
@@ -314,7 +315,7 @@ def test_temporarily_unavailable_mature_outcomes_are_retried_during_grace() -> N
     source.available = True
     second = worker.run_once(
         now=OBSERVED_AT
-        + timedelta(seconds=min(POLICY.jump_horizons_seconds) + 1),
+        + timedelta(seconds=min(POLICY.jump_horizons_seconds), minutes=1),
         limit=20,
     )
 
@@ -327,25 +328,78 @@ def test_temporarily_unavailable_mature_outcomes_are_retried_during_grace() -> N
     assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 2
 
 
-def test_unavailable_outcomes_are_sealed_after_availability_grace() -> None:
+def test_stable_unavailable_outcomes_are_sealed_after_confirmation() -> None:
     store = InMemoryProspectiveLiveShadowStore()
     RecordProspectivePortfolioSnapshot(store=store, policy=POLICY).execute(_snapshot())
-    result = ProcessProspectiveLiveOutcomes(
+    worker = ProcessProspectiveLiveOutcomes(
         store=store,
         source=_OutcomeSource(available=False),
         policy=POLICY,
         outcome_policy_version="live-outcome-v1",
-    ).run_once(
+    )
+    first = worker.run_once(
+        now=OBSERVED_AT + timedelta(seconds=POLICY.volume_horizon_seconds),
+        limit=20,
+    )
+    result = worker.run_once(
         now=OBSERVED_AT
-        + timedelta(seconds=POLICY.volume_horizon_seconds, minutes=5),
+        + timedelta(seconds=POLICY.volume_horizon_seconds, minutes=1),
         limit=20,
     )
 
+    assert first.stored == 0
+    assert first.pending == 8
     assert result.stored == 8
     assert result.pending == 0
     assert result.unavailable == 8
     assert all(row.data_coverage == 0.0 for row in result.event.statistics.rows)
     assert all(row.mean_effect is None for row in result.event.statistics.rows)
+
+
+def test_changed_unavailable_evidence_restarts_confirmation() -> None:
+    store = InMemoryProspectiveLiveShadowStore()
+    RecordProspectivePortfolioSnapshot(store=store, policy=POLICY).execute(_snapshot())
+    source = _OutcomeSource(available=False)
+    worker = ProcessProspectiveLiveOutcomes(
+        store=store,
+        source=source,
+        policy=POLICY,
+        outcome_policy_version="live-outcome-v1",
+    )
+    matured_at = OBSERVED_AT + timedelta(seconds=POLICY.volume_horizon_seconds)
+
+    first = worker.run_once(now=matured_at, limit=20)
+    source.evidence_fingerprint = "sha256:" + "d" * 64
+    changed = worker.run_once(now=matured_at + timedelta(minutes=1), limit=20)
+    sealed = worker.run_once(now=matured_at + timedelta(minutes=2), limit=20)
+
+    assert first.pending == 8
+    assert changed.pending == 8
+    assert changed.stored == 0
+    assert sealed.stored == 8
+    assert sealed.unavailable == 8
+
+
+def test_unavailable_retry_timeout_prevents_infinite_pending() -> None:
+    store = InMemoryProspectiveLiveShadowStore()
+    RecordProspectivePortfolioSnapshot(store=store, policy=POLICY).execute(_snapshot())
+    source = _OutcomeSource(available=False)
+    worker = ProcessProspectiveLiveOutcomes(
+        store=store,
+        source=source,
+        policy=POLICY,
+        outcome_policy_version="live-outcome-v1",
+    )
+    matured_at = OBSERVED_AT + timedelta(seconds=POLICY.volume_horizon_seconds)
+
+    first = worker.run_once(now=matured_at, limit=20)
+    source.evidence_fingerprint = "sha256:" + "e" * 64
+    timed_out = worker.run_once(now=matured_at + timedelta(hours=1), limit=20)
+
+    assert first.pending == 8
+    assert timed_out.pending == 0
+    assert timed_out.stored == 8
+    assert timed_out.unavailable == 8
 
 
 def test_next_ingest_event_retains_accumulated_outcome_statistics() -> None:

@@ -36,7 +36,8 @@ from tinvest_signal_engine.domain.prospective_scientific_observations import (
 
 
 DEFAULT_LIVE_OUTCOME_POLICY_VERSION = "prospective-live-outcomes-v1"
-DEFAULT_LIVE_OUTCOME_AVAILABILITY_GRACE = timedelta(minutes=5)
+DEFAULT_LIVE_OUTCOME_CONFIRMATION_INTERVAL = timedelta(minutes=1)
+DEFAULT_LIVE_OUTCOME_RETRY_TIMEOUT = timedelta(hours=1)
 LIVE_SHADOW_HYPOTHESES = frozenset(
     {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
@@ -272,17 +273,30 @@ class ProcessProspectiveLiveOutcomes:
         source: ProspectiveLiveOutcomeSource,
         policy: ProspectiveScientificPolicy = ProspectiveScientificPolicy(),
         outcome_policy_version: str = DEFAULT_LIVE_OUTCOME_POLICY_VERSION,
-        availability_grace: timedelta = DEFAULT_LIVE_OUTCOME_AVAILABILITY_GRACE,
+        unavailable_confirmation_interval: timedelta = (
+            DEFAULT_LIVE_OUTCOME_CONFIRMATION_INTERVAL
+        ),
+        unavailable_retry_timeout: timedelta = DEFAULT_LIVE_OUTCOME_RETRY_TIMEOUT,
     ) -> None:
         if not outcome_policy_version.strip():
             raise ValueError("outcome_policy_version must not be empty")
-        if availability_grace < timedelta(0):
-            raise ValueError("availability_grace must not be negative")
+        if unavailable_confirmation_interval <= timedelta(0):
+            raise ValueError(
+                "unavailable_confirmation_interval must be positive"
+            )
+        if unavailable_retry_timeout < unavailable_confirmation_interval:
+            raise ValueError(
+                "unavailable_retry_timeout must not be below confirmation interval"
+            )
         self._store = store
         self._source = source
         self._policy = policy
         self._outcome_policy_version = outcome_policy_version
-        self._availability_grace = availability_grace
+        self._unavailable_confirmation_interval = (
+            unavailable_confirmation_interval
+        )
+        self._unavailable_retry_timeout = unavailable_retry_timeout
+        self._unavailable_candidates: dict[str, tuple[str, datetime]] = {}
 
     def run_once(
         self, *, now: datetime, limit: int = 100
@@ -306,12 +320,29 @@ class ProcessProspectiveLiveOutcomes:
                 raise ValueError("outcome evidence belongs to a different observation")
             if evidence.target_at != observation.target_at:
                 raise ValueError("outcome evidence target differs from observation")
-            if (
-                not evidence.available
-                and now < observation.target_at + self._availability_grace
-            ):
-                pending += 1
-                continue
+            if not evidence.available:
+                deadline = observation.target_at + self._unavailable_retry_timeout
+                candidate = self._unavailable_candidates.get(
+                    observation.observation_id
+                )
+                if now < deadline:
+                    if (
+                        candidate is None
+                        or candidate[0] != evidence.evidence_fingerprint
+                    ):
+                        self._unavailable_candidates[observation.observation_id] = (
+                            evidence.evidence_fingerprint,
+                            now,
+                        )
+                        pending += 1
+                        continue
+                    if (
+                        now
+                        < candidate[1] + self._unavailable_confirmation_interval
+                    ):
+                        pending += 1
+                        continue
+            self._unavailable_candidates.pop(observation.observation_id, None)
             outcome = _evaluate_outcome(
                 observation.feature,
                 evidence,
