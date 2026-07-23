@@ -58,6 +58,7 @@ _CANDLE_COLUMNS = (
     "has_gap",
     "schema_version",
     "record_version",
+    "same_version_fingerprint_count",
 )
 _TRADING_DAYS_PER_WEEK = 5
 _CALENDAR_DAYS_PER_WEEK = 7
@@ -87,14 +88,48 @@ SELECT
     payload_fingerprint,
     has_gap,
     schema_version,
-    record_version
-FROM scientific_candles_1m
-PREWHERE instrument_id = {instrument_id:String}
-  AND trading_day >= toDate(parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC'))
-WHERE candle_at >= parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC')
-  AND candle_at < parseDateTime64BestEffort({candle_until:String}, 6, 'UTC')
-  AND source_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
-  AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+    record_version,
+    same_version_fingerprint_count
+FROM
+(
+    SELECT
+        instrument_id,
+        ticker,
+        exchange,
+        trading_day,
+        candle_at,
+        open_price,
+        high_price,
+        low_price,
+        close_price,
+        volume,
+        is_complete,
+        source_kind,
+        source_at,
+        received_at,
+        source_event_id,
+        payload_fingerprint,
+        has_gap,
+        schema_version,
+        record_version,
+        row_number() OVER
+        (
+            PARTITION BY instrument_id, candle_at
+            ORDER BY record_version DESC, payload_fingerprint DESC
+        ) AS physical_rank,
+        uniqExact(payload_fingerprint) OVER
+        (
+            PARTITION BY instrument_id, candle_at, record_version
+        ) AS same_version_fingerprint_count
+    FROM scientific_candles_1m
+    PREWHERE instrument_id = {instrument_id:String}
+      AND trading_day >= toDate(parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC'))
+    WHERE candle_at >= parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC')
+      AND candle_at < parseDateTime64BestEffort({candle_until:String}, 6, 'UTC')
+      AND source_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+      AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+)
+WHERE physical_rank = 1
 ORDER BY trading_day DESC, candle_at DESC, record_version DESC
 LIMIT 75001
 SETTINGS max_execution_time = 30,
@@ -699,6 +734,8 @@ def _series_point(row: Mapping[str, object], *, cutoff: datetime) -> _SeriesPoin
     received_at = _datetime(row["received_at"])
     if max(candle_at, source_at, received_at) > cutoff:
         raise ValueError("ClickHouse returned a scientific candle beyond cutoff")
+    if int(row["same_version_fingerprint_count"]) != 1:
+        raise ValueError("conflicting scientific candle physical versions")
     fingerprint = str(row["payload_fingerprint"])
     if not fingerprint.startswith("sha256:"):
         fingerprint = "sha256:" + fingerprint

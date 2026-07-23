@@ -398,6 +398,10 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
     sql, parameters = client.calls[0]
     assert "PREWHERE instrument_id =" in sql
     assert "trading_day >=" in sql
+    assert "row_number() OVER" in sql
+    assert "PARTITION BY instrument_id, candle_at" in sql
+    assert "uniqExact(payload_fingerprint) OVER" in sql
+    assert "WHERE physical_rank = 1" in sql
     assert "ORDER BY trading_day DESC, candle_at DESC" in sql
     assert "LIMIT 75001" in sql
     assert "max_rows_to_read = 200000" in sql
@@ -503,6 +507,15 @@ def test_backfill_row_restores_parquet_float_integer_scale() -> None:
 
     assert restored.payload_fingerprint == candle.payload_fingerprint
     assert str(restored.high_price) == "263.0"
+
+
+def test_snapshot_source_rejects_latest_physical_version_conflict() -> None:
+    candle = _candle(OBSERVED_AT - timedelta(minutes=1), 1)
+    row = _candle_row(candle)
+    row["same_version_fingerprint_count"] = 2
+
+    with pytest.raises(ValueError, match="conflicting scientific candle"):
+        _series_point(row, cutoff=RECORDED_AT)
 
 
 def test_outcome_source_reads_as_of_now_but_seals_evidence_at_target() -> None:
@@ -866,4 +879,5 @@ def _candle_row(candle: ScientificCandle) -> dict[str, object]:
         "has_gap": "0",
         "schema_version": candle.schema_version,
         "record_version": 1,
+        "same_version_fingerprint_count": 1,
     }
