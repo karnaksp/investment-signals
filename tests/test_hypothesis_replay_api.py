@@ -161,6 +161,7 @@ def test_replay_evidence_contract_preserves_v2_diagnostics_and_legacy_rows() -> 
     legacy = ReplayEvidenceResponse.model_validate(_fake_evidence("H1"))
     assert legacy.diagnostics_v2 is None
     assert legacy.control_matching is None
+    assert legacy.reason_codes == ()
 
     row = dict(_fake_evidence("H7V3"))
     row["diagnostics_v2"] = {
@@ -196,6 +197,10 @@ def test_replay_evidence_contract_preserves_v2_diagnostics_and_legacy_rows() -> 
         "minimum_independent_control_clusters": 8,
         "inference_unit": "control_dependency_cluster",
     }
+    row["reason_codes"] = (
+        "minimum_common_support_coverage_not_met",
+        "minimum_trading_days_not_met",
+    )
 
     encoded = ReplayEvidenceResponse.model_validate(row).model_dump(mode="json")
 
@@ -232,6 +237,10 @@ def test_replay_evidence_contract_preserves_v2_diagnostics_and_legacy_rows() -> 
         "minimum_independent_control_clusters": 8,
         "inference_unit": "control_dependency_cluster",
     }
+    assert encoded["reason_codes"] == [
+        "minimum_common_support_coverage_not_met",
+        "minimum_trading_days_not_met",
+    ]
 
 
 def test_pending_result_returns_202_and_same_key_reuses_job(tmp_path: Path) -> None:

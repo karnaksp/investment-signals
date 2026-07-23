@@ -161,6 +161,7 @@ def test_adapter_writes_deterministic_holdout_evidence(tmp_path: Path) -> None:
         "H7V2",
     ]
     assert all(item["decision"] == "blocked_by_data" for item in first.evidence)
+    assert all(item["reason_codes"] for item in first.evidence)
     assert all(item["independent_validation"] is True for item in first.evidence)
     assert all(item["sample_count"] == 0 for item in first.evidence)
     assert all(
@@ -180,6 +181,8 @@ def test_adapter_writes_deterministic_holdout_evidence(tmp_path: Path) -> None:
     )
     stored = json.loads((Path(first.artifact_uri) / "evidence.json").read_text())
     assert stored == json.loads(json.dumps(first.evidence))
+    manifest = json.loads((Path(first.artifact_uri) / "manifest.json").read_text())
+    assert manifest["artifact_schema"] == "scientific-candle-evidence-v2"
 
 
 def test_adapter_blocks_rows_without_complete_controls(tmp_path: Path) -> None:

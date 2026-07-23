@@ -148,6 +148,7 @@ def test_artifact_is_immutable_and_exposes_exact_fail_closed_horizons(
     )
     manifest = json.loads((Path(artifact.artifact_uri) / "manifest.json").read_text())
     assert manifest["kind"] == "causal_h10_h11_r2_replay"
+    assert manifest["schema_version"] == 2
     assert manifest["blocking_reason_codes"] == list(reasons)
     assert manifest["feature_set_fingerprint"].startswith("sha256:")
 

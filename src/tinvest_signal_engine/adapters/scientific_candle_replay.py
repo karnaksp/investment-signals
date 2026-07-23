@@ -28,6 +28,8 @@ from tinvest_signal_engine.domain.scientific_candle_models import (
     ScientificCandleHypothesis,
 )
 
+SCIENTIFIC_CANDLE_EVIDENCE_SCHEMA = "scientific-candle-evidence-v2"
+
 
 @dataclass(frozen=True, slots=True)
 class ScientificCandleReplayDefinition:
@@ -127,6 +129,7 @@ class ScientificCandleReplayArtifactAdapter:
 
         artifact_fingerprint = _fingerprint(
             {
+                "artifact_schema": SCIENTIFIC_CANDLE_EVIDENCE_SCHEMA,
                 "cost_model_version": cost_model_version,
                 "evidence_policy": asdict(self._evidence_policy),
                 "report_fingerprint": report.report_fingerprint,
@@ -154,6 +157,7 @@ class ScientificCandleReplayArtifactAdapter:
         )
         run_dir = self._root / artifact_fingerprint.removeprefix("sha256:")
         manifest = {
+            "artifact_schema": SCIENTIFIC_CANDLE_EVIDENCE_SCHEMA,
             "dataset_fingerprint": report.dataset_fingerprint,
             "evidence_policy": asdict(self._evidence_policy),
             "report_fingerprint": report.report_fingerprint,
@@ -213,6 +217,7 @@ def _evidence_row(
         "market_phase": definition.market_phase,
         "source_data_state": source_state,
         "decision": decision,
+        "reason_codes": bundle.reason_codes,
         "independent_validation": bool(report.split.holdout_days),
         "cost_adjusted": hypothesis
         in {

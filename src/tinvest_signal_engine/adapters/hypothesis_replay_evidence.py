@@ -210,6 +210,7 @@ def _aggregate(
         "market_phase": definition.market_phase,
         "source_data_state": source_data_state.value,
         "decision": decision,
+        "reason_codes": _blocking_reason_codes(rows),
         "independent_validation": independent_validation,
         "cost_adjusted": bool(next(iter(cost_versions))),
         "sample_count": min(_integer(row.get("eligible_events")) for row in rows),
@@ -382,6 +383,20 @@ def _strict_period_share(rows: Sequence[Mapping[str, Any]]) -> float | None:
         total = sum(counts)
         shares.append(max(counts) / total if total else None)
     return _strict_values(shares, max)
+
+
+def _blocking_reason_codes(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    reasons: set[str] = set()
+    for row in rows:
+        value = row.get("reason_codes", ())
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("evidence reason_codes must be an array")
+        for item in value:
+            reason = str(item).strip()
+            if not reason:
+                raise ValueError("evidence reason_codes must not contain empty values")
+            reasons.add(reason)
+    return tuple(sorted(reasons))
 
 
 def _strict_extreme(

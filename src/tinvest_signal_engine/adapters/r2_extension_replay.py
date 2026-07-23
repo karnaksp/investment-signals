@@ -26,6 +26,8 @@ from tinvest_signal_engine.domain.scientific_replay_contract import (
     scientific_replay_definition,
 )
 
+R2_EXTENSION_EVIDENCE_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class R2ExtensionReplayArtifact:
@@ -64,6 +66,7 @@ class R2ExtensionReplayArtifactAdapter:
             raise ValueError("R2 replay must name its fail-closed reason")
         artifact_fingerprint = _fingerprint(
             {
+                "schema_version": R2_EXTENSION_EVIDENCE_SCHEMA_VERSION,
                 "blocking_reason_codes": reasons,
                 "cost_model_version": cost_model_version,
                 "report_fingerprint": report.report_fingerprint,
@@ -82,7 +85,7 @@ class R2ExtensionReplayArtifactAdapter:
         )
         run_dir = self._root / artifact_fingerprint.removeprefix("sha256:")
         manifest = {
-            "schema_version": 1,
+            "schema_version": R2_EXTENSION_EVIDENCE_SCHEMA_VERSION,
             "kind": "causal_h10_h11_r2_replay",
             "portfolio_version": report.portfolio_version,
             "dataset_fingerprint": report.dataset_fingerprint,
@@ -159,6 +162,7 @@ def _blocked_evidence(
         "market_phase": definition.market_phase,
         "source_data_state": "unavailable",
         "decision": "blocked_by_data",
+        "reason_codes": blocking_reason_codes,
         "independent_validation": False,
         "cost_adjusted": True,
         "sample_count": 0,

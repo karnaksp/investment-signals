@@ -302,6 +302,7 @@ class ReplayEvidenceResponse(BaseModel):
         "unavailable",
     ]
     decision: Literal["passed", "rejected", "inconclusive", "blocked_by_data"]
+    reason_codes: tuple[str, ...] = ()
     independent_validation: bool
     cost_adjusted: bool
     sample_count: int = Field(ge=0)
@@ -1152,6 +1153,7 @@ def _blocked_orderbook_evidence(
         "market_phase": definition.market_phase,
         "source_data_state": ReplaySourceDataState.REQUIRES_LIVE_ORDERBOOK.value,
         "decision": "blocked_by_data",
+        "reason_codes": ("requires_live_orderbook",),
         "independent_validation": False,
         "cost_adjusted": False,
         "sample_count": 0,

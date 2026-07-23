@@ -398,6 +398,7 @@ def _evidence_row(
         "market_phase": "eligible_moex_equity_session",
         "source_data_state": source_state,
         "decision": bundle.decision.value,
+        "reason_codes": bundle.reason_codes,
         "independent_validation": independent_validation,
         "cost_adjusted": hypothesis
         in {

@@ -335,6 +335,8 @@ def test_adapter_is_deterministic_typed_and_immutable(tmp_path: Path) -> None:
     assert by_id["H7V3"]["target_metric"] == "future_variance_uplift"
     assert by_id["H7V3"]["claim_scope"] == ("independent_holdout_matched_controls")
     assert by_id["H17"]["decision"] == "blocked_by_data"
+    assert by_id["H7V3"]["reason_codes"] == ()
+    assert "minimum_eligible_events_not_met" in by_id["H17"]["reason_codes"]
     complete_diagnostics = by_id["H7V3"]["diagnostics_v2"]
     assert complete_diagnostics == {
         "version": "evidence-diagnostics-v2",
