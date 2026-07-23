@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from io import BytesIO
 import json
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -42,6 +44,13 @@ class _StreamingResponse(_Response):
 
     def read(self) -> bytes:
         raise AssertionError("streaming ClickHouse reads must not call read()")
+
+
+class _InterruptedStreamingResponse(_StreamingResponse):
+    def __iter__(self):
+        lines = self._payload.splitlines(keepends=True)
+        yield lines[0]
+        raise TimeoutError("response stream interrupted")
 
 
 class _LiveSource:
@@ -172,10 +181,23 @@ def _clickhouse_row(
     }
 
 
+def _instrument_range_row(
+    *,
+    instrument_id: str = "uid-sber",
+    ticker: str = "SBER",
+    first_candle_at: str = "2026-07-17T10:00:00Z",
+) -> dict[str, object]:
+    return {
+        "instrument_id": instrument_id,
+        "ticker": ticker,
+        "first_candle_at": first_candle_at,
+    }
+
+
 def test_clickhouse_source_queries_causal_snapshot_and_prefers_latest_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: list[tuple[object, float]] = []
     payload = "\n".join(
         json.dumps(row)
         for row in (
@@ -185,8 +207,9 @@ def test_clickhouse_source_queries_causal_snapshot_and_prefers_latest_version(
     )
 
     def open_request(request, timeout: float):
-        captured["request"] = request
-        captured["timeout"] = timeout
+        captured.append((request, timeout))
+        if "min(candle_at)" in request.data.decode("utf-8"):
+            return _Response(json.dumps(_instrument_range_row()))
         return _Response(payload)
 
     monkeypatch.setattr(
@@ -206,17 +229,22 @@ def test_clickhouse_source_queries_causal_snapshot_and_prefers_latest_version(
     assert len(rows) == 1
     assert rows[0].record_version == 5
     assert rows[0].candle.close == 102.0
-    request = captured["request"]
+    assert len(captured) == 2
+    request, timeout = captured[1]
     query = parse_qs(urlparse(request.full_url).query)
     assert query["database"] == ["signal_engine"]
     assert query["param_as_of"] == ["2026-07-17T11:00:00.000000Z"]
+    assert query["param_instrument_id"] == ["uid-sber"]
+    assert query["param_ticker"] == ["SBER"]
     sql = request.data.decode("utf-8")
     assert "candle_at <=" in sql
     assert "source_at <=" in sql
     assert "received_at <=" in sql
+    assert "PREWHERE instrument_id =" in sql
+    assert "ORDER BY candle_at, record_version" in sql
     assert "secret-token" not in request.full_url
     assert "secret-token" not in sql
-    assert captured["timeout"] == 7.0
+    assert timeout == 7.0
 
 
 def test_clickhouse_datetime64_without_suffix_restores_schema_utc(
@@ -228,9 +256,14 @@ def test_clickhouse_datetime64_without_suffix_restores_schema_utc(
             received_at="2026-07-17 10:00:01.000000",
         )
     )
+    def open_request(request, timeout):
+        if "min(candle_at)" in request.data.decode("utf-8"):
+            return _Response(json.dumps(_instrument_range_row()))
+        return _Response(payload)
+
     monkeypatch.setattr(
         "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
-        lambda request, timeout: _Response(payload),
+        open_request,
     )
     source = ClickHouseScientificCandleSource(
         base_url="http://clickhouse:8123",
@@ -248,9 +281,14 @@ def test_clickhouse_source_rejects_future_row_even_if_backend_returns_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = json.dumps(_clickhouse_row(received_at="2026-07-17T12:00:00Z"))
+    def open_request(request, timeout):
+        if "min(candle_at)" in request.data.decode("utf-8"):
+            return _Response(json.dumps(_instrument_range_row()))
+        return _Response(payload)
+
     monkeypatch.setattr(
         "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
-        lambda request, timeout: _Response(payload),
+        open_request,
     )
     source = ClickHouseScientificCandleSource(
         base_url="http://clickhouse:8123",
@@ -266,7 +304,7 @@ def test_clickhouse_source_rejects_future_row_even_if_backend_returns_it(
 def test_clickhouse_source_streams_and_bounds_deduplication_by_ticker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rows = (
+    sber_rows = (
         _clickhouse_row(close="101", version=4),
         _clickhouse_row(close="102", version=5),
         {
@@ -276,6 +314,8 @@ def test_clickhouse_source_streams_and_bounds_deduplication_by_ticker(
             ),
             "ticker": "SBER",
         },
+    )
+    sberp_rows = (
         {
             **_clickhouse_row(
                 source_time="2026-07-17T10:00:00Z",
@@ -287,7 +327,23 @@ def test_clickhouse_source_streams_and_bounds_deduplication_by_ticker(
     captured: dict[str, object] = {}
 
     def open_request(request, timeout: float):
-        captured["sql"] = request.data.decode("utf-8")
+        sql = request.data.decode("utf-8")
+        if "min(candle_at)" in sql:
+            return _StreamingResponse(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        _instrument_range_row(),
+                        _instrument_range_row(
+                            instrument_id="uid-sberp",
+                            ticker="SBERP",
+                        ),
+                    )
+                )
+            )
+        captured["sql"] = sql
+        query = parse_qs(urlparse(request.full_url).query)
+        rows = sber_rows if query["param_ticker"] == ["SBER"] else sberp_rows
         return _StreamingResponse("\n".join(json.dumps(row) for row in rows))
 
     monkeypatch.setattr(
@@ -310,11 +366,193 @@ def test_clickhouse_source_streams_and_bounds_deduplication_by_ticker(
         "SBERP",
     )
     assert tuple(item.candle.close for item in partitions[0]) == (102.0, 102.0)
-    assert "ORDER BY ticker, candle_at, record_version" in str(captured["sql"])
-    assert "max_result_rows = 10000000" in str(captured["sql"])
+    assert "ORDER BY candle_at, record_version" in str(captured["sql"])
+    assert "max_result_rows = 1000000" in str(captured["sql"])
+    assert "ORDER BY ticker, candle_at" not in str(captured["sql"])
     assert str(captured["sql"]).index("SETTINGS") < str(captured["sql"]).index(
         "FORMAT JSONEachRow"
     )
+
+
+def test_clickhouse_source_retries_only_failed_bounded_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discovery_calls = 0
+    chunk_calls: dict[str, int] = {}
+
+    def open_request(request, timeout):
+        nonlocal discovery_calls
+        sql = request.data.decode("utf-8")
+        if "min(candle_at)" in sql:
+            discovery_calls += 1
+            return _Response(
+                json.dumps(
+                    _instrument_range_row(
+                        first_candle_at="2026-06-01T10:00:00Z",
+                    )
+                )
+            )
+        query = parse_qs(urlparse(request.full_url).query)
+        window_start = query["param_window_start"][0]
+        chunk_calls[window_start] = chunk_calls.get(window_start, 0) + 1
+        if window_start.startswith("2026-07-02") and chunk_calls[window_start] == 1:
+            raise HTTPError(
+                request.full_url,
+                500,
+                "Internal Server Error",
+                {},
+                BytesIO(b"Code: 241. Memory limit exceeded"),
+            )
+        source_time = (
+            "2026-06-01T10:00:00Z"
+            if window_start.startswith("2026-06-01")
+            else "2026-07-02T10:00:00Z"
+        )
+        return _StreamingResponse(
+            json.dumps(
+                _clickhouse_row(
+                    source_time=source_time,
+                    received_at=source_time,
+                )
+            )
+        )
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        open_request,
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+        retry_backoff_seconds=0,
+    )
+
+    rows = source.load_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
+
+    assert len(rows) == 2
+    assert discovery_calls == 1
+    assert chunk_calls == {
+        "2026-06-01T10:00:00.000000Z": 1,
+        "2026-07-02T10:00:00.000000Z": 2,
+    }
+
+
+def test_clickhouse_source_restarts_partial_chunk_without_duplicate_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk_calls = 0
+    payload = "\n".join(
+        json.dumps(row)
+        for row in (
+            _clickhouse_row(close="101", version=4),
+            _clickhouse_row(close="102", version=5),
+        )
+    )
+
+    def open_request(request, timeout):
+        nonlocal chunk_calls
+        if "min(candle_at)" in request.data.decode("utf-8"):
+            return _Response(json.dumps(_instrument_range_row()))
+        chunk_calls += 1
+        if chunk_calls == 1:
+            return _InterruptedStreamingResponse(payload)
+        return _StreamingResponse(payload)
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        open_request,
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+        retry_backoff_seconds=0,
+    )
+
+    rows = source.load_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
+
+    assert len(rows) == 1
+    assert rows[0].record_version == 5
+    assert chunk_calls == 2
+
+
+def test_clickhouse_source_reads_adjacent_time_chunks_without_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk_queries: list[dict[str, list[str]]] = []
+
+    def open_request(request, timeout):
+        if "min(candle_at)" in request.data.decode("utf-8"):
+            return _Response(
+                json.dumps(
+                    _instrument_range_row(
+                        first_candle_at="2026-06-01T10:00:00Z",
+                    )
+                )
+            )
+        query = parse_qs(urlparse(request.full_url).query)
+        chunk_queries.append(query)
+        return _StreamingResponse("")
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        open_request,
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+        chunk_days=31,
+    )
+
+    assert tuple(source.iter_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))) == ()
+
+    assert len(chunk_queries) == 2
+    assert (
+        chunk_queries[0]["param_window_end"]
+        == chunk_queries[1]["param_window_start"]
+    )
+    assert chunk_queries[-1]["param_window_end"] == [
+        "2026-07-17T11:00:00.000001Z"
+    ]
+
+
+def test_clickhouse_source_reports_bounded_server_diagnostic_after_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def open_request(request, timeout):
+        if "min(candle_at)" in request.data.decode("utf-8"):
+            return _Response(json.dumps(_instrument_range_row()))
+        raise HTTPError(
+            request.full_url,
+            500,
+            "Internal Server Error",
+            {},
+            BytesIO(b"Code: 241. Memory limit exceeded"),
+        )
+
+    monkeypatch.setattr(
+        "tinvest_signal_engine.adapters.composite_scientific_candle_cache.urlopen",
+        open_request,
+    )
+    source = ClickHouseScientificCandleSource(
+        base_url="http://clickhouse:8123",
+        database="signal_engine",
+        username="reader",
+        password="secret",
+        max_attempts=2,
+        retry_backoff_seconds=0,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"status 500.*Code: 241\. Memory limit exceeded",
+    ):
+        source.load_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
 
 
 def test_composite_merges_local_cache_and_live_revisions_without_future_data(

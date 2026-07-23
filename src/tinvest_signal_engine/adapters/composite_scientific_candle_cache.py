@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
-from typing import Protocol
+from time import sleep
+from typing import Callable, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -21,7 +22,28 @@ from tinvest_signal_engine.domain.historical_hypothesis_replay import (
 )
 
 
-SELECT_SQL = """
+INSTRUMENT_RANGES_SQL = """
+SELECT
+    instrument_id,
+    ticker,
+    min(candle_at) AS first_candle_at
+FROM scientific_candles_1m
+WHERE candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+  AND source_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+  AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+GROUP BY instrument_id, ticker
+ORDER BY ticker, instrument_id
+SETTINGS
+    max_execution_time = 120,
+    max_threads = 1,
+    max_block_size = 8192,
+    output_format_parallel_formatting = 0,
+    timeout_before_checking_execution_speed = 0
+FORMAT JSONEachRow
+""".strip()
+
+
+SELECT_CHUNK_SQL = """
 SELECT
     ticker,
     candle_at AS source_time,
@@ -35,22 +57,34 @@ SELECT
     received_at,
     record_version
 FROM scientific_candles_1m
-WHERE candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+PREWHERE instrument_id = {instrument_id:String}
+  AND trading_day >= toDate(parseDateTime64BestEffort({window_start:String}, 6, 'UTC'))
+  AND trading_day <= toDate(parseDateTime64BestEffort({window_end:String}, 6, 'UTC'))
+WHERE ticker = {ticker:String}
+  AND candle_at >= parseDateTime64BestEffort({window_start:String}, 6, 'UTC')
+  AND candle_at < parseDateTime64BestEffort({window_end:String}, 6, 'UTC')
+  AND candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
   AND source_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
   AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
-ORDER BY ticker, candle_at, record_version
+ORDER BY candle_at, record_version
 SETTINGS
-    max_execution_time = 300,
+    max_execution_time = 60,
     max_threads = 1,
     max_block_size = 8192,
     output_format_parallel_formatting = 0,
     timeout_before_checking_execution_speed = 0,
-    max_rows_to_read = 10000000,
-    max_result_rows = 10000000,
+    max_result_rows = 1000000,
     result_overflow_mode = 'throw',
-    max_bytes_before_external_sort = 33554432
+    max_bytes_before_external_sort = 16777216
 FORMAT JSONEachRow
 """.strip()
+
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+_ERROR_DETAIL_LIMIT = 320
+_DEFAULT_CHUNK_DAYS = 31
+_DEFAULT_MAX_ATTEMPTS = 4
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +97,13 @@ class VersionedHistoricalCandle:
     def __post_init__(self) -> None:
         if self.record_version < 0:
             raise ValueError("candle record_version must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class _InstrumentRange:
+    instrument_id: str
+    ticker: str
+    first_candle_at: datetime
 
 
 class VersionedScientificCandleSource(Protocol):
@@ -85,6 +126,9 @@ class ClickHouseScientificCandleSource:
         username: str,
         password: str,
         timeout_seconds: float = 15.0,
+        chunk_days: int = _DEFAULT_CHUNK_DAYS,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        retry_backoff_seconds: float = 0.25,
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("ClickHouse URL must use HTTP or HTTPS")
@@ -92,11 +136,20 @@ class ClickHouseScientificCandleSource:
             raise ValueError("ClickHouse database must not be empty")
         if timeout_seconds <= 0:
             raise ValueError("ClickHouse timeout must be positive")
+        if chunk_days <= 0:
+            raise ValueError("ClickHouse candle chunk_days must be positive")
+        if max_attempts <= 0:
+            raise ValueError("ClickHouse max_attempts must be positive")
+        if retry_backoff_seconds < 0:
+            raise ValueError("ClickHouse retry backoff must not be negative")
         self._base_url = base_url.rstrip("/")
         self._database = database
         self._username = username
         self._password = password
         self._timeout_seconds = timeout_seconds
+        self._chunk_days = chunk_days
+        self._max_attempts = max_attempts
+        self._retry_backoff_seconds = retry_backoff_seconds
 
     def load_as_of(self, as_of: datetime) -> tuple[VersionedHistoricalCandle, ...]:
         return tuple(
@@ -109,20 +162,75 @@ class ClickHouseScientificCandleSource:
         self,
         as_of: datetime,
     ) -> Iterator[tuple[VersionedHistoricalCandle, ...]]:
-        """Stream ordered, deduplicated ticker partitions from ClickHouse."""
+        """Read retry-safe chunks while retaining at most one ticker in memory."""
 
         cutoff = _aware_utc(as_of, "as_of")
-        cutoff_text = _timestamp(cutoff)
-        query = urlencode(
-            {
-                "database": self._database,
-                "date_time_input_format": "best_effort",
-                "param_as_of": cutoff_text,
-            }
+        ranges = self._request_rows(
+            sql=INSTRUMENT_RANGES_SQL,
+            parameters={"as_of": _timestamp(cutoff)},
+            parser=lambda row: _instrument_range(row, cutoff=cutoff),
+            context="instrument discovery",
         )
+        previous_range: tuple[str, str] | None = None
+        ticker_rows: list[VersionedHistoricalCandle] = []
+        current_ticker: str | None = None
+        for instrument_range in ranges:
+            range_key = (instrument_range.ticker, instrument_range.instrument_id)
+            if previous_range is not None and range_key <= previous_range:
+                raise ValueError(
+                    "ClickHouse scientific candle instruments are not ordered"
+                )
+            previous_range = range_key
+            if current_ticker is not None and instrument_range.ticker != current_ticker:
+                partition = _deduplicate(tuple(ticker_rows))
+                if partition:
+                    yield partition
+                ticker_rows = []
+            current_ticker = instrument_range.ticker
+            for window_start, window_end in _time_windows(
+                instrument_range.first_candle_at,
+                cutoff,
+                chunk_days=self._chunk_days,
+            ):
+                ticker_rows.extend(
+                    self._request_rows(
+                        sql=SELECT_CHUNK_SQL,
+                        parameters={
+                            "as_of": _timestamp(cutoff),
+                            "instrument_id": instrument_range.instrument_id,
+                            "ticker": instrument_range.ticker,
+                            "window_start": _timestamp(window_start),
+                            "window_end": _timestamp(window_end),
+                        },
+                        parser=lambda row: _versioned_candle(row, cutoff=cutoff),
+                        context=(
+                            f"instrument {instrument_range.ticker} "
+                            f"[{_timestamp(window_start)}, {_timestamp(window_end)})"
+                        ),
+                    )
+                )
+        partition = _deduplicate(tuple(ticker_rows))
+        if partition:
+            yield partition
+
+    def _request_rows(
+        self,
+        *,
+        sql: str,
+        parameters: dict[str, str],
+        parser: Callable[[object], _T],
+        context: str,
+    ) -> tuple[_T, ...]:
+        """Buffer one bounded request so a partial response can be retried safely."""
+
+        query_parameters = {
+            "database": self._database,
+            "date_time_input_format": "best_effort",
+            **{f"param_{key}": value for key, value in parameters.items()},
+        }
         request = Request(
-            f"{self._base_url}/?{query}",
-            data=(SELECT_SQL + "\n").encode("utf-8"),
+            f"{self._base_url}/?{urlencode(query_parameters)}",
+            data=(sql + "\n").encode("utf-8"),
             headers={
                 "Content-Type": "text/plain; charset=utf-8",
                 "X-ClickHouse-User": self._username,
@@ -130,22 +238,32 @@ class ClickHouseScientificCandleSource:
             },
             method="POST",
         )
-        try:
-            with urlopen(request, timeout=self._timeout_seconds) as response:
-                yield from _deduplicated_ticker_partitions(
-                    (
-                        _versioned_candle(json.loads(line), cutoff=cutoff)
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                with urlopen(request, timeout=self._timeout_seconds) as response:
+                    return tuple(
+                        parser(json.loads(line))
                         for line in _response_lines(response)
                     )
-                )
-        except HTTPError as error:
-            raise RuntimeError(
-                f"ClickHouse scientific candle read failed with status {error.code}"
-            ) from error
-        except URLError as error:
-            raise RuntimeError(
-                "ClickHouse scientific candle read connection failed"
-            ) from error
+            except HTTPError as error:
+                if (
+                    error.code not in _RETRYABLE_HTTP_STATUSES
+                    or attempt >= self._max_attempts
+                ):
+                    detail = _http_error_detail(error)
+                    raise RuntimeError(
+                        "ClickHouse scientific candle read failed with status "
+                        f"{error.code} during {context}{detail}"
+                    ) from error
+            except (TimeoutError, URLError, OSError) as error:
+                if attempt >= self._max_attempts:
+                    raise RuntimeError(
+                        "ClickHouse scientific candle read connection failed "
+                        f"during {context}"
+                    ) from error
+            if self._retry_backoff_seconds:
+                sleep(self._retry_backoff_seconds * (2 ** (attempt - 1)))
+        raise AssertionError("unreachable ClickHouse retry state")
 
 
 class CompositeScientificCandleCache:
@@ -284,6 +402,65 @@ def _versioned_candle(
     )
 
 
+def _instrument_range(
+    row: object,
+    *,
+    cutoff: datetime,
+) -> _InstrumentRange:
+    if not isinstance(row, dict):
+        raise ValueError("ClickHouse instrument range row must be an object")
+    instrument_id = str(row.get("instrument_id", "")).strip()
+    ticker = str(row.get("ticker", "")).strip().upper()
+    first_candle_at = _parse_timestamp(
+        row.get("first_candle_at"),
+        "first_candle_at",
+    )
+    if not instrument_id:
+        raise ValueError("ClickHouse instrument range has no instrument_id")
+    if not ticker:
+        raise ValueError("ClickHouse instrument range has no ticker")
+    if first_candle_at > cutoff:
+        raise ValueError("ClickHouse instrument range begins beyond the causal cutoff")
+    return _InstrumentRange(
+        instrument_id=instrument_id,
+        ticker=ticker,
+        first_candle_at=first_candle_at,
+    )
+
+
+def _time_windows(
+    first_candle_at: datetime,
+    cutoff: datetime,
+    *,
+    chunk_days: int,
+) -> Iterator[tuple[datetime, datetime]]:
+    """Build adjacent half-open windows, including a candle exactly at cutoff."""
+
+    cursor = _aware_utc(first_candle_at, "first_candle_at")
+    inclusive_cutoff = _aware_utc(cutoff, "cutoff") + timedelta(microseconds=1)
+    step = timedelta(days=chunk_days)
+    while cursor < inclusive_cutoff:
+        window_end = min(cursor + step, inclusive_cutoff)
+        yield cursor, window_end
+        cursor = window_end
+
+
+def _http_error_detail(error: HTTPError) -> str:
+    """Return a bounded ClickHouse diagnostic without request headers or secrets."""
+
+    try:
+        payload = error.read(_ERROR_DETAIL_LIMIT + 1)
+    except (OSError, ValueError):
+        return ""
+    if not payload:
+        return ""
+    text = payload.decode("utf-8", errors="replace")
+    compact = " ".join(text.split())
+    if len(compact) > _ERROR_DETAIL_LIMIT:
+        compact = compact[:_ERROR_DETAIL_LIMIT] + "…"
+    return f": {compact}" if compact else ""
+
+
 def _deduplicate(
     rows: tuple[VersionedHistoricalCandle, ...],
 ) -> tuple[VersionedHistoricalCandle, ...]:
@@ -365,45 +542,6 @@ def _response_lines(response: object) -> Iterator[str]:
         line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
         if line.strip():
             yield line
-
-
-def _deduplicated_ticker_partitions(
-    rows: Iterator[VersionedHistoricalCandle],
-) -> Iterator[tuple[VersionedHistoricalCandle, ...]]:
-    """Deduplicate the ordered response with memory bounded by one ticker."""
-
-    ticker: str | None = None
-    selected: list[VersionedHistoricalCandle] = []
-    current: VersionedHistoricalCandle | None = None
-    current_key: tuple[str, datetime] | None = None
-    for row in rows:
-        key = (row.candle.ticker, row.candle.at.astimezone(timezone.utc))
-        if current_key is not None and key < current_key:
-            raise ValueError("ClickHouse candle response is not deterministically ordered")
-        if current_key == key:
-            if row.record_version < current.record_version:  # type: ignore[union-attr]
-                raise ValueError("ClickHouse candle revisions are not ordered")
-            if (
-                row.record_version == current.record_version  # type: ignore[union-attr]
-                and row.candle != current.candle  # type: ignore[union-attr]
-            ):
-                raise ValueError(
-                    "conflicting candle payloads share ticker, source_time, and record_version"
-                )
-            current = row
-            continue
-        if current is not None:
-            selected.append(current)
-        if ticker is not None and row.candle.ticker != ticker:
-            yield tuple(selected)
-            selected = []
-        ticker = row.candle.ticker
-        current = row
-        current_key = key
-    if current is not None:
-        selected.append(current)
-    if selected:
-        yield tuple(selected)
 
 
 def _partition_versioned_rows(
