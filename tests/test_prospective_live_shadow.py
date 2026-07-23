@@ -296,7 +296,38 @@ def test_mature_outcomes_accumulate_descriptive_live_shadow_statistics() -> None
     assert first.event.event_type == "prospective_live_shadow_updated"
 
 
-def test_unavailable_mature_outcomes_are_retained_in_coverage() -> None:
+def test_temporarily_unavailable_mature_outcomes_are_retried_during_grace() -> None:
+    store = InMemoryProspectiveLiveShadowStore()
+    RecordProspectivePortfolioSnapshot(store=store, policy=POLICY).execute(_snapshot())
+    source = _OutcomeSource(available=False)
+    worker = ProcessProspectiveLiveOutcomes(
+        store=store,
+        source=source,
+        policy=POLICY,
+        outcome_policy_version="live-outcome-v1",
+    )
+
+    first = worker.run_once(
+        now=OBSERVED_AT + timedelta(seconds=min(POLICY.jump_horizons_seconds)),
+        limit=20,
+    )
+    source.available = True
+    second = worker.run_once(
+        now=OBSERVED_AT
+        + timedelta(seconds=min(POLICY.jump_horizons_seconds) + 1),
+        limit=20,
+    )
+
+    assert first.stored == 0
+    assert first.pending == 8
+    assert first.unavailable == 0
+    assert second.stored == 2
+    assert second.pending == 6
+    assert second.unavailable == 0
+    assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 2
+
+
+def test_unavailable_outcomes_are_sealed_after_availability_grace() -> None:
     store = InMemoryProspectiveLiveShadowStore()
     RecordProspectivePortfolioSnapshot(store=store, policy=POLICY).execute(_snapshot())
     result = ProcessProspectiveLiveOutcomes(
@@ -305,11 +336,13 @@ def test_unavailable_mature_outcomes_are_retained_in_coverage() -> None:
         policy=POLICY,
         outcome_policy_version="live-outcome-v1",
     ).run_once(
-        now=OBSERVED_AT + timedelta(seconds=POLICY.volume_horizon_seconds),
+        now=OBSERVED_AT
+        + timedelta(seconds=POLICY.volume_horizon_seconds, minutes=5),
         limit=20,
     )
 
     assert result.stored == 8
+    assert result.pending == 0
     assert result.unavailable == 8
     assert all(row.data_coverage == 0.0 for row in result.event.statistics.rows)
     assert all(row.mean_effect is None for row in result.event.statistics.rows)

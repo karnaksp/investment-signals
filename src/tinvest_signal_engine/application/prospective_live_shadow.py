@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Protocol
 
 from tinvest_signal_engine.domain.prospective_live_shadow import (
@@ -36,6 +36,7 @@ from tinvest_signal_engine.domain.prospective_scientific_observations import (
 
 
 DEFAULT_LIVE_OUTCOME_POLICY_VERSION = "prospective-live-outcomes-v1"
+DEFAULT_LIVE_OUTCOME_AVAILABILITY_GRACE = timedelta(minutes=5)
 LIVE_SHADOW_HYPOTHESES = frozenset(
     {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
@@ -271,13 +272,17 @@ class ProcessProspectiveLiveOutcomes:
         source: ProspectiveLiveOutcomeSource,
         policy: ProspectiveScientificPolicy = ProspectiveScientificPolicy(),
         outcome_policy_version: str = DEFAULT_LIVE_OUTCOME_POLICY_VERSION,
+        availability_grace: timedelta = DEFAULT_LIVE_OUTCOME_AVAILABILITY_GRACE,
     ) -> None:
         if not outcome_policy_version.strip():
             raise ValueError("outcome_policy_version must not be empty")
+        if availability_grace < timedelta(0):
+            raise ValueError("availability_grace must not be negative")
         self._store = store
         self._source = source
         self._policy = policy
         self._outcome_policy_version = outcome_policy_version
+        self._availability_grace = availability_grace
 
     def run_once(
         self, *, now: datetime, limit: int = 100
@@ -301,6 +306,12 @@ class ProcessProspectiveLiveOutcomes:
                 raise ValueError("outcome evidence belongs to a different observation")
             if evidence.target_at != observation.target_at:
                 raise ValueError("outcome evidence target differs from observation")
+            if (
+                not evidence.available
+                and now < observation.target_at + self._availability_grace
+            ):
+                pending += 1
+                continue
             outcome = _evaluate_outcome(
                 observation.feature,
                 evidence,
