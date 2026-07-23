@@ -300,6 +300,9 @@ class RuntimeSettings:
     signal_delivery_max_per_hour: int
     signal_delivery_instrument_cooldown_seconds: int
     signal_delivery_type_rules_json: str
+    # Replayed events remain local evidence but never become realtime alerts
+    # after this wall-clock age.
+    signal_delivery_max_event_age_seconds: int
     # Периодический unary-эмиттер → Kafka raw (см. tinvest-market-unary-emitter). 0 = выключено.
     market_unary_poll_seconds: int
     # Один цикл опроса и выход (Dagster / ручной прогон); иначе бесконечный цикл как сервис.
@@ -517,6 +520,9 @@ class RuntimeSettings:
             ),
             signal_delivery_type_rules_json=(
                 os.getenv("SIGNAL_DELIVERY_TYPE_RULES_JSON", "").strip()
+            ),
+            signal_delivery_max_event_age_seconds=int(
+                os.getenv("SIGNAL_DELIVERY_MAX_EVENT_AGE_SECONDS", "120")
             ),
             market_unary_poll_seconds=int(
                 os.getenv("MARKET_UNARY_POLL_SECONDS", "0")

@@ -69,6 +69,11 @@ _delivery_attempt_number = Histogram(
     ("destination_type", "outcome"),
     buckets=(1, 2, 3, 4, 5, 8, 13, 21),
 )
+_stale_delivery_suppressions = Counter(
+    "reliable_processing_stale_delivery_suppressions_total",
+    "Signals retained locally but suppressed from realtime delivery by freshness",
+    ("reason_code", "signal_type"),
+)
 _observation_publication = Counter(
     "detector_observation_publication_attempts_total",
     "Durable detector observation publication attempts",
@@ -83,6 +88,17 @@ _observation_attempt_number = Histogram(
 
 
 class PrometheusReliabilityMetrics:
+    def stale_delivery_suppressed(
+        self,
+        *,
+        reason_code: str,
+        signal_type: str,
+    ) -> None:
+        _stale_delivery_suppressions.labels(
+            reason_code=reason_code,
+            signal_type=signal_type,
+        ).inc()
+
     def event_processed(
         self,
         *,

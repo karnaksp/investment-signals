@@ -15,6 +15,7 @@ def _settings(monkeypatch, **env: str) -> RuntimeSettings:
         "SIGNAL_DELIVERY_MAX_PER_HOUR",
         "SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS",
         "SIGNAL_DELIVERY_TYPE_RULES_JSON",
+        "SIGNAL_DELIVERY_MAX_EVENT_AGE_SECONDS",
         "SIGNAL_MIN_QUALITY_SCORE",
     ):
         monkeypatch.delenv(key, raising=False)

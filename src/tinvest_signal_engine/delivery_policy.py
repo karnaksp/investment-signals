@@ -92,10 +92,38 @@ class DeliveryPolicy:
         now = signal.detected_at or utc_now()
         self._record_activity_context(signal, now)
         decision = self.decide(signal, now=now)
+        return self._annotate(signal, decision)
+
+    def suppress(
+        self,
+        signal: TriggerSignal,
+        *,
+        reason_code: str,
+        rule: str,
+        metadata: dict[str, object] | None = None,
+    ) -> TriggerSignal:
+        """Suppress without mutating cooldown, rate-limit, or context state."""
+
+        decision = DeliveryDecision(
+            status=DELIVERY_SUPPRESSED,
+            reason=reason_code,
+            rule=rule,
+            channel="admin_only",
+        )
+        return self._annotate(signal, decision, metadata=metadata)
+
+    def _annotate(
+        self,
+        signal: TriggerSignal,
+        decision: DeliveryDecision,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> TriggerSignal:
         payload = {
             **signal.payload,
             "delivery_status": decision.status,
             "delivery_reason": decision.reason,
+            "delivery_reason_code": decision.reason,
             "delivery_rule": decision.rule,
             "delivery_policy_version": POLICY_VERSION,
             "delivery_priority": self._priority(signal, decision),
@@ -106,6 +134,7 @@ class DeliveryPolicy:
                 if decision.delivered_at is not None
                 else None
             ),
+            **(metadata or {}),
         }
         return replace(signal, payload=payload)
 
@@ -522,4 +551,8 @@ _REASON_RU: dict[str, str] = {
     "instrument_cooldown": "Сигнал сохранён, но подавлен cooldown по инструменту.",
     "status_cooldown": "Статусный сигнал сохранён, но повтор подавлен часовым cooldown.",
     "custom_type_rule_not_matched": "Сигнал сохранён, но custom type rule не дал realtime-доставку.",
+    "delivery_event_age_exceeded": "Событие обработано для локальной статистики, но слишком устарело для Telegram или webhook.",
+    "delivery_event_crossed_session": "Событие относится к предыдущей торговой сессии и сохранено только для локальной статистики.",
+    "delivery_event_time_unavailable": "Время исходного события неизвестно, поэтому внешнее уведомление безопасно подавлено.",
+    "delivery_event_time_in_future": "Время исходного события расходится с часами сервиса; внешнее уведомление безопасно подавлено.",
 }

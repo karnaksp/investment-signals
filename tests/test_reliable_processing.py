@@ -23,6 +23,9 @@ from tinvest_signal_engine.domain.reliable_processing import (
     SignalRecord,
 )
 from tinvest_signal_engine.domain.detector_observations import DetectorObservation
+from tinvest_signal_engine.domain.delivery_recovery import (
+    DeliveryFreshnessDecision,
+)
 
 
 @dataclass
@@ -138,6 +141,7 @@ class FakeStore:
     stored: StoredEvent | None = None
     fail_next_persist: bool = False
     observations: tuple[DetectorObservation, ...] = ()
+    delivery_target_counts: tuple[int, ...] = ()
 
     def load_state_checkpoints(self):
         return ()
@@ -153,6 +157,9 @@ class FakeStore:
             raise RuntimeError("database unavailable")
         if self.stored is None:
             self.observations = batch.observations
+            self.delivery_target_counts = tuple(
+                len(item.delivery_targets) for item in batch.signals
+            )
             self.stored = StoredEvent(
                 tuple(item.signal for item in batch.signals),
                 replayed=False,
@@ -243,10 +250,47 @@ def test_detection_failure_restores_durable_state_before_retry() -> None:
     assert detector.restored == 1
 
 
+def test_reprocessed_stale_signal_remains_local_without_delivery_target() -> None:
+    class StaleDetector(FakeDetector):
+        def detect_batch(self, payload) -> DetectionBatch:
+            self.calls += 1
+            stale = replace(
+                _signal(),
+                payload={
+                    "delivery_status": "suppressed",
+                    "delivery_reason_code": "delivery_event_age_exceeded",
+                    "delivery_recovery_only": True,
+                },
+            )
+            return DetectionBatch(signals=(PreparedSignal(stale),))
+
+    detector = StaleDetector()
+    store = FakeStore()
+    metrics = FakeMetrics()
+    processor = ReliableEventProcessor(
+        detector=detector,
+        store=store,
+        publisher=FakePublisher(),
+        metrics=metrics,
+    )
+
+    first = processor.process(_event())
+    replayed = processor.process(_event())
+
+    assert first.signals[0].payload["delivery_reason_code"] == (
+        "delivery_event_age_exceeded"
+    )
+    assert replayed.replayed is True
+    assert detector.calls == 1
+    assert store.delivery_target_counts == (0,)
+    assert metrics.events == ["stored", "replayed"]
+
+
 @dataclass
 class FakeQueue:
     task: DeliveryTask | None
     failures: list[tuple[bool, int]] = field(default_factory=list)
+    failure_reasons: list[str] = field(default_factory=list)
     delivered: int = 0
 
     def claim(self, **kwargs) -> DeliveryTask | None:
@@ -258,13 +302,16 @@ class FakeQueue:
 
     def mark_failed(self, task, **kwargs) -> None:
         self.failures.append((bool(kwargs["dead_letter"]), task.attempt_count))
+        self.failure_reasons.append(str(kwargs["reason_code"]))
 
 
 @dataclass
 class FakeSender:
     failure: str | None = None
+    sent: int = 0
 
     def send(self, task: DeliveryTask) -> None:
+        self.sent += 1
         if self.failure:
             raise DeliveryFailure(self.failure)
 
@@ -279,7 +326,13 @@ def _delivery_task(attempt_count: int) -> DeliveryTask:
     )
 
 
-def _worker(queue: FakeQueue, sender: FakeSender, metrics: FakeMetrics):
+def _worker(
+    queue: FakeQueue,
+    sender: FakeSender,
+    metrics: FakeMetrics,
+    *,
+    recovery_guard=None,
+):
     now = datetime(2026, 7, 1, tzinfo=timezone.utc)
     return DurableDeliveryWorker(
         queue=queue,
@@ -290,6 +343,7 @@ def _worker(queue: FakeQueue, sender: FakeSender, metrics: FakeMetrics):
         maximum_attempts=3,
         retry_base_seconds=5,
         retry_maximum_seconds=60,
+        recovery_guard=recovery_guard,
     )
 
 
@@ -313,6 +367,36 @@ def test_delivery_failure_moves_to_dead_letter_at_limit() -> None:
     assert result.outcome == "dead_letter"
     assert queue.failures == [(True, 3)]
     assert metrics.deliveries == ["dead_letter"]
+
+
+def test_stale_queued_delivery_is_terminally_suppressed_before_sender() -> None:
+    class StaleGuard:
+        def evaluate(self, task: DeliveryTask) -> DeliveryFreshnessDecision:
+            return DeliveryFreshnessDecision(
+                allow_external_delivery=False,
+                reason_code="delivery_event_age_exceeded",
+                event_age_seconds=600.0,
+                maximum_event_age_seconds=120,
+                source_session="2026-07-01",
+                evaluated_session="2026-07-01",
+            )
+
+    queue = FakeQueue(_delivery_task(1))
+    sender = FakeSender()
+    metrics = FakeMetrics()
+
+    result = _worker(
+        queue,
+        sender,
+        metrics,
+        recovery_guard=StaleGuard(),
+    ).run_once()
+
+    assert result.outcome == "suppressed_stale"
+    assert sender.sent == 0
+    assert queue.failures == [(True, 1)]
+    assert queue.failure_reasons == ["delivery_event_age_exceeded"]
+    assert metrics.deliveries == ["suppressed_stale"]
 
 
 def test_redis_runtime_uses_aof_and_noeviction() -> None:

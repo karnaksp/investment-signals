@@ -16,6 +16,9 @@ from tinvest_signal_engine.application.reliable_processing import (
     DetectorConfigAcknowledgementSink,
     DetectorStateCheckpoint,
 )
+from tinvest_signal_engine.application.delivery_recovery import (
+    DeliveryRecoveryGuard,
+)
 from tinvest_signal_engine.config import (
     RuntimeSettings,
     load_detector_config,
@@ -51,10 +54,12 @@ class LegacyDetectionAdapter:
         checkpoints: Sequence[DetectorStateCheckpoint] = (),
         config_ack_sink: DetectorConfigAcknowledgementSink | None = None,
         detector_instance_id: str | None = None,
+        delivery_recovery_guard: DeliveryRecoveryGuard | None = None,
     ) -> None:
         self._settings = settings
         self._config_ack_sink = config_ack_sink
         self._detector_instance_id = detector_instance_id or str(uuid4())
+        self._delivery_recovery_guard = delivery_recovery_guard
         self._configured_instruments_count = 0
         self._detector = self._build_detector()
         self._ack_detector_config("loaded", self._detector_config_version())
@@ -85,7 +90,7 @@ class LegacyDetectionAdapter:
         prepared: list[PreparedSignal] = []
         for signal in signals:
             enriched = enrich_signal_for_delivery(signal)
-            governed = self._policy.apply(enriched)
+            governed = self._govern_delivery(enriched)
             targets = (
                 self._delivery_targets()
                 if governed.payload.get("delivery_status") == DELIVERY_DELIVERED
@@ -108,6 +113,28 @@ class LegacyDetectionAdapter:
             payload_sha256=sha256(state_payload).digest(),
         )
         return DetectionBatch(tuple(prepared), observations, checkpoint)
+
+    def _govern_delivery(self, signal: TriggerSignal) -> TriggerSignal:
+        if self._delivery_recovery_guard is None:
+            return self._policy.apply(signal)
+        freshness = self._delivery_recovery_guard.evaluate(
+            source_event_at=signal.source_event_at,
+            signal_type=signal.signal_type,
+        )
+        if freshness.allow_external_delivery:
+            return self._policy.apply(signal)
+        return self._policy.suppress(
+            signal,
+            reason_code=freshness.reason_code,
+            rule="delivery_recovery_freshness_v1",
+            metadata={
+                "delivery_event_age_seconds": freshness.event_age_seconds,
+                "delivery_max_event_age_seconds": (freshness.maximum_event_age_seconds),
+                "delivery_source_session": freshness.source_session,
+                "delivery_evaluated_session": freshness.evaluated_session,
+                "delivery_recovery_only": True,
+            },
+        )
 
     def replace_state(
         self,

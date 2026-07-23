@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 from typing import Callable, Protocol
 
 from tinvest_signal_engine.application.observability import ReliabilityMetrics
+from tinvest_signal_engine.domain.delivery_recovery import (
+    DeliveryFreshnessDecision,
+)
 from tinvest_signal_engine.domain.reliable_processing import (
     DeliveryTask,
     retry_decision,
@@ -43,6 +46,10 @@ class DeliverySender(Protocol):
     def send(self, task: DeliveryTask) -> None: ...
 
 
+class QueuedDeliveryRecoveryGuard(Protocol):
+    def evaluate(self, task: DeliveryTask) -> DeliveryFreshnessDecision: ...
+
+
 @dataclass(frozen=True)
 class DeliveryRunResult:
     outcome: str
@@ -61,6 +68,7 @@ class DurableDeliveryWorker:
         maximum_attempts: int,
         retry_base_seconds: int,
         retry_maximum_seconds: int,
+        recovery_guard: QueuedDeliveryRecoveryGuard | None = None,
     ) -> None:
         self._queue = queue
         self._sender = sender
@@ -70,6 +78,7 @@ class DurableDeliveryWorker:
         self._maximum_attempts = max(1, maximum_attempts)
         self._retry_base_seconds = max(1, retry_base_seconds)
         self._retry_maximum_seconds = max(1, retry_maximum_seconds)
+        self._recovery_guard = recovery_guard
 
     def run_once(self) -> DeliveryRunResult:
         now = self._clock()
@@ -79,6 +88,21 @@ class DurableDeliveryWorker:
         )
         if task is None:
             return DeliveryRunResult("idle", None)
+        if self._recovery_guard is not None:
+            freshness = self._recovery_guard.evaluate(task)
+            if not freshness.allow_external_delivery:
+                self._queue.mark_failed(
+                    task,
+                    reason_code=freshness.reason_code,
+                    next_attempt_at=now,
+                    dead_letter=True,
+                )
+                self._metrics.delivery_attempted(
+                    destination_type=task.destination_type,
+                    outcome="suppressed_stale",
+                    attempt_count=task.attempt_count,
+                )
+                return DeliveryRunResult("suppressed_stale", task)
         try:
             self._sender.send(task)
         except DeliveryFailure as failure:
@@ -92,9 +116,7 @@ class DurableDeliveryWorker:
             self._queue.mark_failed(
                 task,
                 reason_code=failure.reason_code,
-                next_attempt_at=(
-                    failed_at + timedelta(seconds=decision.delay_seconds)
-                ),
+                next_attempt_at=(failed_at + timedelta(seconds=decision.delay_seconds)),
                 dead_letter=decision.dead_letter,
             )
             outcome = "dead_letter" if decision.dead_letter else "retry"
