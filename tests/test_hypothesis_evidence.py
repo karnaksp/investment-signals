@@ -224,6 +224,37 @@ def test_matching_is_independent_of_input_order() -> None:
     assert first == second
 
 
+def test_rarity_first_matching_preserves_the_maximal_control_coverage() -> None:
+    common = _point("event-common", scenario="common", seconds=1)
+    rare = _point("event-rare", scenario="rare", seconds=2)
+    shared = tuple(_point(f"shared-{index}", seconds=100 + index) for index in range(5))
+    common_only = tuple(
+        _point(
+            f"common-only-{index}",
+            seconds=200 + index,
+            nearby=("rare",),
+        )
+        for index in range(5)
+    )
+
+    result = BuildMatchedControls().execute(
+        (common, rare),
+        shared + common_only,
+    )
+
+    assert tuple(group.event.point_id for group in result.groups) == (
+        "event-rare",
+        "event-common",
+    )
+    assert result.unmatched_event_ids == ()
+    assert {control.point_id for control in result.groups[0].controls} == {
+        item.point_id for item in shared
+    }
+    assert {control.point_id for control in result.groups[1].controls} == {
+        item.point_id for item in common_only
+    }
+
+
 def test_bounded_control_reuse_is_deterministic_capped_and_auditable() -> None:
     events = tuple(
         _point(f"event-{index}", scenario=f"h-{index}", seconds=index)
@@ -235,7 +266,7 @@ def test_bounded_control_reuse_is_deterministic_capped_and_auditable() -> None:
     builder = BuildMatchedControls(
         maximum_control_reuse=5,
         selection_policy_version=(
-            "bounded-control-reuse-5-exact-strata-exclusion-5m-v1"
+            "bounded-control-reuse-5-rarity-first-exact-strata-exclusion-5m-v2"
         ),
     )
 

@@ -52,7 +52,9 @@ class BuildMatchedControls:
         controls_per_event: int = 5,
         scenario_exclusion_window: timedelta = timedelta(minutes=5),
         maximum_control_reuse: int = 1,
-        selection_policy_version: str = ("unique-control-exact-strata-exclusion-5m-v1"),
+        selection_policy_version: str = (
+            "unique-control-rarity-first-exact-strata-exclusion-5m-v2"
+        ),
     ) -> None:
         if controls_per_event <= 0:
             raise ValueError("controls_per_event must be positive")
@@ -87,7 +89,20 @@ class BuildMatchedControls:
         control_reuse: Counter[str] = Counter()
         groups: list[MatchedControlGroup] = []
         unmatched: list[str] = []
-        for event in sorted(events, key=lambda item: (item.occurred_at, item.point_id)):
+        ordered_events = sorted(
+            events,
+            key=lambda event: (
+                sum(
+                    candidate.point_id not in event_ids
+                    and candidate.cost_model_version == event.cost_model_version
+                    and not self._scenario_overlap(event, candidate)
+                    for candidate in candidates_by_key[event.matching_key]
+                ),
+                event.occurred_at,
+                event.point_id,
+            ),
+        )
+        for event in ordered_events:
             eligible = [
                 candidate
                 for candidate in candidates_by_key[event.matching_key]

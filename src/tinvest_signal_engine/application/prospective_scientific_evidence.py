@@ -200,7 +200,7 @@ BOUNDED_CONTROL_REUSE_HYPOTHESES = frozenset(
 )
 BOUNDED_CONTROL_REUSE_LIMIT = 5
 BOUNDED_CONTROL_SELECTION_POLICY_VERSION = (
-    "bounded-control-reuse-5-exact-strata-exclusion-5m-v1"
+    "bounded-control-reuse-5-rarity-first-exact-strata-exclusion-5m-v2"
 )
 
 

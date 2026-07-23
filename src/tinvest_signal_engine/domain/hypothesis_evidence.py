@@ -162,7 +162,9 @@ class MatchedControlsResult:
     unmatched_event_ids: tuple[str, ...]
     controls_per_event: int
     maximum_control_reuse: int = 1
-    selection_policy_version: str = "unique-control-exact-strata-exclusion-5m-v1"
+    selection_policy_version: str = (
+        "unique-control-rarity-first-exact-strata-exclusion-5m-v2"
+    )
 
     def __post_init__(self) -> None:
         if self.maximum_control_reuse <= 0:
