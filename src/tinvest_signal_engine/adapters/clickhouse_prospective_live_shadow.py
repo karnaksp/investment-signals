@@ -706,20 +706,24 @@ def _series_point(row: Mapping[str, object], *, cutoff: datetime) -> _SeriesPoin
         Decimal(str(row[column]))
         for column in ("open_price", "high_price", "low_price", "close_price")
     )
-    # Decimal(18, 9) is rendered by ClickHouse with its storage scale.  Stream
+    source_kind = str(row["source_kind"])
+    # Decimal(18, 9) is rendered by ClickHouse with its storage scale. Stream
     # fingerprints were sealed from T-Invest quotations before persistence, so
-    # e.g. Decimal("280.1") returns as Decimal("280.100000000").  Try the exact
-    # transport representation first, then the sole lossless normalization
-    # introduced by that storage boundary.  A fingerprint must still match one
-    # of those complete payloads; arbitrary or corrupted rows remain rejected.
+    # e.g. Decimal("280.1") returns as Decimal("280.100000000"). Backfill was
+    # sealed from Parquet floats, whose integer values retain one decimal place
+    # (`263.0`). Try only those two known, source-aware transport reversals.
+    # A fingerprint must still match a complete payload; corrupted rows fail.
     normalized_prices = tuple(_without_storage_scale(value) for value in raw_prices)
     price_candidates = (raw_prices, normalized_prices)
+    if source_kind == "backfill":
+        price_candidates += (
+            tuple(_parquet_float_decimal(value) for value in raw_prices),
+        )
     instrument_id = str(row["instrument_id"])
     ticker = str(row["ticker"])
     exchange = str(row["exchange"])
     volume = int(row["volume"])
     complete = _boolean(row["is_complete"])
-    source_kind = str(row["source_kind"])
     source_event_id = str(row["source_event_id"])
     has_gap = _boolean(row["has_gap"])
     schema_version = str(row["schema_version"])
@@ -779,6 +783,15 @@ def _without_storage_scale(value: Decimal) -> Decimal:
     """Remove only insignificant ClickHouse Decimal trailing zeroes."""
 
     return Decimal(format(value.normalize(), "f"))
+
+
+def _parquet_float_decimal(value: Decimal) -> Decimal:
+    """Reproduce ``Decimal(str(float_value))`` used by the backfill importer."""
+
+    normalized = _without_storage_scale(value)
+    if normalized == normalized.to_integral_value():
+        return Decimal(f"{format(normalized, 'f')}.0")
+    return normalized
 
 
 def _observed_at(candle: ScientificCandle) -> datetime:

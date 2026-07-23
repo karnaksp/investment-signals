@@ -20,6 +20,7 @@ from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
     _CANDLE_COLUMNS,
     _calendar_lookback_days,
     _compact_json_each_row,
+    _series_point,
     ClickHouseProspectiveLiveOutcomeSource,
     ClickHouseProspectiveLiveSnapshotSource,
 )
@@ -466,6 +467,42 @@ def test_snapshot_source_rejects_tampered_scaled_decimal() -> None:
             policy=PRODUCTION_LIVE_POLICY,
             limit=1,
         )
+
+
+def test_backfill_row_restores_parquet_float_integer_scale() -> None:
+    candle_at = datetime(2026, 7, 21, 20, 37, tzinfo=UTC)
+    source_at = candle_at + timedelta(minutes=1)
+    fields = {
+        "instrument_id": "SBER_TQBR",
+        "ticker": "SBER",
+        "exchange": "TQBR",
+        "candle_at": candle_at,
+        "open_price": Decimal("262.94"),
+        "high_price": Decimal("263.0"),
+        "low_price": Decimal("262.84"),
+        "close_price": Decimal("262.89"),
+        "volume": 1_000,
+        "complete": True,
+        "source_kind": "backfill",
+        "source_at": source_at,
+        "source_event_id": "backfill-v1:SBER_TQBR:2026-07-21T20:37:00+00:00",
+        "has_gap": False,
+        "schema_version": "scientific-candle-v1",
+    }
+    candle = ScientificCandle(
+        **fields,
+        trading_day=candle_at.date(),
+        received_at=source_at,
+        payload_fingerprint=scientific_candle_fingerprint(**fields),
+    )
+    row = _candle_row(candle)
+    for column in ("open_price", "high_price", "low_price", "close_price"):
+        row[column] = format(Decimal(str(row[column])), ".9f")
+
+    restored = _series_point(row, cutoff=source_at + timedelta(seconds=1)).candle
+
+    assert restored.payload_fingerprint == candle.payload_fingerprint
+    assert str(restored.high_price) == "263.0"
 
 
 def test_outcome_source_reads_as_of_now_but_seals_evidence_at_target() -> None:
