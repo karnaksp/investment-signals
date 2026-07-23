@@ -268,9 +268,7 @@ def test_internal_runner_wires_prospective_portfolio_as_one_evidence_family(
             return SimpleNamespace(
                 artifact_uri=str(tmp_path / "prospective-artifact"),
                 artifact_fingerprint="sha256:" + "c" * 64,
-                evidence=tuple(
-                    {"hypothesis_id": item.value} for item in requested
-                ),
+                evidence=tuple({"hypothesis_id": item.value} for item in requested),
             )
 
     def fake_build(
@@ -303,9 +301,10 @@ def test_internal_runner_wires_prospective_portfolio_as_one_evidence_family(
     result = runner.execute(request, run_fingerprint="sha256:" + "d" * 64)
 
     requests = captured["requests"]
-    assert tuple(
-        item.selected_hypotheses[0].value for item in requests
-    ) == request.hypothesis_ids
+    assert (
+        tuple(item.selected_hypotheses[0].value for item in requests)
+        == request.hypothesis_ids
+    )
     assert all(item.policy.round_trip_cost_bps == 10.0 for item in requests)
     assert len(captured["artifact_reports"]) == len(request.hypothesis_ids)
     assert captured["dataset_fingerprint"] == report.dataset_fingerprint
@@ -349,9 +348,7 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
             return SimpleNamespace(
                 artifact_uri=str(tmp_path / "prospective"),
                 artifact_fingerprint="sha256:" + "c" * 64,
-                evidence=tuple(
-                    {"hypothesis_id": item.value} for item in requested
-                ),
+                evidence=tuple({"hypothesis_id": item.value} for item in requested),
             )
 
     class FakeStage:
@@ -404,14 +401,14 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
         replay_api.PROSPECTIVE_SCIENTIFIC_HYPOTHESES | {"H1", "H2"},
     )
     monkeypatch.setattr(replay_api, "GENERAL_HYPOTHESES", frozenset())
-    monkeypatch.setattr(
-        replay_api, "build_prospective_scientific_research", fake_build
-    )
+    monkeypatch.setattr(replay_api, "build_prospective_scientific_research", fake_build)
     monkeypatch.setattr(
         replay_api, "FileProspectiveScientificPartitionStage", FakeStage
     )
     monkeypatch.setattr(
-        replay_api, "FileScientificCombinationStreamingArtifacts", FakeStreamingArtifacts
+        replay_api,
+        "FileScientificCombinationStreamingArtifacts",
+        FakeStreamingArtifacts,
     )
     monkeypatch.setattr(
         replay_api, "EvaluateScientificCombinationPartitions", FakeCombinationEvaluator

@@ -82,7 +82,10 @@ from tinvest_signal_engine.application.historical_hypothesis_replay import (
 )
 from tinvest_signal_engine.domain.historical_hypothesis_replay import ReplayCostModel
 from tinvest_signal_engine.domain.hypothesis_formulas import HypothesisId
-from tinvest_signal_engine.domain.jump_activity_replay import CostModel, JumpReplayPolicy
+from tinvest_signal_engine.domain.jump_activity_replay import (
+    CostModel,
+    JumpReplayPolicy,
+)
 from tinvest_signal_engine.domain.scientific_candle_models import (
     ScientificCandleHypothesis,
     ScientificCandlePolicy,
@@ -122,9 +125,7 @@ COMBINATION_SOURCE_HYPOTHESES = (
     ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
     ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
 )
-COMBINATION_SOURCE_IDS = frozenset(
-    item.value for item in COMBINATION_SOURCE_HYPOTHESES
-)
+COMBINATION_SOURCE_IDS = frozenset(item.value for item in COMBINATION_SOURCE_HYPOTHESES)
 SUPPORTED_HYPOTHESES = (
     frozenset(ALL_HYPOTHESES)
     | R2_EXTENSION_HYPOTHESES
@@ -190,7 +191,9 @@ class StartReplayRequest(BaseModel):
     @field_validator("tickers", "liquid_universe")
     @classmethod
     def normalize_tickers(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        normalized = tuple(sorted({value.strip().upper() for value in values if value.strip()}))
+        normalized = tuple(
+            sorted({value.strip().upper() for value in values if value.strip()})
+        )
         return normalized
 
 
@@ -303,9 +306,7 @@ class ReplayEvidenceResponse(BaseModel):
     diagnostics_v2: ReplayEvidenceDiagnosticsV2Response | None = None
     horizons: tuple["ReplayHorizonEvidenceResponse", ...]
     claim_family: str = Field(default="directional", min_length=1)
-    effect_unit: str = Field(
-        default="cost_adjusted_signed_return_bps", min_length=1
-    )
+    effect_unit: str = Field(default="cost_adjusted_signed_return_bps", min_length=1)
     claim_scope: str = Field(default="price_direction", min_length=1)
     target_metric: str = Field(default="forward_return", min_length=1)
 
@@ -324,9 +325,7 @@ class ReplayHorizonEvidenceResponse(BaseModel):
         "timestamp_desynchronization",
         "unavailable",
     ]
-    decision: Literal[
-        "passed", "rejected", "inconclusive", "blocked_by_data"
-    ] | None
+    decision: Literal["passed", "rejected", "inconclusive", "blocked_by_data"] | None
     sample_count: int = Field(ge=0)
     primary_metric_value: float | None
 
@@ -478,13 +477,18 @@ class ReplayJobManager:
                 return _Submission(existing, reused=True)
             dataset_as_of = datetime.now(timezone.utc)
             dataset_fingerprint = self._runner.dataset_fingerprint(as_of=dataset_as_of)
-            run_fingerprint = _fingerprint({
-                "schema_version": JOB_SCHEMA_VERSION,
-                "dataset_fingerprint": dataset_fingerprint,
-                "dataset_as_of": dataset_as_of.isoformat(),
-                "request": request_payload,
-            })
-            job_id = "job-" + sha256(f"{key_hash}:{run_fingerprint}".encode()).hexdigest()[:32]
+            run_fingerprint = _fingerprint(
+                {
+                    "schema_version": JOB_SCHEMA_VERSION,
+                    "dataset_fingerprint": dataset_fingerprint,
+                    "dataset_as_of": dataset_as_of.isoformat(),
+                    "request": request_payload,
+                }
+            )
+            job_id = (
+                "job-"
+                + sha256(f"{key_hash}:{run_fingerprint}".encode()).hexdigest()[:32]
+            )
             now = _now()
             record: dict[str, Any] = {
                 "schema_version": JOB_SCHEMA_VERSION,
@@ -615,9 +619,9 @@ class LocalHypothesisPortfolioRunner:
         # scan.  The bounded map is only an optimization: evicted/recovered jobs
         # reconstruct the same causal cache and remain correct.
         self._prepared_cache_lock = Lock()
-        self._prepared_caches: OrderedDict[
-            datetime, HistoricalCandleCachePort
-        ] = OrderedDict()
+        self._prepared_caches: OrderedDict[datetime, HistoricalCandleCachePort] = (
+            OrderedDict()
+        )
 
     def _candle_cache(self, as_of: datetime | None = None) -> HistoricalCandleCachePort:
         if self._live_candles is None:
@@ -712,40 +716,52 @@ class LocalHypothesisPortfolioRunner:
             )
             execution = RunHistoricalHypothesisReplay(
                 cache=candle_cache,
-                artifacts=ImmutableReplayArtifactStore(self._artifact_root / "h1-h2-h5-h6-h7"),
-            ).execute(HistoricalReplayRequest(
-                selected_hypotheses=executed_general,
-                cost_model=ReplayCostModel(
-                    version=request.cost_model.version,
-                    commission_bps=request.cost_model.commission_bps,
-                    slippage_bps=request.cost_model.slippage_bps,
-                    half_spread_entry_bps=request.cost_model.entry_half_spread_bps,
-                    half_spread_exit_bps=request.cost_model.exit_half_spread_bps,
+                artifacts=ImmutableReplayArtifactStore(
+                    self._artifact_root / "h1-h2-h5-h6-h7"
                 ),
-                liquid_universe=request.liquid_universe,
-                resume=request.resume,
-            ))
-            engines.append({
-                "engine": "scientific_candle_replay",
-                "hypothesis_ids": tuple(item.value for item in requested_general),
-                "requested_hypothesis_ids": tuple(
-                    item.value for item in requested_general
-                ),
-                "executed_hypothesis_ids": tuple(
-                    item.value for item in executed_general
-                ),
-                "application_run_id": execution.completion.run_id,
-                "artifact_fingerprint": execution.completion.artifact_fingerprint,
-                "artifact_uri": str(
-                    (self._artifact_root / "h1-h2-h5-h6-h7" / execution.completion.run_id.removeprefix("sha256:")).resolve()
-                ),
-                "resumed": execution.completion.resumed,
-            })
-            evidence.extend(self._evidence_reader.read_general(
-                engines[-1]["artifact_uri"],
-                tuple(item.value for item in requested_general),
-                generated_at=generated_at,
-            ))
+            ).execute(
+                HistoricalReplayRequest(
+                    selected_hypotheses=executed_general,
+                    cost_model=ReplayCostModel(
+                        version=request.cost_model.version,
+                        commission_bps=request.cost_model.commission_bps,
+                        slippage_bps=request.cost_model.slippage_bps,
+                        half_spread_entry_bps=request.cost_model.entry_half_spread_bps,
+                        half_spread_exit_bps=request.cost_model.exit_half_spread_bps,
+                    ),
+                    liquid_universe=request.liquid_universe,
+                    resume=request.resume,
+                )
+            )
+            engines.append(
+                {
+                    "engine": "scientific_candle_replay",
+                    "hypothesis_ids": tuple(item.value for item in requested_general),
+                    "requested_hypothesis_ids": tuple(
+                        item.value for item in requested_general
+                    ),
+                    "executed_hypothesis_ids": tuple(
+                        item.value for item in executed_general
+                    ),
+                    "application_run_id": execution.completion.run_id,
+                    "artifact_fingerprint": execution.completion.artifact_fingerprint,
+                    "artifact_uri": str(
+                        (
+                            self._artifact_root
+                            / "h1-h2-h5-h6-h7"
+                            / execution.completion.run_id.removeprefix("sha256:")
+                        ).resolve()
+                    ),
+                    "resumed": execution.completion.resumed,
+                }
+            )
+            evidence.extend(
+                self._evidence_reader.read_general(
+                    engines[-1]["artifact_uri"],
+                    tuple(item.value for item in requested_general),
+                    generated_at=generated_at,
+                )
+            )
             del execution
         if set(request.hypothesis_ids) & JUMP_HYPOTHESES:
             jump = RunJumpActivityReplay(
@@ -760,18 +776,24 @@ class LocalHypothesisPortfolioRunner:
                 ),
                 tickers=request.tickers or None,
             )
-            engines.append({
-                "engine": "jump_activity_replay",
-                "hypothesis_ids": tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
-                "application_run_id": jump.run_id,
-                "artifact_uri": jump.artifact_uri,
-                "resumed": jump.reused,
-            })
-            evidence.extend(self._evidence_reader.read_jump(
-                jump.artifact_uri,
-                tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
-                generated_at=generated_at,
-            ))
+            engines.append(
+                {
+                    "engine": "jump_activity_replay",
+                    "hypothesis_ids": tuple(
+                        sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)
+                    ),
+                    "application_run_id": jump.run_id,
+                    "artifact_uri": jump.artifact_uri,
+                    "resumed": jump.reused,
+                }
+            )
+            evidence.extend(
+                self._evidence_reader.read_jump(
+                    jump.artifact_uri,
+                    tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
+                    generated_at=generated_at,
+                )
+            )
         requested_r2 = tuple(
             R2ExtensionHypothesis(item)
             for item in request.hypothesis_ids
@@ -816,9 +838,7 @@ class LocalHypothesisPortfolioRunner:
             if item in SCIENTIFIC_CANDLE_HYPOTHESES
         )
         if requested_scientific:
-            report = BuildScientificCandleModelResearch(
-                candle_cache
-            ).execute(
+            report = BuildScientificCandleModelResearch(candle_cache).execute(
                 ScientificCandleResearchRequest(
                     selected_hypotheses=requested_scientific,
                     market_universe=request.liquid_universe,
@@ -832,14 +852,18 @@ class LocalHypothesisPortfolioRunner:
                 requested_scientific,
                 cost_model_version=request.cost_model.version,
             )
-            engines.append({
-                "engine": "next_scientific_candle_replay",
-                "hypothesis_ids": tuple(item.value for item in requested_scientific),
-                "application_run_id": report.report_fingerprint,
-                "artifact_fingerprint": artifact.artifact_fingerprint,
-                "artifact_uri": artifact.artifact_uri,
-                "resumed": False,
-            })
+            engines.append(
+                {
+                    "engine": "next_scientific_candle_replay",
+                    "hypothesis_ids": tuple(
+                        item.value for item in requested_scientific
+                    ),
+                    "application_run_id": report.report_fingerprint,
+                    "artifact_fingerprint": artifact.artifact_fingerprint,
+                    "artifact_uri": artifact.artifact_uri,
+                    "resumed": False,
+                }
+            )
             evidence.extend(artifact.evidence)
             del report
         requested_prospective = tuple(
@@ -877,9 +901,7 @@ class LocalHypothesisPortfolioRunner:
                     request=scientific_request,
                 )
 
-            combinations_enabled = COMBINATION_SOURCE_IDS <= set(
-                request.hypothesis_ids
-            )
+            combinations_enabled = COMBINATION_SOURCE_IDS <= set(request.hypothesis_ids)
             combination_source = (
                 FileProspectiveScientificPartitionStage(
                     self._artifact_root
@@ -909,14 +931,18 @@ class LocalHypothesisPortfolioRunner:
                 requested_prospective,
                 cost_model_version=request.cost_model.version,
             )
-            engines.append({
-                "engine": "prospective_scientific_replay",
-                "hypothesis_ids": tuple(item.value for item in requested_prospective),
-                "application_run_id": artifact.artifact_fingerprint,
-                "artifact_fingerprint": artifact.artifact_fingerprint,
-                "artifact_uri": artifact.artifact_uri,
-                "resumed": False,
-            })
+            engines.append(
+                {
+                    "engine": "prospective_scientific_replay",
+                    "hypothesis_ids": tuple(
+                        item.value for item in requested_prospective
+                    ),
+                    "application_run_id": artifact.artifact_fingerprint,
+                    "artifact_fingerprint": artifact.artifact_fingerprint,
+                    "artifact_uri": artifact.artifact_uri,
+                    "resumed": False,
+                }
+            )
             evidence.extend(artifact.evidence)
             if combination_source is not None:
                 # H1/H2 have a legacy product evidence path, but C3 requires
@@ -941,31 +967,35 @@ class LocalHypothesisPortfolioRunner:
                     combination_source,
                     cost_model_version=request.cost_model.version,
                 )
-                engines.append({
-                    "engine": "scientific_combination_evidence",
-                    "combination_ids": tuple(
-                        item.value for item in ScientificCombinationId
-                    ),
-                    "application_run_id": combination_completion.run_id,
-                    "artifact_fingerprint": (
-                        combination_completion.artifact.artifact_fingerprint
-                    ),
-                    "artifact_uri": combination_completion.artifact.artifact_uri,
-                    "partition_count": combination_completion.partition_count,
-                    "observation_count": combination_completion.observation_count,
-                    "result_count": combination_completion.result_count,
-                    "resumed": combination_completion.resumed,
-                })
+                engines.append(
+                    {
+                        "engine": "scientific_combination_evidence",
+                        "combination_ids": tuple(
+                            item.value for item in ScientificCombinationId
+                        ),
+                        "application_run_id": combination_completion.run_id,
+                        "artifact_fingerprint": (
+                            combination_completion.artifact.artifact_fingerprint
+                        ),
+                        "artifact_uri": combination_completion.artifact.artifact_uri,
+                        "partition_count": combination_completion.partition_count,
+                        "observation_count": combination_completion.observation_count,
+                        "result_count": combination_completion.result_count,
+                        "resumed": combination_completion.resumed,
+                    }
+                )
         requested_orderbook = tuple(
             item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
         )
         if requested_orderbook:
-            engines.append({
-                "engine": "live_orderbook_replay",
-                "hypothesis_ids": requested_orderbook,
-                "availability": "requires_live_orderbook",
-                "resumed": False,
-            })
+            engines.append(
+                {
+                    "engine": "live_orderbook_replay",
+                    "hypothesis_ids": requested_orderbook,
+                    "availability": "requires_live_orderbook",
+                    "resumed": False,
+                }
+            )
             evidence.extend(
                 _blocked_orderbook_evidence(
                     hypothesis_id,
@@ -977,7 +1007,9 @@ class LocalHypothesisPortfolioRunner:
             )
         ordered = tuple(sorted(evidence, key=lambda item: str(item["hypothesis_id"])))
         if tuple(item["hypothesis_id"] for item in ordered) != request.hypothesis_ids:
-            raise ValueError("replay must produce exactly one evidence row per hypothesis")
+            raise ValueError(
+                "replay must produce exactly one evidence row per hypothesis"
+            )
         return {
             "run_fingerprint": run_fingerprint,
             "engines": tuple(engines),
@@ -1021,16 +1053,19 @@ def _blocked_orderbook_evidence(
         "maximum_ticker_share": None,
         "maximum_period_share": None,
         "abstention_rate": None,
-        "horizons": tuple({
-            "horizon_seconds": horizon,
-            "evidence_scope": "not_evaluated",
-            "source_data_state": (
-                ReplaySourceDataState.REQUIRES_LIVE_ORDERBOOK.value
-            ),
-            "decision": "blocked_by_data",
-            "sample_count": 0,
-            "primary_metric_value": None,
-        } for horizon in definition.horizons_seconds),
+        "horizons": tuple(
+            {
+                "horizon_seconds": horizon,
+                "evidence_scope": "not_evaluated",
+                "source_data_state": (
+                    ReplaySourceDataState.REQUIRES_LIVE_ORDERBOOK.value
+                ),
+                "decision": "blocked_by_data",
+                "sample_count": 0,
+                "primary_metric_value": None,
+            }
+            for horizon in definition.horizons_seconds
+        ),
     }
 
 
@@ -1074,7 +1109,9 @@ def create_app(
     )
     def start_replay(
         payload: StartReplayRequest,
-        idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=256),
+        idempotency_key: str = Header(
+            alias="Idempotency-Key", min_length=1, max_length=256
+        ),
     ) -> ReplayAcceptedResponse:
         try:
             submission = manager.submit(payload, idempotency_key)

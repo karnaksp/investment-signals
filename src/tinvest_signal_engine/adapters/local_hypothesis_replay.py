@@ -50,7 +50,11 @@ class LocalCandleCache:
             end_day = date.fromisoformat(str(scope["to"]))
             resolved_fingerprint = fingerprint
         else:
-            tickers = tuple(sorted({path.parent.name.removeprefix("ticker=").upper() for path in files}))
+            tickers = tuple(
+                sorted(
+                    {path.parent.name.removeprefix("ticker=").upper() for path in files}
+                )
+            )
             days = tuple(sorted(_partition_day(path) for path in files))
             if not days:
                 raise ValueError("candle cache has no partition files")
@@ -110,14 +114,17 @@ class LocalCandleCache:
                     records.extend(dict(row) for row in csv.DictReader(handle))
             elif path.suffix == ".jsonl":
                 records.extend(
-                    json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                    json.loads(line)
+                    for line in path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
                 )
         return records
 
     def _manifest(self) -> Mapping[str, object]:
         if not self._manifest_path.is_file():
-            raise FileNotFoundError(f"candle cache manifest not found: {self._manifest_path}")
+            raise FileNotFoundError(
+                f"candle cache manifest not found: {self._manifest_path}"
+            )
         payload = json.loads(self._manifest_path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("cache manifest root must be an object")
@@ -137,7 +144,8 @@ class LocalCandleCache:
 
     def _partition_files(self) -> tuple[Path, ...]:
         files = [
-            path for suffix in (".parquet", ".csv", ".jsonl")
+            path
+            for suffix in (".parquet", ".csv", ".jsonl")
             for path in self._cache_dir.glob(f"ticker=*/date=*{suffix}")
         ]
         return tuple(sorted(files))
@@ -188,11 +196,15 @@ class ImmutableReplayArtifactStore:
         completion = json.loads(completion_path.read_text(encoding="utf-8"))
         if completion.get("run_id") != run_id:
             raise ValueError("replay completion identity mismatch")
-        hashes = _mapping(completion.get("artifact_hashes"), "completion.artifact_hashes")
+        hashes = _mapping(
+            completion.get("artifact_hashes"), "completion.artifact_hashes"
+        )
         for name in self._ARTIFACT_NAMES:
             path = run_dir / name
             if not path.is_file() or _file_hash(path) != hashes.get(name):
-                raise ValueError(f"immutable replay artifact failed verification: {name}")
+                raise ValueError(
+                    f"immutable replay artifact failed verification: {name}"
+                )
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         selected = tuple(HypothesisId(item) for item in manifest["selected_hypotheses"])
         return CompletedReplay(
@@ -207,14 +219,18 @@ class ImmutableReplayArtifactStore:
         run_dir = self._run_dir(report.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         payloads = {
-            "manifest.json": _json_bytes({
-                "run_id": report.run_id,
-                "engine_version": report.engine_version,
-                "dataset_fingerprint": report.dataset_fingerprint,
-                "cache_partition_count": report.cache_partition_count,
-                "selected_hypotheses": [item.value for item in report.selected_hypotheses],
-                "cost_model": _json_value(report.cost_model),
-            }),
+            "manifest.json": _json_bytes(
+                {
+                    "run_id": report.run_id,
+                    "engine_version": report.engine_version,
+                    "dataset_fingerprint": report.dataset_fingerprint,
+                    "cache_partition_count": report.cache_partition_count,
+                    "selected_hypotheses": [
+                        item.value for item in report.selected_hypotheses
+                    ],
+                    "cost_model": _json_value(report.cost_model),
+                }
+            ),
             "split.json": _json_bytes(_json_value(report.split)),
             "summaries.json": _json_bytes(_json_value(report.summaries)),
             "evidence.json": _json_bytes(_json_value(report.evidence)),
@@ -230,9 +246,12 @@ class ImmutableReplayArtifactStore:
             else:
                 _write_once_or_verify(path, payloads[name])
                 hashes[name] = _file_hash(path)
-        artifact_fingerprint = "sha256:" + sha256(
-            json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        artifact_fingerprint = (
+            "sha256:"
+            + sha256(
+                json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        )
         completion = {
             "run_id": report.run_id,
             "artifact_hashes": hashes,
@@ -255,8 +274,10 @@ class ImmutableReplayArtifactStore:
 
 def _candle(record: Mapping[str, object]) -> HistoricalCandle:
     raw_at = record["at"]
-    at = raw_at if isinstance(raw_at, datetime) else datetime.fromisoformat(
-        str(raw_at).replace("Z", "+00:00")
+    at = (
+        raw_at
+        if isinstance(raw_at, datetime)
+        else datetime.fromisoformat(str(raw_at).replace("Z", "+00:00"))
     )
     return HistoricalCandle(
         ticker=str(record["ticker"]).upper(),
@@ -312,7 +333,9 @@ def _json_bytes(value: object, *, newline: bool = False) -> bytes:
 def _write_once_or_verify(path: Path, content: bytes) -> None:
     if path.exists():
         if path.read_bytes() != content:
-            raise ValueError(f"refusing to overwrite immutable replay artifact: {path.name}")
+            raise ValueError(
+                f"refusing to overwrite immutable replay artifact: {path.name}"
+            )
         return
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:

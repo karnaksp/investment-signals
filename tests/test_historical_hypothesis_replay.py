@@ -69,9 +69,7 @@ class _PartitionedCache(_Cache):
     def iter_ticker_partitions(self):
         self.partition_passes += 1
         for ticker in self.descriptor.tickers:
-            partition = tuple(
-                item for item in self.candles if item.ticker == ticker
-            )
+            partition = tuple(item for item in self.candles if item.ticker == ticker)
             self.maximum_partition_size = max(
                 self.maximum_partition_size,
                 len(partition),
@@ -116,11 +114,11 @@ def _fixture_candles(*, future_multiplier: float = 1.0) -> tuple[HistoricalCandl
         high_volume = day_index % 2 == 1
         for ticker_index, ticker in enumerate(("SBER", "GAZP")):
             ticker_bias = ticker_index * 0.01
-            morning_deviation = (
-                2.0 if holdout_pattern else ((day_index % 5) - 2) * 0.05
-            )
-            morning_volume = 200.0 if holdout_pattern and high_volume else (
-                20.0 if holdout_pattern else 100.0
+            morning_deviation = 2.0 if holdout_pattern else ((day_index % 5) - 2) * 0.05
+            morning_volume = (
+                200.0
+                if holdout_pattern and high_volume
+                else (20.0 if holdout_pattern else 100.0)
             )
             for minute_range in _minute_ranges():
                 for local_minute in minute_range:
@@ -137,22 +135,28 @@ def _fixture_candles(*, future_multiplier: float = 1.0) -> tuple[HistoricalCandl
                     elif local_minute <= 11 * 60:
                         progress = (local_minute - 10 * 60) / 60
                         close = 100.0 + ticker_bias + progress * future_multiplier
-                        volume = 100.0 + (500.0 if high_volume and local_minute >= 10 * 60 + 15 else 0.0)
+                        volume = 100.0 + (
+                            500.0
+                            if high_volume and local_minute >= 10 * 60 + 15
+                            else 0.0
+                        )
                         span = 0.04 + (0.20 if high_volume else 0.0)
                     else:
                         progress = (local_minute - (18 * 60 + 10)) / 29
                         close = 101.0 + ticker_bias + progress * 0.5 * future_multiplier
                         volume = 100.0
                         span = 0.04
-                    rows.append(HistoricalCandle(
-                        ticker=ticker,
-                        at=at,
-                        open=close,
-                        high=close + span,
-                        low=close - span,
-                        close=close,
-                        volume=volume,
-                    ))
+                    rows.append(
+                        HistoricalCandle(
+                            ticker=ticker,
+                            at=at,
+                            open=close,
+                            high=close + span,
+                            low=close - span,
+                            close=close,
+                            volume=volume,
+                        )
+                    )
     return tuple(rows)
 
 
@@ -164,7 +168,9 @@ def _request(*hypotheses: HypothesisId) -> HistoricalReplayRequest:
     )
 
 
-def test_full_portfolio_replay_is_causal_partitioned_and_resumable(tmp_path: Path) -> None:
+def test_full_portfolio_replay_is_causal_partitioned_and_resumable(
+    tmp_path: Path,
+) -> None:
     cache = _Cache(_fixture_candles())
     artifacts = ImmutableReplayArtifactStore(tmp_path / "runs")
     use_case = RunHistoricalHypothesisReplay(
@@ -181,9 +187,13 @@ def test_full_portfolio_replay_is_causal_partitioned_and_resumable(tmp_path: Pat
     assert len(first.report.split.train_days) == 24
     assert len(first.report.split.validation_days) == 8
     assert len(first.report.split.holdout_days) == 8
-    assert {item.hypothesis_id for item in first.report.summaries} == set(SUPPORTED_HYPOTHESES)
+    assert {item.hypothesis_id for item in first.report.summaries} == set(
+        SUPPORTED_HYPOTHESES
+    )
     assert all(item.evaluated_observations > 0 for item in first.report.summaries)
-    assert all(item.feature_cutoff_at <= item.event_at for item in first.report.outcomes)
+    assert all(
+        item.feature_cutoff_at <= item.event_at for item in first.report.outcomes
+    )
     assert any(
         item.hypothesis_id is HypothesisId.H1
         and item.phase is TradingPhase.MORNING_LOW_LIQUIDITY
@@ -198,7 +208,9 @@ def test_full_portfolio_replay_is_causal_partitioned_and_resumable(tmp_path: Pat
 
     assert second.report is None
     assert second.completion.resumed is True
-    assert second.completion.artifact_fingerprint == first.completion.artifact_fingerprint
+    assert (
+        second.completion.artifact_fingerprint == first.completion.artifact_fingerprint
+    )
     assert cache.load_calls == 1
 
 
@@ -250,19 +262,28 @@ def test_outcome_artifact_writer_has_bounded_incremental_memory(
     assert path.stat().st_size > 20_000_000
     assert artifact_hash.startswith("sha256:")
     assert peak < 4_000_000
-    assert replay_artifacts._write_jsonl_once_or_verify(
-        path,
-        rows(),
-    ) == artifact_hash
+    assert (
+        replay_artifacts._write_jsonl_once_or_verify(
+            path,
+            rows(),
+        )
+        == artifact_hash
+    )
 
 
-def test_future_price_changes_labels_but_not_h1_trigger_decisions(tmp_path: Path) -> None:
+def test_future_price_changes_labels_but_not_h1_trigger_decisions(
+    tmp_path: Path,
+) -> None:
     def run(candles: tuple[HistoricalCandle, ...], suffix: str) -> object:
-        return RunHistoricalHypothesisReplay(
-            cache=_Cache(candles),
-            artifacts=ImmutableReplayArtifactStore(tmp_path / suffix),
-            gate_policy=_gate(),
-        ).execute(_request(HypothesisId.H1)).report
+        return (
+            RunHistoricalHypothesisReplay(
+                cache=_Cache(candles),
+                artifacts=ImmutableReplayArtifactStore(tmp_path / suffix),
+                gate_policy=_gate(),
+            )
+            .execute(_request(HypothesisId.H1))
+            .report
+        )
 
     rising = run(_fixture_candles(future_multiplier=1.0), "rising")
     falling = run(_fixture_candles(future_multiplier=-1.0), "falling")
@@ -279,12 +300,12 @@ def test_future_price_changes_labels_but_not_h1_trigger_decisions(tmp_path: Path
     assert rising_decisions == falling_decisions
     assert {
         item.net_effect_bps for item in rising.outcomes if item.label_available
-    } != {
-        item.net_effect_bps for item in falling.outcomes if item.label_available
-    }
+    } != {item.net_effect_bps for item in falling.outcomes if item.label_available}
 
 
-def test_local_cache_adapter_reads_fixture_without_modifying_cache(tmp_path: Path) -> None:
+def test_local_cache_adapter_reads_fixture_without_modifying_cache(
+    tmp_path: Path,
+) -> None:
     cache_dir = tmp_path / "cache"
     partition = cache_dir / "ticker=SBER" / "date=2026-01-05.jsonl"
     partition.parent.mkdir(parents=True)
@@ -297,34 +318,46 @@ def test_local_cache_adapter_reads_fixture_without_modifying_cache(tmp_path: Pat
         close=100.5,
         volume=1000.0,
     )
-    partition.write_text(json.dumps({
-        "ticker": candle.ticker,
-        "at": candle.at.isoformat(),
-        "open": candle.open,
-        "high": candle.high,
-        "low": candle.low,
-        "close": candle.close,
-        "volume": candle.volume,
-        "complete": True,
-    }) + "\n", encoding="utf-8")
-    (cache_dir / "manifest.json").write_text(json.dumps({
-        "kind": "tinvest_research_candle_cache",
-        "scope": {
-            "tickers": ["SBER"],
-            "from": "2026-01-05",
-            "to": "2026-01-05",
-        },
-        "quality": {"partition_count": 1},
-        "privacy": {
-            "tokens_persisted": False,
-            "account_identifiers_persisted": False,
-            "instrument_uids_persisted": False,
-        },
-        "content_fingerprint": "a" * 64,
-    }), encoding="utf-8")
+    partition.write_text(
+        json.dumps(
+            {
+                "ticker": candle.ticker,
+                "at": candle.at.isoformat(),
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+                "complete": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (cache_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": "tinvest_research_candle_cache",
+                "scope": {
+                    "tickers": ["SBER"],
+                    "from": "2026-01-05",
+                    "to": "2026-01-05",
+                },
+                "quality": {"partition_count": 1},
+                "privacy": {
+                    "tokens_persisted": False,
+                    "account_identifiers_persisted": False,
+                    "instrument_uids_persisted": False,
+                },
+                "content_fingerprint": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
     before = {
         path.relative_to(cache_dir): (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in cache_dir.rglob("*") if path.is_file()
+        for path in cache_dir.rglob("*")
+        if path.is_file()
     }
 
     adapter = LocalCandleCache(cache_dir)
@@ -332,7 +365,8 @@ def test_local_cache_adapter_reads_fixture_without_modifying_cache(tmp_path: Pat
     loaded = adapter.load()
     after = {
         path.relative_to(cache_dir): (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in cache_dir.rglob("*") if path.is_file()
+        for path in cache_dir.rglob("*")
+        if path.is_file()
     }
 
     assert descriptor.dataset_fingerprint == "sha256:" + "a" * 64
@@ -358,21 +392,36 @@ def test_stale_incremental_manifest_falls_back_to_all_cached_partitions(
         "complete": True,
     }
     first.write_text(json.dumps(record) + "\n", encoding="utf-8")
-    second.write_text(json.dumps({
-        **record,
-        "at": "2026-01-06T04:00:00+00:00",
-    }) + "\n", encoding="utf-8")
-    (cache_dir / "manifest.json").write_text(json.dumps({
-        "kind": "tinvest_research_candle_cache",
-        "scope": {"tickers": ["SBER"], "from": "2026-01-06", "to": "2026-01-06"},
-        "quality": {"partition_count": 1},
-        "privacy": {
-            "tokens_persisted": False,
-            "account_identifiers_persisted": False,
-            "instrument_uids_persisted": False,
-        },
-        "content_fingerprint": "b" * 64,
-    }), encoding="utf-8")
+    second.write_text(
+        json.dumps(
+            {
+                **record,
+                "at": "2026-01-06T04:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (cache_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": "tinvest_research_candle_cache",
+                "scope": {
+                    "tickers": ["SBER"],
+                    "from": "2026-01-06",
+                    "to": "2026-01-06",
+                },
+                "quality": {"partition_count": 1},
+                "privacy": {
+                    "tokens_persisted": False,
+                    "account_identifiers_persisted": False,
+                    "instrument_uids_persisted": False,
+                },
+                "content_fingerprint": "b" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     descriptor = LocalCandleCache(cache_dir).describe()
 
@@ -400,10 +449,14 @@ def test_immutable_artifact_detects_tampering(tmp_path: Path) -> None:
 def test_h1_threshold_matches_canonical_half_volume_rule(tmp_path: Path) -> None:
     candles = _fixture_candles()
     cache = _Cache(candles)
-    report = RunHistoricalHypothesisReplay(
-        cache=cache,
-        artifacts=ImmutableReplayArtifactStore(tmp_path),
-        gate_policy=_gate(),
-    ).execute(_request(HypothesisId.H1)).report
+    report = (
+        RunHistoricalHypothesisReplay(
+            cache=cache,
+            artifacts=ImmutableReplayArtifactStore(tmp_path),
+            gate_policy=_gate(),
+        )
+        .execute(_request(HypothesisId.H1))
+        .report
+    )
     assert report is not None
     assert any(item.verdict is ObservationVerdict.MATCHED for item in report.outcomes)

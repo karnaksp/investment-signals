@@ -113,7 +113,9 @@ class HistoricalReplayRequest:
             raise ValueError("selected hypotheses must be unique")
         unsupported = set(self.selected_hypotheses) - set(SUPPORTED_HYPOTHESES)
         if unsupported:
-            raise ValueError(f"historical replay does not support {sorted(unsupported)}")
+            raise ValueError(
+                f"historical replay does not support {sorted(unsupported)}"
+            )
         if not self.liquid_universe:
             raise ValueError("liquid universe must not be empty")
 
@@ -164,7 +166,9 @@ class RunHistoricalHypothesisReplay:
 
     def execute(self, request: HistoricalReplayRequest) -> HistoricalReplayExecution:
         descriptor = self._cache.describe()
-        selected = tuple(sorted(request.selected_hypotheses, key=lambda item: item.value))
+        selected = tuple(
+            sorted(request.selected_hypotheses, key=lambda item: item.value)
+        )
         run_id = _run_id(descriptor, selected, request)
         if request.resume:
             completed = self._artifacts.load_completed(run_id)
@@ -236,9 +240,7 @@ class RunHistoricalHypothesisReplay:
         candidate_values: dict[HypothesisId, list[_CandidateValue]] = defaultdict(list)
         retained_h6: dict[tuple[str, date], _DaySeries] = {}
         seen_tickers: set[str] = set()
-        ticker_local = tuple(
-            item for item in selected if item is not HypothesisId.H6
-        )
+        ticker_local = tuple(item for item in selected if item is not HypothesisId.H6)
         h6_universe = frozenset(request.liquid_universe)
 
         for partition in cache.iter_ticker_partitions():
@@ -266,10 +268,7 @@ class RunHistoricalHypothesisReplay:
                     event_points[hypothesis_id],
                     candidate_values[hypothesis_id],
                 )
-            if (
-                HypothesisId.H6 in selected
-                and ticker in h6_universe
-            ):
+            if HypothesisId.H6 in selected and ticker in h6_universe:
                 retained_h6.update(series)
 
         if HypothesisId.H6 in selected:
@@ -409,14 +408,16 @@ class RunHistoricalHypothesisReplay:
                 controls_per_event=self._gate_policy.controls_per_event,
             ).execute(events, candidates)
             holdout_eligible[hypothesis_id] = len(events)
-            evidence_requests.append(EvidenceRequest(
-                hypothesis_id=CANONICAL_IDS[hypothesis_id],
-                hypothesis_version=default_rule(hypothesis_id).version,
-                dataset_fingerprint=descriptor.dataset_fingerprint,
-                groups=controls.groups,
-                expected_eligible_events=len(events),
-                unmatched_event_ids=controls.unmatched_event_ids,
-            ))
+            evidence_requests.append(
+                EvidenceRequest(
+                    hypothesis_id=CANONICAL_IDS[hypothesis_id],
+                    hypothesis_version=default_rule(hypothesis_id).version,
+                    dataset_fingerprint=descriptor.dataset_fingerprint,
+                    groups=controls.groups,
+                    expected_eligible_events=len(events),
+                    unmatched_event_ids=controls.unmatched_event_ids,
+                )
+            )
         evidence = AssessEvidencePortfolio(self._gate_policy).execute(evidence_requests)
         summaries = tuple(
             _summary(hypothesis_id, outcomes, holdout_eligible[hypothesis_id])
@@ -431,12 +432,17 @@ class RunHistoricalHypothesisReplay:
             cost_model=request.cost_model,
             split=split,
             summaries=summaries,
-            outcomes=tuple(sorted(outcomes, key=lambda item: (
-                item.hypothesis_id.value,
-                item.event_at,
-                item.ticker,
-                item.horizon_seconds,
-            ))),
+            outcomes=tuple(
+                sorted(
+                    outcomes,
+                    key=lambda item: (
+                        item.hypothesis_id.value,
+                        item.event_at,
+                        item.ticker,
+                        item.horizon_seconds,
+                    ),
+                )
+            ),
             evidence=evidence,
         )
 
@@ -468,24 +474,29 @@ class RunHistoricalHypothesisReplay:
                     prior_row = prior.by_minute.get(local_minute)
                     if prior_close is None or prior_row is None:
                         continue
-                    historical_deviations.append(_return_bps(prior_close.close, prior_row.close))
+                    historical_deviations.append(
+                        _return_bps(prior_close.close, prior_row.close)
+                    )
                     historical_cumulative.append(prior.cumulative_volume[local_minute])
                     historical_ranges.append(_range_bps(prior_row))
                 if len(historical_deviations) < 20 or not all(historical_cumulative):
                     continue
                 deviation = _return_bps(previous_close.close, row.close)
                 deviation_z = _z_score(historical_deviations, deviation)
-                cumulative_relative_volume = (
-                    current.cumulative_volume[local_minute] / fmean(historical_cumulative)
-                )
+                cumulative_relative_volume = current.cumulative_volume[
+                    local_minute
+                ] / fmean(historical_cumulative)
                 range_rank = _percentile_rank(historical_ranges, _range_bps(row))
-                features = _feature_set(row.at, {
-                    FeatureName.PREVIOUS_CLOSE: previous_close.close,
-                    FeatureName.EVENT_PRICE: row.close,
-                    FeatureName.MORNING_DEVIATION_Z: deviation_z,
-                    FeatureName.CUMULATIVE_RELATIVE_VOLUME: cumulative_relative_volume,
-                    FeatureName.RANGE_PERCENTILE: range_rank,
-                })
+                features = _feature_set(
+                    row.at,
+                    {
+                        FeatureName.PREVIOUS_CLOSE: previous_close.close,
+                        FeatureName.EVENT_PRICE: row.close,
+                        FeatureName.MORNING_DEVIATION_Z: deviation_z,
+                        FeatureName.CUMULATIVE_RELATIVE_VOLUME: cumulative_relative_volume,
+                        FeatureName.RANGE_PERCENTILE: range_rank,
+                    },
+                )
                 observation = self._evaluator.execute(
                     hypothesis_id=hypothesis_id,
                     ticker=current.ticker,
@@ -502,7 +513,9 @@ class RunHistoricalHypothesisReplay:
                     )
                     for horizon in observation.horizons_seconds
                 }
-                _append_outcomes(outcomes, observation, current.trading_day, raw_by_horizon, costs)
+                _append_outcomes(
+                    outcomes, observation, current.trading_day, raw_by_horizon, costs
+                )
                 primary_raw = raw_by_horizon[observation.horizons_seconds[0]]
                 if primary_raw is None:
                     continue
@@ -519,17 +532,25 @@ class RunHistoricalHypothesisReplay:
                     feature_cutoff_at=row.at,
                 )
                 candidates.append(candidate)
-                if observation.verdict is ObservationVerdict.MATCHED and split is not None:
-                    if split.partition_for(current.trading_day) is DatasetPartition.HOLDOUT:
-                        events.append(_event_point(
-                            observation,
-                            current.trading_day,
-                            local_minute,
-                            primary_raw,
-                            range_rank,
-                            _ratio_rank(cumulative_relative_volume),
-                            costs,
-                        ))
+                if (
+                    observation.verdict is ObservationVerdict.MATCHED
+                    and split is not None
+                ):
+                    if (
+                        split.partition_for(current.trading_day)
+                        is DatasetPartition.HOLDOUT
+                    ):
+                        events.append(
+                            _event_point(
+                                observation,
+                                current.trading_day,
+                                local_minute,
+                                primary_raw,
+                                range_rank,
+                                _ratio_rank(cumulative_relative_volume),
+                                costs,
+                            )
+                        )
 
     def _replay_phase_recurrence(
         self,
@@ -551,16 +572,26 @@ class RunHistoricalHypothesisReplay:
                 historical_returns = [
                     value
                     for prior in history
-                    if (value := _directional_return_from_minutes(
-                        prior, local_minute, local_minute + 30, 1
-                    )) is not None
+                    if (
+                        value := _directional_return_from_minutes(
+                            prior, local_minute, local_minute + 30, 1
+                        )
+                    )
+                    is not None
                 ]
                 if len(historical_returns) < 20:
                     continue
-                features = _feature_set(row.at, {
-                    FeatureName.SAME_PHASE_MEAN_RETURN_BPS_20D: fmean(historical_returns),
-                    FeatureName.SAME_PHASE_HISTORY_DAYS: float(len(historical_returns)),
-                })
+                features = _feature_set(
+                    row.at,
+                    {
+                        FeatureName.SAME_PHASE_MEAN_RETURN_BPS_20D: fmean(
+                            historical_returns
+                        ),
+                        FeatureName.SAME_PHASE_HISTORY_DAYS: float(
+                            len(historical_returns)
+                        ),
+                    },
+                )
                 observation = self._evaluator.execute(
                     hypothesis_id=HypothesisId.H5,
                     ticker=current.ticker,
@@ -570,24 +601,48 @@ class RunHistoricalHypothesisReplay:
                 raw = _directional_return_from_minutes(
                     current, local_minute, local_minute + 30, 1
                 )
-                _append_outcomes(outcomes, observation, current.trading_day, {1800: raw}, costs)
+                _append_outcomes(
+                    outcomes, observation, current.trading_day, {1800: raw}, costs
+                )
                 if raw is None:
                     continue
                 magnitude_rank = _percentile_rank(
                     [abs(item) for item in historical_returns],
                     abs(fmean(historical_returns)),
                 )
-                candidates.append(_CandidateValue(
-                    current.ticker, row.at, current.trading_day,
-                    observation.phase, local_minute, raw, None,
-                    magnitude_rank, 0.5, row.at,
-                ))
-                if observation.verdict is ObservationVerdict.MATCHED and split is not None:
-                    if split.partition_for(current.trading_day) is DatasetPartition.HOLDOUT:
-                        events.append(_event_point(
-                            observation, current.trading_day, local_minute, raw,
-                            magnitude_rank, 0.5, costs,
-                        ))
+                candidates.append(
+                    _CandidateValue(
+                        current.ticker,
+                        row.at,
+                        current.trading_day,
+                        observation.phase,
+                        local_minute,
+                        raw,
+                        None,
+                        magnitude_rank,
+                        0.5,
+                        row.at,
+                    )
+                )
+                if (
+                    observation.verdict is ObservationVerdict.MATCHED
+                    and split is not None
+                ):
+                    if (
+                        split.partition_for(current.trading_day)
+                        is DatasetPartition.HOLDOUT
+                    ):
+                        events.append(
+                            _event_point(
+                                observation,
+                                current.trading_day,
+                                local_minute,
+                                raw,
+                                magnitude_rank,
+                                0.5,
+                                costs,
+                            )
+                        )
 
     def _replay_open_close(
         self,
@@ -601,20 +656,46 @@ class RunHistoricalHypothesisReplay:
     ) -> None:
         days = sorted({day for _, day in series})
         for trading_day in days:
-            members = [series[(ticker, trading_day)] for ticker in liquid_universe if (ticker, trading_day) in series]
+            members = [
+                series[(ticker, trading_day)]
+                for ticker in liquid_universe
+                if (ticker, trading_day) in series
+            ]
             if len(members) / len(liquid_universe) < 0.8:
                 continue
             opening = [
-                value for item in members
-                if (value := _directional_return_from_minutes(item, 10 * 60, 10 * 60 + 29, 1)) is not None
+                value
+                for item in members
+                if (
+                    value := _directional_return_from_minutes(
+                        item, 10 * 60, 10 * 60 + 29, 1
+                    )
+                )
+                is not None
             ]
             closing = [
-                value for item in members
-                if (value := _directional_return_from_minutes(item, 18 * 60 + 10, 18 * 60 + 39, 1)) is not None
+                value
+                for item in members
+                if (
+                    value := _directional_return_from_minutes(
+                        item, 18 * 60 + 10, 18 * 60 + 39, 1
+                    )
+                )
+                is not None
             ]
-            if len(opening) / len(liquid_universe) < 0.8 or len(closing) / len(liquid_universe) < 0.8:
+            if (
+                len(opening) / len(liquid_universe) < 0.8
+                or len(closing) / len(liquid_universe) < 0.8
+            ):
                 continue
-            event_row = next((item.by_minute.get(10 * 60 + 30) for item in members if item.by_minute.get(10 * 60 + 30)), None)
+            event_row = next(
+                (
+                    item.by_minute.get(10 * 60 + 30)
+                    for item in members
+                    if item.by_minute.get(10 * 60 + 30)
+                ),
+                None,
+            )
             if event_row is None:
                 continue
             opening_basket = fmean(opening)
@@ -623,38 +704,68 @@ class RunHistoricalHypothesisReplay:
                 hypothesis_id=HypothesisId.H6,
                 ticker="MOEX_LIQUID_BASKET",
                 event_at=event_row.at,
-                features=_feature_set(event_row.at, {
-                    FeatureName.OPENING_BASKET_RETURN_BPS: opening_basket,
-                }),
+                features=_feature_set(
+                    event_row.at,
+                    {
+                        FeatureName.OPENING_BASKET_RETURN_BPS: opening_basket,
+                    },
+                ),
             )
-            _append_outcomes(outcomes, observation, trading_day, {1800: closing_basket}, costs)
+            _append_outcomes(
+                outcomes, observation, trading_day, {1800: closing_basket}, costs
+            )
             opening_rank = _ratio_rank(abs(opening_basket) / 10.0)
             for candidate_minute in range(10 * 60 + 30, 17 * 60 + 31, 30):
                 candidate_returns = [
-                    value for item in members
-                    if (value := _directional_return_from_minutes(
-                        item, candidate_minute, candidate_minute + 30, 1
-                    )) is not None
+                    value
+                    for item in members
+                    if (
+                        value := _directional_return_from_minutes(
+                            item, candidate_minute, candidate_minute + 30, 1
+                        )
+                    )
+                    is not None
                 ]
-                candidate_row = next((
-                    item.by_minute.get(candidate_minute)
-                    for item in members if item.by_minute.get(candidate_minute)
-                ), None)
-                if candidate_row is None or len(candidate_returns) / len(liquid_universe) < 0.8:
+                candidate_row = next(
+                    (
+                        item.by_minute.get(candidate_minute)
+                        for item in members
+                        if item.by_minute.get(candidate_minute)
+                    ),
+                    None,
+                )
+                if (
+                    candidate_row is None
+                    or len(candidate_returns) / len(liquid_universe) < 0.8
+                ):
                     continue
-                candidates.append(_CandidateValue(
-                    "MOEX_LIQUID_BASKET", candidate_row.at, trading_day,
-                    TradingPhase.MAIN_CONTINUOUS,
-                    10 * 60 + 30,
-                    fmean(candidate_returns), None, opening_rank, 1.0,
-                    candidate_row.at,
-                ))
+                candidates.append(
+                    _CandidateValue(
+                        "MOEX_LIQUID_BASKET",
+                        candidate_row.at,
+                        trading_day,
+                        TradingPhase.MAIN_CONTINUOUS,
+                        10 * 60 + 30,
+                        fmean(candidate_returns),
+                        None,
+                        opening_rank,
+                        1.0,
+                        candidate_row.at,
+                    )
+                )
             if observation.verdict is ObservationVerdict.MATCHED and split is not None:
                 if split.partition_for(trading_day) is DatasetPartition.HOLDOUT:
-                    events.append(_event_point(
-                        observation, trading_day, 10 * 60 + 30, closing_basket,
-                        opening_rank, 1.0, costs,
-                    ))
+                    events.append(
+                        _event_point(
+                            observation,
+                            trading_day,
+                            10 * 60 + 30,
+                            closing_basket,
+                            opening_rank,
+                            1.0,
+                            costs,
+                        )
+                    )
 
     def _replay_activity(
         self,
@@ -675,7 +786,9 @@ class RunHistoricalHypothesisReplay:
                 row = current.by_minute[local_minute]
                 start = local_minute - 14
                 current_volume = _window_volume(current, start, local_minute)
-                prior_volumes = [_window_volume(item, start, local_minute) for item in history]
+                prior_volumes = [
+                    _window_volume(item, start, local_minute) for item in history
+                ]
                 prior_volumes = [value for value in prior_volumes if value is not None]
                 if current_volume is None or len(prior_volumes) < 20:
                     continue
@@ -684,19 +797,30 @@ class RunHistoricalHypothesisReplay:
                     hypothesis_id=HypothesisId.H7,
                     ticker=current.ticker,
                     event_at=row.at,
-                    features=_feature_set(row.at, {
-                        FeatureName.PHASE_VOLUME_PERCENTILE: volume_rank,
-                        FeatureName.PHASE_HISTORY_DAYS: float(len(prior_volumes)),
-                    }),
+                    features=_feature_set(
+                        row.at,
+                        {
+                            FeatureName.PHASE_VOLUME_PERCENTILE: volume_rank,
+                            FeatureName.PHASE_HISTORY_DAYS: float(len(prior_volumes)),
+                        },
+                    ),
                     has_trading_gap=_has_gap(current, start, local_minute),
                 )
                 activity_by_horizon: dict[int, float | None] = {}
                 for horizon in observation.horizons_seconds:
                     future_minutes = horizon // 60
-                    current_activity = _realized_activity(current, local_minute, future_minutes)
+                    current_activity = _realized_activity(
+                        current, local_minute, future_minutes
+                    )
                     prior_activity = [
-                        value for item in history
-                        if (value := _realized_activity(item, local_minute, future_minutes)) is not None
+                        value
+                        for item in history
+                        if (
+                            value := _realized_activity(
+                                item, local_minute, future_minutes
+                            )
+                        )
+                        is not None
                     ]
                     activity_by_horizon[horizon] = (
                         current_activity - fmean(prior_activity)
@@ -709,16 +833,40 @@ class RunHistoricalHypothesisReplay:
                 primary = activity_by_horizon[observation.horizons_seconds[0]]
                 if primary is None:
                     continue
-                candidates.append(_CandidateValue(
-                    current.ticker, row.at, current.trading_day, observation.phase,
-                    local_minute, 0.0, primary, 0.5, volume_rank, row.at,
-                ))
-                if observation.verdict is ObservationVerdict.MATCHED and split is not None:
-                    if split.partition_for(current.trading_day) is DatasetPartition.HOLDOUT:
-                        events.append(_event_point(
-                            observation, current.trading_day, local_minute, primary,
-                            0.5, volume_rank, costs, activity=True,
-                        ))
+                candidates.append(
+                    _CandidateValue(
+                        current.ticker,
+                        row.at,
+                        current.trading_day,
+                        observation.phase,
+                        local_minute,
+                        0.0,
+                        primary,
+                        0.5,
+                        volume_rank,
+                        row.at,
+                    )
+                )
+                if (
+                    observation.verdict is ObservationVerdict.MATCHED
+                    and split is not None
+                ):
+                    if (
+                        split.partition_for(current.trading_day)
+                        is DatasetPartition.HOLDOUT
+                    ):
+                        events.append(
+                            _event_point(
+                                observation,
+                                current.trading_day,
+                                local_minute,
+                                primary,
+                                0.5,
+                                volume_rank,
+                                costs,
+                                activity=True,
+                            )
+                        )
 
 
 def _build_series(
@@ -727,7 +875,9 @@ def _build_series(
     grouped: dict[tuple[str, date], list[HistoricalCandle]] = defaultdict(list)
     moscow = ZoneInfo("Europe/Moscow")
     for candle in candles:
-        if candle.complete and MOEX_EQUITY_PHASE_SCHEDULE_V1.is_signal_eligible(candle.at):
+        if candle.complete and MOEX_EQUITY_PHASE_SCHEDULE_V1.is_signal_eligible(
+            candle.at
+        ):
             grouped[(candle.ticker, candle.at.astimezone(moscow).date())].append(candle)
     result: dict[tuple[str, date], _DaySeries] = {}
     for (ticker, trading_day), rows in sorted(grouped.items()):
@@ -754,15 +904,21 @@ def _build_series(
     return result, tuple(sorted({day for _, day in result}))
 
 
-def _ordered_series(series: dict[tuple[str, date], _DaySeries]) -> tuple[_DaySeries, ...]:
+def _ordered_series(
+    series: dict[tuple[str, date], _DaySeries],
+) -> tuple[_DaySeries, ...]:
     return tuple(series[key] for key in sorted(series))
 
 
-def _ticker_days(series: dict[tuple[str, date], _DaySeries], ticker: str) -> tuple[date, ...]:
+def _ticker_days(
+    series: dict[tuple[str, date], _DaySeries], ticker: str
+) -> tuple[date, ...]:
     return tuple(sorted(day for item_ticker, day in series if item_ticker == ticker))
 
 
-def _series_position(series: dict[tuple[str, date], _DaySeries], current: _DaySeries) -> int:
+def _series_position(
+    series: dict[tuple[str, date], _DaySeries], current: _DaySeries
+) -> int:
     return _ticker_days(series, current.ticker).index(current.trading_day)
 
 
@@ -773,7 +929,10 @@ def _prior_series(
 ) -> tuple[_DaySeries, ...]:
     days = _ticker_days(series, current.ticker)
     position = days.index(current.trading_day)
-    return tuple(series[(current.ticker, day)] for day in days[max(0, position - count):position])
+    return tuple(
+        series[(current.ticker, day)]
+        for day in days[max(0, position - count) : position]
+    )
 
 
 def _previous_main_close(
@@ -789,13 +948,16 @@ def _previous_main_close(
 
 def _morning_checkpoints(series: _DaySeries) -> tuple[int, ...]:
     return tuple(
-        minute for minute in sorted(series.by_minute)
+        minute
+        for minute in sorted(series.by_minute)
         if 7 * 60 <= minute <= 9 * 60 + 49
         and (minute % 15 == 14 or minute == 9 * 60 + 49)
     )
 
 
-def _feature_set(at: datetime, values: dict[FeatureName, float]) -> HypothesisFeatureSet:
+def _feature_set(
+    at: datetime, values: dict[FeatureName, float]
+) -> HypothesisFeatureSet:
     return HypothesisFeatureSet.from_iterable(
         ObservedFeature(
             name=name,
@@ -811,7 +973,9 @@ def _feature_set(at: datetime, values: dict[FeatureName, float]) -> HypothesisFe
 def _has_gap(series: _DaySeries, start_minute: int, end_minute: int) -> bool:
     if start_minute > end_minute:
         return True
-    return any(minute not in series.by_minute for minute in range(start_minute, end_minute + 1))
+    return any(
+        minute not in series.by_minute for minute in range(start_minute, end_minute + 1)
+    )
 
 
 def _return_bps(start: float, end: float) -> float:
@@ -825,7 +989,13 @@ def _range_bps(candle: HistoricalCandle) -> float:
 def _z_score(history: Sequence[float], value: float) -> float:
     sigma = pstdev(history)
     if sigma <= 1e-12:
-        return 999.0 if value > fmean(history) else -999.0 if value < fmean(history) else 0.0
+        return (
+            999.0
+            if value > fmean(history)
+            else -999.0
+            if value < fmean(history)
+            else 0.0
+        )
     return (value - fmean(history)) / sigma
 
 
@@ -860,12 +1030,18 @@ def _window_volume(series: _DaySeries, start: int, end: int) -> float | None:
     return sum(series.by_minute[minute].volume for minute in range(start, end + 1))
 
 
-def _realized_activity(series: _DaySeries, event_minute: int, horizon_minutes: int) -> float | None:
+def _realized_activity(
+    series: _DaySeries, event_minute: int, horizon_minutes: int
+) -> float | None:
     end = event_minute + horizon_minutes
     if _has_gap(series, event_minute, end):
         return None
     return sum(
-        abs(_return_bps(series.by_minute[minute - 1].close, series.by_minute[minute].close))
+        abs(
+            _return_bps(
+                series.by_minute[minute - 1].close, series.by_minute[minute].close
+            )
+        )
         for minute in range(event_minute + 1, end + 1)
     )
 
@@ -937,14 +1113,20 @@ def _event_point(
     *,
     activity: bool = False,
 ) -> StudyPoint:
-    net = raw_effect if activity else observation.expected_direction * raw_effect - costs.round_trip_bps
+    net = (
+        raw_effect
+        if activity
+        else observation.expected_direction * raw_effect - costs.round_trip_bps
+    )
     return StudyPoint(
         point_id=f"event:{observation.observation_id}",
         scenario_id=observation.observation_id,
         instrument_id=observation.ticker,
         occurred_at=observation.event_at,
         trading_day=trading_day,
-        session_bucket=_matching_session(observation.phase, local_minute, observation.expected_direction),
+        session_bucket=_matching_session(
+            observation.phase, local_minute, observation.expected_direction
+        ),
         volatility_bucket=_bucket(volatility_rank),
         liquidity_bucket=_bucket(liquidity_rank),
         features_observed_at=observation.feature_cutoff_at,
@@ -973,8 +1155,10 @@ def _study_candidates(
             continue
         directions = (-1, 1) if directional else (0,)
         nearby = tuple(
-            scenario for at, scenario in event_times[candidate.ticker]
-            if scenario is not None and abs(at - candidate.event_at) <= timedelta(minutes=5)
+            scenario
+            for at, scenario in event_times[candidate.ticker]
+            if scenario is not None
+            and abs(at - candidate.event_at) <= timedelta(minutes=5)
         )
         for direction in directions:
             effect = (
@@ -984,26 +1168,28 @@ def _study_candidates(
             )
             if effect is None:
                 continue
-            result.append(StudyPoint(
-                point_id=(
-                    f"control:{hypothesis_id.value}:{candidate.ticker}:"
-                    f"{candidate.event_at.isoformat()}:{direction}"
-                ),
-                scenario_id=None,
-                instrument_id=candidate.ticker,
-                occurred_at=candidate.event_at,
-                trading_day=candidate.trading_day,
-                session_bucket=_matching_session(
-                    candidate.phase, candidate.local_minute, direction
-                ),
-                volatility_bucket=_bucket(candidate.volatility_rank),
-                liquidity_bucket=_bucket(candidate.liquidity_rank),
-                features_observed_at=candidate.feature_cutoff_at,
-                partition=DatasetPartition.HOLDOUT,
-                net_effect_bps=effect,
-                cost_model_version=costs.version,
-                nearby_scenario_ids=nearby,
-            ))
+            result.append(
+                StudyPoint(
+                    point_id=(
+                        f"control:{hypothesis_id.value}:{candidate.ticker}:"
+                        f"{candidate.event_at.isoformat()}:{direction}"
+                    ),
+                    scenario_id=None,
+                    instrument_id=candidate.ticker,
+                    occurred_at=candidate.event_at,
+                    trading_day=candidate.trading_day,
+                    session_bucket=_matching_session(
+                        candidate.phase, candidate.local_minute, direction
+                    ),
+                    volatility_bucket=_bucket(candidate.volatility_rank),
+                    liquidity_bucket=_bucket(candidate.liquidity_rank),
+                    features_observed_at=candidate.feature_cutoff_at,
+                    partition=DatasetPartition.HOLDOUT,
+                    net_effect_bps=effect,
+                    cost_model_version=costs.version,
+                    nearby_scenario_ids=nearby,
+                )
+            )
     return tuple(result)
 
 
@@ -1023,11 +1209,13 @@ def _summary(
     rows = [item for item in outcomes if item.hypothesis_id is hypothesis_id]
     observation_ids = {item.observation_id for item in rows}
     matched = {
-        item.observation_id for item in rows
+        item.observation_id
+        for item in rows
         if item.verdict is ObservationVerdict.MATCHED
     }
     abstained = {
-        item.observation_id for item in rows
+        item.observation_id
+        for item in rows
         if item.verdict is ObservationVerdict.ABSTAIN
     }
     return HypothesisReplaySummary(

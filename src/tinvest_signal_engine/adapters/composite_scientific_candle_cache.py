@@ -154,11 +154,7 @@ class ClickHouseScientificCandleSource:
         self._retry_backoff_seconds = retry_backoff_seconds
 
     def load_as_of(self, as_of: datetime) -> tuple[VersionedHistoricalCandle, ...]:
-        return tuple(
-            row
-            for partition in self.iter_as_of(as_of)
-            for row in partition
-        )
+        return tuple(row for partition in self.iter_as_of(as_of) for row in partition)
 
     def iter_as_of(
         self,
@@ -244,8 +240,7 @@ class ClickHouseScientificCandleSource:
             try:
                 with urlopen(request, timeout=self._timeout_seconds) as response:
                     return tuple(
-                        parser(json.loads(line))
-                        for line in _response_lines(response)
+                        parser(json.loads(line)) for line in _response_lines(response)
                     )
             except HTTPError as error:
                 if (
@@ -281,7 +276,9 @@ class CompositeScientificCandleCache:
         self._historical = historical
         self._live = live
         self._as_of = _aware_utc(as_of, "as_of")
-        self._fallback_live_snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
+        self._fallback_live_snapshot: tuple[VersionedHistoricalCandle, ...] | None = (
+            None
+        )
         self._snapshot: tuple[HistoricalCandle, ...] | None = None
         self._descriptor: CandleCacheDescriptor | None = None
         self._partition_store: TemporaryDirectory[str] | None = None
@@ -339,8 +336,7 @@ class CompositeScientificCandleCache:
                         "materialized candle partitions must be ticker ordered"
                     )
                 if any(
-                    left.at >= right.at
-                    for left, right in zip(partition, partition[1:])
+                    left.at >= right.at for left, right in zip(partition, partition[1:])
                 ):
                     raise ValueError(
                         "materialized candle partitions must be time ordered"
@@ -424,9 +420,7 @@ class CompositeScientificCandleCache:
                 else None
             )
             live_ticker = (
-                live_partition[0].candle.ticker
-                if live_partition is not None
-                else None
+                live_partition[0].candle.ticker if live_partition is not None else None
             )
             if live_ticker is None or (
                 historical_ticker is not None and historical_ticker < live_ticker
@@ -630,7 +624,9 @@ def _response_lines(response: object) -> Iterator[str]:
         payload = response.read()  # type: ignore[attr-defined]
         iterator = iter(payload.splitlines())
     for raw_line in iterator:
-        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
+        line = (
+            raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
+        )
         if line.strip():
             yield line
 
@@ -655,12 +651,12 @@ def _iter_historical_partitions(
     as_of: datetime,
 ) -> Iterator[tuple[HistoricalCandle, ...]]:
     iterator = getattr(historical, "iter_ticker_partitions", None)
-    source = iterator() if callable(iterator) else _partition_historical(historical.load())
+    source = (
+        iterator() if callable(iterator) else _partition_historical(historical.load())
+    )
     for partition in source:
         causal = tuple(
-            item
-            for item in partition
-            if item.at.astimezone(timezone.utc) <= as_of
+            item for item in partition if item.at.astimezone(timezone.utc) <= as_of
         )
         if causal:
             yield causal
@@ -687,10 +683,7 @@ def _merge_ticker_partition(
 ) -> tuple[HistoricalCandle, ...]:
     selected = {item.at.astimezone(timezone.utc): item for item in historical}
     selected.update(
-        {
-            item.candle.at.astimezone(timezone.utc): item.candle
-            for item in live
-        }
+        {item.candle.at.astimezone(timezone.utc): item.candle for item in live}
     )
     return tuple(selected[key] for key in sorted(selected))
 
@@ -703,21 +696,23 @@ def _write_materialized_partition(
 
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for candle in partition:
-            handle.write(json.dumps(
-                (
-                    candle.ticker,
-                    candle.at.isoformat(timespec="microseconds"),
-                    candle.open,
-                    candle.high,
-                    candle.low,
-                    candle.close,
-                    candle.volume,
-                    candle.complete,
-                ),
-                ensure_ascii=True,
-                allow_nan=False,
-                separators=(",", ":"),
-            ))
+            handle.write(
+                json.dumps(
+                    (
+                        candle.ticker,
+                        candle.at.isoformat(timespec="microseconds"),
+                        candle.open,
+                        candle.high,
+                        candle.low,
+                        candle.close,
+                        candle.volume,
+                        candle.complete,
+                    ),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+            )
             handle.write("\n")
 
 
@@ -737,16 +732,18 @@ def _read_materialized_partition(
             raise ValueError("materialized candle partition is invalid")
         if not isinstance(payload[7], bool):
             raise ValueError("materialized candle completeness flag is invalid")
-        rows.append(HistoricalCandle(
-            ticker=str(payload[0]),
-            at=datetime.fromisoformat(str(payload[1])),
-            open=float(payload[2]),
-            high=float(payload[3]),
-            low=float(payload[4]),
-            close=float(payload[5]),
-            volume=float(payload[6]),
-            complete=payload[7],
-        ))
+        rows.append(
+            HistoricalCandle(
+                ticker=str(payload[0]),
+                at=datetime.fromisoformat(str(payload[1])),
+                open=float(payload[2]),
+                high=float(payload[3]),
+                low=float(payload[4]),
+                close=float(payload[5]),
+                volume=float(payload[6]),
+                complete=payload[7],
+            )
+        )
     partition = tuple(rows)
     if not partition:
         raise ValueError("materialized candle partition is empty")

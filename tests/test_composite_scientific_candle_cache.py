@@ -256,6 +256,7 @@ def test_clickhouse_datetime64_without_suffix_restores_schema_utc(
             received_at="2026-07-17 10:00:01.000000",
         )
     )
+
     def open_request(request, timeout):
         if "min(candle_at)" in request.data.decode("utf-8"):
             return _Response(json.dumps(_instrument_range_row()))
@@ -281,6 +282,7 @@ def test_clickhouse_source_rejects_future_row_even_if_backend_returns_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = json.dumps(_clickhouse_row(received_at="2026-07-17T12:00:00Z"))
+
     def open_request(request, timeout):
         if "min(candle_at)" in request.data.decode("utf-8"):
             return _Response(json.dumps(_instrument_range_row()))
@@ -357,9 +359,7 @@ def test_clickhouse_source_streams_and_bounds_deduplication_by_ticker(
         password="secret",
     )
 
-    partitions = tuple(
-        source.iter_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC))
-    )
+    partitions = tuple(source.iter_as_of(datetime(2026, 7, 17, 11, 0, tzinfo=UTC)))
 
     assert tuple(partition[0].candle.ticker for partition in partitions) == (
         "SBER",
@@ -513,12 +513,9 @@ def test_clickhouse_source_reads_adjacent_time_chunks_without_overlap(
 
     assert len(chunk_queries) == 2
     assert (
-        chunk_queries[0]["param_window_end"]
-        == chunk_queries[1]["param_window_start"]
+        chunk_queries[0]["param_window_end"] == chunk_queries[1]["param_window_start"]
     )
-    assert chunk_queries[-1]["param_window_end"] == [
-        "2026-07-17T11:00:00.000001Z"
-    ]
+    assert chunk_queries[-1]["param_window_end"] == ["2026-07-17T11:00:00.000001Z"]
 
 
 def test_clickhouse_source_reports_bounded_server_diagnostic_after_retries(
