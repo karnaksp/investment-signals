@@ -12,6 +12,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.application.prospective_scientific_evidence import (
+    BOUNDED_CONTROL_REUSE_HYPOTHESES,
+    BOUNDED_CONTROL_REUSE_LIMIT,
+    BOUNDED_CONTROL_SELECTION_POLICY_VERSION,
     PROSPECTIVE_EVIDENCE_DEFINITIONS,
     AssessProspectiveScientificEvidence,
     PreparedProspectiveEvidence,
@@ -48,9 +51,7 @@ PROSPECTIVE_SCIENTIFIC_EVIDENCE_POLICY = EvidenceGatePolicy(
 # 2026-07-22.  A combined portfolio claim therefore starts no earlier than the
 # next trading day; older observations remain useful only for research.
 PROSPECTIVE_PRIMARY_HOLDOUT_START = date(2026, 7, 23)
-PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA = (
-    "prospective-scientific-evidence-v1.1.0"
-)
+PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA = "prospective-scientific-evidence-v1.1.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +269,18 @@ class ProspectiveScientificReplayArtifactAdapter:
                 "artifact_schema": PROSPECTIVE_SCIENTIFIC_EVIDENCE_SCHEMA,
                 "cost_model_version": cost_model_version,
                 "evidence_policy": asdict(self._evidence_policy),
+                "bounded_control_reuse": {
+                    "hypotheses": sorted(
+                        item.value for item in BOUNDED_CONTROL_REUSE_HYPOTHESES
+                    ),
+                    "maximum_control_reuse": BOUNDED_CONTROL_REUSE_LIMIT,
+                    "selection_policy_version": (
+                        BOUNDED_CONTROL_SELECTION_POLICY_VERSION
+                    ),
+                    "minimum_independent_clusters": (
+                        self._evidence_policy.minimum_trading_days
+                    ),
+                },
                 "report_fingerprint": portfolio_report_fingerprint,
                 "selected_hypotheses": [item.value for item in selected],
                 "claim_definitions": [
@@ -323,6 +336,16 @@ class ProspectiveScientificReplayArtifactAdapter:
             "policy": asdict(portfolio_policy),
             "selected_hypotheses": [item.value for item in selected],
             "cost_model_version": cost_model_version,
+            "bounded_control_reuse": {
+                "hypotheses": sorted(
+                    item.value for item in BOUNDED_CONTROL_REUSE_HYPOTHESES
+                ),
+                "maximum_control_reuse": BOUNDED_CONTROL_REUSE_LIMIT,
+                "selection_policy_version": (BOUNDED_CONTROL_SELECTION_POLICY_VERSION),
+                "minimum_independent_clusters": (
+                    self._evidence_policy.minimum_trading_days
+                ),
+            },
             "evidence_coverage": {
                 item.hypothesis_id: _coverage_manifest(item)
                 for item in assessment.coverage
@@ -398,6 +421,22 @@ def _evidence_row(
         "matched_control_lift_ci95_upper": interval.upper if interval else None,
         "matched_controls": bundle.matched_controls,
         "controls_per_event": controls_per_event,
+        "control_matching": {
+            "selection_policy_version": (coverage.control_selection_policy_version),
+            "maximum_control_reuse": coverage.maximum_control_reuse,
+            "distinct_controls": coverage.distinct_controls,
+            "maximum_observed_control_reuse": (coverage.maximum_observed_control_reuse),
+            "mean_control_reuse": coverage.mean_control_reuse,
+            "independent_control_clusters": (coverage.independent_control_clusters),
+            "minimum_independent_control_clusters": (
+                coverage.minimum_independent_control_clusters
+            ),
+            "inference_unit": (
+                "control_dependency_cluster"
+                if coverage.maximum_observed_control_reuse > 1
+                else "trading_day"
+            ),
+        },
         "adjusted_p_value": bundle.adjusted_q_value,
         "stable_blocks": bundle.stability.positive_blocks,
         "total_blocks": len(bundle.stability.blocks),
@@ -470,7 +509,9 @@ def _has_primary_holdout(
     *,
     starts_on: date,
 ) -> bool:
-    return bool(report.split.holdout_days) and min(report.split.holdout_days) >= starts_on
+    return (
+        bool(report.split.holdout_days) and min(report.split.holdout_days) >= starts_on
+    )
 
 
 def _coverage_manifest(
@@ -483,7 +524,15 @@ def _coverage_manifest(
         "unmatched_events": coverage.unmatched_events,
         "control_candidates": coverage.control_candidates,
         "common_support_rate": coverage.common_support_rate,
-        "selection_policy": "pre_outcome_strata_five_controls_exclusion_5m_v1",
+        "selection_policy": coverage.control_selection_policy_version,
+        "maximum_control_reuse": coverage.maximum_control_reuse,
+        "distinct_controls": coverage.distinct_controls,
+        "maximum_observed_control_reuse": (coverage.maximum_observed_control_reuse),
+        "mean_control_reuse": coverage.mean_control_reuse,
+        "independent_control_clusters": (coverage.independent_control_clusters),
+        "minimum_independent_control_clusters": (
+            coverage.minimum_independent_control_clusters
+        ),
     }
 
 

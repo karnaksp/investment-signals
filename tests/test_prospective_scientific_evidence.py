@@ -13,6 +13,8 @@ from tinvest_signal_engine.adapters.prospective_scientific_replay import (
 )
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.application.prospective_scientific_evidence import (
+    BOUNDED_CONTROL_REUSE_HYPOTHESES,
+    BOUNDED_CONTROL_SELECTION_POLICY_VERSION,
     AssessProspectiveScientificEvidence,
 )
 from tinvest_signal_engine.application.prospective_scientific_models import (
@@ -115,9 +117,7 @@ def test_reports_can_be_prepared_one_at_a_time_before_one_global_fdr_pass() -> N
             features=tuple(pair[0] for pair in selected),
             outcomes=tuple(pair[1] for pair in selected),
         )
-        prepared.append(
-            gate.prepare(one_hypothesis_report, hypothesis, "cost-v1")
-        )
+        prepared.append(gate.prepare(one_hypothesis_report, hypothesis, "cost-v1"))
 
     actual = gate.assess_prepared(prepared)
 
@@ -159,6 +159,86 @@ def test_fdr_is_shared_and_incomplete_controls_fail_closed() -> None:
         ).unmatched_events
         == 1
     )
+
+
+def test_selected_hypotheses_use_bounded_reuse_and_fail_closed_on_one_cluster(
+    tmp_path: Path,
+) -> None:
+    expected = {
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+    }
+    assert BOUNDED_CONTROL_REUSE_HYPOTHESES == expected
+    report = _bounded_reuse_h7_report()
+    gate_policy = EvidenceGatePolicy(
+        minimum_trading_days=2,
+        minimum_eligible_events=2,
+        controls_per_event=5,
+        bootstrap_samples=100,
+        required_positive_stability_blocks=1,
+        maximum_instrument_share=0.99,
+        minimum_coverage=0.10,
+    )
+    assessment = AssessProspectiveScientificEvidence(gate_policy).execute(
+        report,
+        (ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,),
+        cost_model_version="cost-v1",
+    )
+    request = assessment.request_for(
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3
+    )
+    coverage = assessment.coverage_for(
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3
+    )
+    bundle = assessment.for_hypothesis(
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3
+    )
+
+    assert len(request.groups) == 2
+    assert all(len(set(group.controls)) == 5 for group in request.groups)
+    assert coverage.control_selection_policy_version == (
+        BOUNDED_CONTROL_SELECTION_POLICY_VERSION
+    )
+    assert coverage.maximum_control_reuse == 5
+    assert coverage.distinct_controls == 5
+    assert coverage.maximum_observed_control_reuse == 2
+    assert coverage.mean_control_reuse == 2.0
+    assert coverage.independent_control_clusters == 1
+    assert coverage.minimum_independent_control_clusters == 2
+    assert bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
+    assert "minimum_independent_control_clusters_not_met" in bundle.reason_codes
+    assert bundle.diagnostics_v2 is not None
+    assert bundle.diagnostics_v2.primary_p_value == 0.5
+
+    artifact = ProspectiveScientificReplayArtifactAdapter(
+        tmp_path,
+        evidence_policy=gate_policy,
+    ).save(
+        report,
+        (ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,),
+        cost_model_version="cost-v1",
+    )
+    matching = artifact.evidence[0]["control_matching"]
+    assert matching == {
+        "selection_policy_version": BOUNDED_CONTROL_SELECTION_POLICY_VERSION,
+        "maximum_control_reuse": 5,
+        "distinct_controls": 5,
+        "maximum_observed_control_reuse": 2,
+        "mean_control_reuse": 2.0,
+        "independent_control_clusters": 1,
+        "minimum_independent_control_clusters": 2,
+        "inference_unit": "control_dependency_cluster",
+    }
+    manifest = json.loads(
+        (Path(artifact.artifact_uri) / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["bounded_control_reuse"]["selection_policy_version"] == (
+        BOUNDED_CONTROL_SELECTION_POLICY_VERSION
+    )
+    assert manifest["evidence_coverage"]["H7V3"]["maximum_observed_control_reuse"] == 2
 
 
 def test_h15_primary_effect_beats_best_and_therefore_mean_benchmark() -> None:
@@ -262,9 +342,7 @@ def test_adapter_is_deterministic_typed_and_immutable(tmp_path: Path) -> None:
         "matched_event_count": 8,
         "match_coverage": 1.0,
         "data_coverage": 1.0,
-        "reasons_histogram": (
-            {"reason_code": "event_condition_not_met", "count": 40},
-        ),
+        "reasons_histogram": ({"reason_code": "event_condition_not_met", "count": 40},),
         "primary_effect_estimate": 10_000.0,
         "primary_effect_interval": {
             "lower": 10_000.0,
@@ -289,10 +367,7 @@ def test_adapter_is_deterministic_typed_and_immutable(tmp_path: Path) -> None:
     assert tuple(
         item["reason_code"] for item in blocked_diagnostics["reasons_histogram"]
     ) == tuple(
-        sorted(
-            item["reason_code"]
-            for item in blocked_diagnostics["reasons_histogram"]
-        )
+        sorted(item["reason_code"] for item in blocked_diagnostics["reasons_histogram"])
     )
     evidence_path = Path(first.artifact_uri) / "evidence.json"
     expected_bytes = (
@@ -529,6 +604,36 @@ def _variance_portfolio_report(
             outcomes=tuple(pair[1] for pair in pairs),
         ),
         contaminated_id,
+    )
+
+
+def _bounded_reuse_h7_report() -> ProspectiveScientificReport:
+    policy = ProspectiveScientificPolicy(volume_history_days=1)
+    mondays = tuple(date(2026, 1, 5) + timedelta(weeks=index) for index in range(7))
+    pairs = [
+        _variance_pairs(
+            "SBER",
+            trading_day,
+            _at(trading_day),
+            event=index < 2,
+            policy=policy,
+            hypotheses=(ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,),
+        )[0]
+        for index, trading_day in enumerate(mondays)
+    ]
+    return ProspectiveScientificReport(
+        dataset_fingerprint="sha256:" + "1" * 64,
+        report_fingerprint="sha256:" + "2" * 64,
+        split=ChronologicalSplit(
+            train_days=(TRAIN_DAY,),
+            validation_days=(VALIDATION_DAY,),
+            holdout_days=mondays,
+        ),
+        policy=policy,
+        selected_hypotheses=(ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,),
+        har_v2_parameters=None,
+        features=tuple(pair[0] for pair in pairs),
+        outcomes=tuple(pair[1] for pair in pairs),
     )
 
 

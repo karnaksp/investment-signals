@@ -7,6 +7,7 @@ replay, shadow evaluation, and the product evidence gate.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
@@ -131,19 +132,113 @@ class MatchedControlGroup:
 
 
 @dataclass(frozen=True)
+class ControlReuseStatistics:
+    """Auditable dependence created by sharing controls between event groups."""
+
+    distinct_controls: int
+    maximum_reuse: int
+    mean_reuse: float
+    independent_clusters: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.distinct_controls < 0
+            or self.maximum_reuse < 0
+            or self.mean_reuse < 0.0
+            or self.independent_clusters < 0
+        ):
+            raise ValueError("control reuse statistics must not be negative")
+        if self.distinct_controls == 0 and (
+            self.maximum_reuse != 0
+            or self.mean_reuse != 0.0
+            or self.independent_clusters != 0
+        ):
+            raise ValueError("empty control reuse statistics must be all zero")
+
+
+@dataclass(frozen=True)
 class MatchedControlsResult:
     groups: tuple[MatchedControlGroup, ...]
     unmatched_event_ids: tuple[str, ...]
     controls_per_event: int
+    maximum_control_reuse: int = 1
+    selection_policy_version: str = "unique-control-exact-strata-exclusion-5m-v1"
 
     def __post_init__(self) -> None:
-        all_control_ids = [
+        if self.maximum_control_reuse <= 0:
+            raise ValueError("maximum_control_reuse must be positive")
+        if not self.selection_policy_version.strip():
+            raise ValueError("selection_policy_version must not be empty")
+        reuse_counts = Counter(
             control.point_id for group in self.groups for control in group.controls
-        ]
-        if len(all_control_ids) != len(set(all_control_ids)):
-            raise ValueError("a control must not be reused across event groups")
+        )
+        if reuse_counts and max(reuse_counts.values()) > self.maximum_control_reuse:
+            if self.maximum_control_reuse == 1:
+                raise ValueError("a control must not be reused across event groups")
+            raise ValueError("a control exceeds the configured reuse limit")
         if any(len(group.controls) != self.controls_per_event for group in self.groups):
             raise ValueError("every completed group must have the requested controls")
+
+    @property
+    def reuse_statistics(self) -> ControlReuseStatistics:
+        reuse_counts = Counter(
+            control.point_id for group in self.groups for control in group.controls
+        )
+        assignments = sum(reuse_counts.values())
+        return ControlReuseStatistics(
+            distinct_controls=len(reuse_counts),
+            maximum_reuse=max(reuse_counts.values(), default=0),
+            mean_reuse=(assignments / len(reuse_counts) if reuse_counts else 0.0),
+            independent_clusters=len(control_dependency_clusters(self.groups)),
+        )
+
+
+def control_dependency_clusters(
+    groups: Sequence[MatchedControlGroup],
+) -> tuple[tuple[MatchedControlGroup, ...], ...]:
+    """Group events connected by a reused control into independent clusters."""
+
+    if not groups:
+        return ()
+    parents = list(range(len(groups)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    first_group_by_control: dict[str, int] = {}
+    for group_index, group in enumerate(groups):
+        for control in group.controls:
+            prior_group = first_group_by_control.setdefault(
+                control.point_id, group_index
+            )
+            union(group_index, prior_group)
+    by_root: dict[int, list[MatchedControlGroup]] = {}
+    for index, group in enumerate(groups):
+        by_root.setdefault(find(index), []).append(group)
+    return tuple(
+        tuple(
+            sorted(
+                cluster,
+                key=lambda item: (
+                    item.event.occurred_at,
+                    item.event.point_id,
+                ),
+            )
+        )
+        for _, cluster in sorted(
+            by_root.items(),
+            key=lambda item: min(group.event.point_id for group in item[1]),
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -374,6 +469,47 @@ def day_block_bootstrap_interval(
     )
 
 
+def control_cluster_bootstrap_interval(
+    values_by_cluster: Mapping[str, Sequence[float]],
+    *,
+    samples: int = 2_000,
+    seed: int = 0,
+    confidence_level: float = 0.95,
+) -> ConfidenceInterval:
+    """Resample independent control-dependency clusters as whole blocks."""
+
+    if samples <= 0:
+        raise ValueError("samples must be positive")
+    if not 0.0 < confidence_level < 1.0:
+        raise ValueError("confidence_level must be between zero and one")
+    clusters = tuple(sorted(values_by_cluster))
+    if not clusters or any(not values_by_cluster[item] for item in clusters):
+        raise ValueError("every bootstrap cluster must contain observations")
+    flattened = [value for cluster in clusters for value in values_by_cluster[cluster]]
+    estimate = sum(flattened) / len(flattened)
+    generator = Random(seed)
+    bootstrap_means: list[float] = []
+    for _ in range(samples):
+        sampled = [generator.choice(clusters) for _ in clusters]
+        observations = [
+            value
+            for sampled_cluster in sampled
+            for value in values_by_cluster[sampled_cluster]
+        ]
+        bootstrap_means.append(sum(observations) / len(observations))
+    bootstrap_means.sort()
+    alpha = (1.0 - confidence_level) / 2.0
+    return ConfidenceInterval(
+        lower=min(_quantile(bootstrap_means, alpha), estimate),
+        estimate=estimate,
+        upper=max(
+            _quantile(bootstrap_means, 1.0 - alpha),
+            estimate,
+        ),
+        confidence_level=confidence_level,
+    )
+
+
 def benjamini_hochberg(
     p_values: Mapping[str, float],
     *,
@@ -429,7 +565,9 @@ def five_block_stability(
     blocks: list[StabilityBlock] = []
     for index, days_in_block in enumerate(block_days, start=1):
         values = [
-            value for trading_day in days_in_block for value in values_by_day[trading_day]
+            value
+            for trading_day in days_in_block
+            for value in values_by_day[trading_day]
         ]
         mean = sum(values) / len(values)
         blocks.append(
@@ -467,6 +605,7 @@ def _quantile(sorted_values: Sequence[float], probability: float) -> float:
     lower_index = int(position)
     upper_index = min(lower_index + 1, len(sorted_values) - 1)
     fraction = position - lower_index
-    return sorted_values[lower_index] + (
-        sorted_values[upper_index] - sorted_values[lower_index]
-    ) * fraction
+    return (
+        sorted_values[lower_index]
+        + (sorted_values[upper_index] - sorted_values[lower_index]) * fraction
+    )

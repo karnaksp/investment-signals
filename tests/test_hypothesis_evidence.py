@@ -15,6 +15,7 @@ from tinvest_signal_engine.application.hypothesis_evidence import (
     EvidenceRequest,
 )
 from tinvest_signal_engine.domain.hypothesis_evidence import (
+    ControlReuseStatistics,
     DatasetPartition,
     EvidenceDecision,
     EvidenceReasonCount,
@@ -22,6 +23,7 @@ from tinvest_signal_engine.domain.hypothesis_evidence import (
     MatchedControlsResult,
     StudyPoint,
     benjamini_hochberg,
+    control_cluster_bootstrap_interval,
     day_block_bootstrap_interval,
     five_block_stability,
     one_sided_sign_test_p_value,
@@ -114,7 +116,9 @@ def _request(
         _group(
             day_index * events_per_day + event_index,
             effect=effect,
-            instrument=instruments[(day_index * events_per_day + event_index) % len(instruments)],
+            instrument=instruments[
+                (day_index * events_per_day + event_index) % len(instruments)
+            ],
             day_offset=day_index,
         )
         for day_index, effect in enumerate(effects_by_day)
@@ -161,7 +165,9 @@ def test_matched_controls_require_all_strata_and_never_reuse_controls() -> None:
         _point("event-1", scenario="h1", seconds=1),
         _point("event-2", scenario="h1", seconds=2),
     )
-    valid = tuple(_point(f"candidate-{index}", seconds=100 + index) for index in range(10))
+    valid = tuple(
+        _point(f"candidate-{index}", seconds=100 + index) for index in range(10)
+    )
     wrong_strata = (
         _point("wrong-session", session="closing"),
         _point("wrong-volatility", volatility="high"),
@@ -207,13 +213,50 @@ def test_incomplete_control_set_is_reported_and_never_partially_emitted() -> Non
 
 def test_matching_is_independent_of_input_order() -> None:
     events = (_point("event-1", seconds=1), _point("event-2", seconds=2))
-    candidates = tuple(_point(f"candidate-{index}", seconds=100 + index) for index in range(10))
+    candidates = tuple(
+        _point(f"candidate-{index}", seconds=100 + index) for index in range(10)
+    )
     builder = BuildMatchedControls()
 
     first = builder.execute(events, candidates)
     second = builder.execute(tuple(reversed(events)), tuple(reversed(candidates)))
 
     assert first == second
+
+
+def test_bounded_control_reuse_is_deterministic_capped_and_auditable() -> None:
+    events = tuple(
+        _point(f"event-{index}", scenario=f"h-{index}", seconds=index)
+        for index in range(6)
+    )
+    candidates = tuple(
+        _point(f"candidate-{index}", seconds=100 + index) for index in range(5)
+    )
+    builder = BuildMatchedControls(
+        maximum_control_reuse=5,
+        selection_policy_version=(
+            "bounded-control-reuse-5-exact-strata-exclusion-5m-v1"
+        ),
+    )
+
+    first = builder.execute(events, candidates)
+    second = builder.execute(
+        tuple(reversed(events)),
+        tuple(reversed(candidates)),
+    )
+
+    assert first == second
+    assert len(first.groups) == 5
+    assert first.unmatched_event_ids == ("event-5",)
+    assert all(
+        len({control.point_id for control in group.controls}) == 5
+        for group in first.groups
+    )
+    assert first.maximum_control_reuse == 5
+    assert first.reuse_statistics.distinct_controls == 5
+    assert first.reuse_statistics.maximum_reuse == 5
+    assert first.reuse_statistics.mean_reuse == 5.0
+    assert first.reuse_statistics.independent_clusters == 1
 
 
 def test_matched_group_rejects_partition_and_scenario_overlap() -> None:
@@ -234,7 +277,41 @@ def test_result_object_rejects_control_reuse_across_events() -> None:
         MatchedControlGroup(event=_point("event-2"), controls=shared),
     )
     with pytest.raises(ValueError, match="must not be reused"):
-        MatchedControlsResult(groups=groups, unmatched_event_ids=(), controls_per_event=5)
+        MatchedControlsResult(
+            groups=groups, unmatched_event_ids=(), controls_per_event=5
+        )
+
+
+def test_evidence_request_rejects_unreported_or_inconsistent_control_reuse() -> None:
+    shared = tuple(_point(f"shared-{index}") for index in range(5))
+    groups = (
+        MatchedControlGroup(event=_point("event-1"), controls=shared),
+        MatchedControlGroup(event=_point("event-2"), controls=shared),
+    )
+    with pytest.raises(ValueError, match="configured request limit"):
+        EvidenceRequest(
+            hypothesis_id="H4V2",
+            hypothesis_version="2.0.0",
+            dataset_fingerprint="sha256:dataset",
+            groups=groups,
+            expected_eligible_events=2,
+        )
+    with pytest.raises(ValueError, match="do not match groups"):
+        EvidenceRequest(
+            hypothesis_id="H4V2",
+            hypothesis_version="2.0.0",
+            dataset_fingerprint="sha256:dataset",
+            groups=groups,
+            expected_eligible_events=2,
+            maximum_control_reuse=5,
+            control_selection_policy_version="bounded-v1",
+            control_reuse_statistics=ControlReuseStatistics(
+                distinct_controls=5,
+                maximum_reuse=1,
+                mean_reuse=1.0,
+                independent_clusters=2,
+            ),
+        )
 
 
 def test_wilson_interval_matches_known_half_success_case() -> None:
@@ -256,7 +333,23 @@ def test_day_block_bootstrap_is_deterministic_and_keeps_point_estimate() -> None
     second = day_block_bootstrap_interval(values, samples=500, seed=71)
 
     assert first == second
-    assert first.estimate == pytest.approx(sum(chain.from_iterable(values.values())) / 6)
+    assert first.estimate == pytest.approx(
+        sum(chain.from_iterable(values.values())) / 6
+    )
+
+
+def test_control_cluster_bootstrap_keeps_reused_groups_together() -> None:
+    values = {
+        "shared-control-a": (10.0, 10.0, 10.0),
+        "shared-control-b": (-2.0,),
+    }
+
+    first = control_cluster_bootstrap_interval(values, samples=500, seed=71)
+    second = control_cluster_bootstrap_interval(values, samples=500, seed=71)
+
+    assert first == second
+    assert first.estimate == pytest.approx(7.0)
+    assert first.lower <= first.estimate <= first.upper
 
 
 def test_benjamini_hochberg_applies_monotone_fdr_adjustment() -> None:

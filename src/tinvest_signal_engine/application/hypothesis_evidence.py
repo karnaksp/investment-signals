@@ -12,6 +12,7 @@ from typing import Sequence
 from tinvest_signal_engine.domain.hypothesis_evidence import (
     ConfidenceInterval,
     ChronologicalSplit,
+    ControlReuseStatistics,
     DatasetPartition,
     EvidenceBundle,
     EvidenceDecision,
@@ -24,6 +25,8 @@ from tinvest_signal_engine.domain.hypothesis_evidence import (
     StudyPoint,
     benjamini_hochberg,
     chronological_split_60_20_20,
+    control_cluster_bootstrap_interval,
+    control_dependency_clusters,
     day_block_bootstrap_interval,
     five_block_stability,
     one_sided_sign_test_p_value,
@@ -37,20 +40,32 @@ class BuildChronologicalSplit:
 
 
 class BuildMatchedControls:
-    """Select deterministic, non-reused matched controls without leakage."""
+    """Select deterministic matched controls without leakage.
+
+    Reuse remains disabled by default. Research policies that explicitly
+    account for the induced dependence may opt into a small, auditable cap.
+    """
 
     def __init__(
         self,
         *,
         controls_per_event: int = 5,
         scenario_exclusion_window: timedelta = timedelta(minutes=5),
+        maximum_control_reuse: int = 1,
+        selection_policy_version: str = ("unique-control-exact-strata-exclusion-5m-v1"),
     ) -> None:
         if controls_per_event <= 0:
             raise ValueError("controls_per_event must be positive")
         if scenario_exclusion_window < timedelta(0):
             raise ValueError("scenario_exclusion_window must not be negative")
+        if maximum_control_reuse <= 0:
+            raise ValueError("maximum_control_reuse must be positive")
+        if not selection_policy_version.strip():
+            raise ValueError("selection_policy_version must not be empty")
         self._controls_per_event = controls_per_event
         self._scenario_exclusion_window = scenario_exclusion_window
+        self._maximum_control_reuse = maximum_control_reuse
+        self._selection_policy_version = selection_policy_version
 
     def execute(
         self,
@@ -69,7 +84,7 @@ class BuildMatchedControls:
         )
         for candidate in candidates:
             candidates_by_key[candidate.matching_key].append(candidate)
-        used_controls: set[str] = set()
+        control_reuse: Counter[str] = Counter()
         groups: list[MatchedControlGroup] = []
         unmatched: list[str] = []
         for event in sorted(events, key=lambda item: (item.occurred_at, item.point_id)):
@@ -77,12 +92,13 @@ class BuildMatchedControls:
                 candidate
                 for candidate in candidates_by_key[event.matching_key]
                 if candidate.point_id not in event_ids
-                and candidate.point_id not in used_controls
+                and control_reuse[candidate.point_id] < self._maximum_control_reuse
                 and candidate.cost_model_version == event.cost_model_version
                 and not self._scenario_overlap(event, candidate)
             ]
             eligible.sort(
                 key=lambda candidate: (
+                    control_reuse[candidate.point_id],
                     abs((candidate.occurred_at - event.occurred_at).total_seconds()),
                     _stable_tie_break(event.point_id, candidate.point_id),
                     candidate.point_id,
@@ -92,12 +108,14 @@ class BuildMatchedControls:
             if len(selected) != self._controls_per_event:
                 unmatched.append(event.point_id)
                 continue
-            used_controls.update(control.point_id for control in selected)
+            control_reuse.update(control.point_id for control in selected)
             groups.append(MatchedControlGroup(event=event, controls=selected))
         return MatchedControlsResult(
             groups=tuple(groups),
             unmatched_event_ids=tuple(unmatched),
             controls_per_event=self._controls_per_event,
+            maximum_control_reuse=self._maximum_control_reuse,
+            selection_policy_version=self._selection_policy_version,
         )
 
     def _scenario_overlap(self, event: StudyPoint, candidate: StudyPoint) -> bool:
@@ -122,6 +140,10 @@ class EvidenceRequest:
     unmatched_event_ids: tuple[str, ...] = ()
     total_available_observations: int | None = None
     diagnostics_input: EvidenceDiagnosticsInput | None = None
+    control_reuse_statistics: ControlReuseStatistics | None = None
+    control_selection_policy_version: str | None = None
+    maximum_control_reuse: int = 1
+    minimum_independent_control_clusters: int = 1
 
     def __post_init__(self) -> None:
         if not self.hypothesis_id.strip() or not self.hypothesis_version.strip():
@@ -150,6 +172,30 @@ class EvidenceRequest:
             and len(self.groups) > self.diagnostics_input.eligible_event_count
         ):
             raise ValueError("diagnostic eligible events cannot be fewer than groups")
+        if self.minimum_independent_control_clusters <= 0:
+            raise ValueError("minimum_independent_control_clusters must be positive")
+        if self.maximum_control_reuse <= 0:
+            raise ValueError("maximum_control_reuse must be positive")
+        if (
+            self.control_selection_policy_version is not None
+            and not self.control_selection_policy_version.strip()
+        ):
+            raise ValueError("control_selection_policy_version must not be empty")
+        actual_reuse = _control_reuse_statistics(self.groups)
+        if actual_reuse.maximum_reuse > self.maximum_control_reuse:
+            raise ValueError("control reuse exceeds the configured request limit")
+        if actual_reuse.maximum_reuse > 1 and self.control_reuse_statistics is None:
+            raise ValueError("reused controls require auditable statistics")
+        if (
+            self.control_reuse_statistics is not None
+            and self.control_reuse_statistics != actual_reuse
+        ):
+            raise ValueError("control reuse statistics do not match groups")
+        if (
+            self.control_reuse_statistics is not None
+            and self.control_selection_policy_version is None
+        ):
+            raise ValueError("control reuse statistics require a policy version")
 
     @property
     def test_id(self) -> str:
@@ -213,9 +259,13 @@ class AssessEvidencePortfolio:
     def __init__(self, policy: EvidenceGatePolicy = EvidenceGatePolicy()) -> None:
         self._policy = policy
 
-    def execute(self, requests: Sequence[EvidenceRequest]) -> tuple[EvidenceBundle, ...]:
+    def execute(
+        self, requests: Sequence[EvidenceRequest]
+    ) -> tuple[EvidenceBundle, ...]:
         if len({request.test_id for request in requests}) != len(requests):
-            raise ValueError("hypothesis id/version pairs must be unique in a portfolio")
+            raise ValueError(
+                "hypothesis id/version pairs must be unique in a portfolio"
+            )
         preliminary = [self._calculate(request) for request in requests]
         p_values = {
             request.test_id: bundle.raw_p_value
@@ -261,7 +311,10 @@ class AssessEvidencePortfolio:
             reasons.append("minimum_coverage_not_met")
         if len(trading_days) < self._policy.minimum_trading_days:
             reasons.append("minimum_trading_days_not_met")
-        if request.unmatched_event_ids or len(groups) != request.expected_eligible_events:
+        if (
+            request.unmatched_event_ids
+            or len(groups) != request.expected_eligible_events
+        ):
             reasons.append("matched_controls_incomplete")
         if bad_control_count:
             reasons.append("controls_per_event_not_met")
@@ -273,6 +326,12 @@ class AssessEvidencePortfolio:
             for point in (group.event, *group.controls)
         ):
             reasons.append("independent_holdout_required")
+        if (
+            request.control_reuse_statistics is not None
+            and request.control_reuse_statistics.independent_clusters
+            < request.minimum_independent_control_clusters
+        ):
+            reasons.append("minimum_independent_control_clusters_not_met")
 
         empty_stability = StabilityAssessment(
             blocks=(),
@@ -283,7 +342,10 @@ class AssessEvidencePortfolio:
         )
         concentrations = _instrument_concentrations(groups)
         maximum_share = max((item.share for item in concentrations), default=None)
-        if maximum_share is not None and maximum_share > self._policy.maximum_instrument_share:
+        if (
+            maximum_share is not None
+            and maximum_share > self._policy.maximum_instrument_share
+        ):
             reasons.append("single_instrument_concentration_exceeded")
 
         primary = _calculate_descriptive_primary_effect(
@@ -413,15 +475,34 @@ def _calculate_descriptive_primary_effect(
     for group in analyzable:
         lifts_by_day[group.event.trading_day].append(group.lift_bps)
     lifts = tuple(group.lift_bps for group in analyzable)
-    positives = sum(value > 0.0 for value in lifts)
     seed = policy.bootstrap_seed + int(
         sha256(request.test_id.encode("utf-8")).hexdigest()[:8], 16
     )
-    lift_interval = day_block_bootstrap_interval(
-        lifts_by_day,
-        samples=policy.bootstrap_samples,
-        seed=seed,
-    )
+    if (
+        request.control_reuse_statistics is not None
+        and request.control_reuse_statistics.maximum_reuse > 1
+    ):
+        dependency_clusters = control_dependency_clusters(analyzable)
+        lifts_by_cluster = {
+            f"cluster-{index:06d}": tuple(group.lift_bps for group in cluster)
+            for index, cluster in enumerate(dependency_clusters)
+        }
+        lift_interval = control_cluster_bootstrap_interval(
+            lifts_by_cluster,
+            samples=policy.bootstrap_samples,
+            seed=seed,
+        )
+        independent_lifts = tuple(
+            sum(values) / len(values) for values in lifts_by_cluster.values()
+        )
+    else:
+        lift_interval = day_block_bootstrap_interval(
+            lifts_by_day,
+            samples=policy.bootstrap_samples,
+            seed=seed,
+        )
+        independent_lifts = lifts
+    positives = sum(value > 0.0 for value in independent_lifts)
     stability = (
         five_block_stability(
             lifts_by_day,
@@ -437,8 +518,14 @@ def _calculate_descriptive_primary_effect(
         / len(analyzable),
         mean_lift=sum(lifts) / len(lifts),
         lift_interval=lift_interval,
-        positive_rate_interval=wilson_interval(positives, len(lifts)),
-        p_value=one_sided_sign_test_p_value(positives, len(lifts)),
+        positive_rate_interval=wilson_interval(
+            positives,
+            len(independent_lifts),
+        ),
+        p_value=one_sided_sign_test_p_value(
+            positives,
+            len(independent_lifts),
+        ),
         stability=stability,
     )
 
@@ -545,6 +632,21 @@ def _instrument_concentrations(
     )
 
 
+def _control_reuse_statistics(
+    groups: Sequence[MatchedControlGroup],
+) -> ControlReuseStatistics:
+    reuse_counts = Counter(
+        control.point_id for group in groups for control in group.controls
+    )
+    assignments = sum(reuse_counts.values())
+    return ControlReuseStatistics(
+        distinct_controls=len(reuse_counts),
+        maximum_reuse=max(reuse_counts.values(), default=0),
+        mean_reuse=(assignments / len(reuse_counts) if reuse_counts else 0.0),
+        independent_clusters=len(control_dependency_clusters(groups)),
+    )
+
+
 def _evidence_id(request: EvidenceRequest) -> str:
     payload = {
         "hypothesis_id": request.hypothesis_id,
@@ -554,6 +656,22 @@ def _evidence_id(request: EvidenceRequest) -> str:
         "control_ids": tuple(
             tuple(control.point_id for control in group.controls)
             for group in request.groups
+        ),
+        "control_selection_policy_version": (request.control_selection_policy_version),
+        "maximum_control_reuse": request.maximum_control_reuse,
+        "control_reuse_statistics": (
+            {
+                "distinct_controls": (
+                    request.control_reuse_statistics.distinct_controls
+                ),
+                "maximum_reuse": (request.control_reuse_statistics.maximum_reuse),
+                "mean_reuse": request.control_reuse_statistics.mean_reuse,
+                "independent_clusters": (
+                    request.control_reuse_statistics.independent_clusters
+                ),
+            }
+            if request.control_reuse_statistics is not None
+            else None
         ),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

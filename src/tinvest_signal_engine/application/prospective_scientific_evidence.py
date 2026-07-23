@@ -189,6 +189,20 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
     ),
 }
 
+BOUNDED_CONTROL_REUSE_HYPOTHESES = frozenset(
+    {
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+    }
+)
+BOUNDED_CONTROL_REUSE_LIMIT = 5
+BOUNDED_CONTROL_SELECTION_POLICY_VERSION = (
+    "bounded-control-reuse-5-exact-strata-exclusion-5m-v1"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveEvidenceCoverage:
@@ -199,6 +213,13 @@ class ProspectiveEvidenceCoverage:
     unmatched_events: int
     control_candidates: int
     matched_event_ids: tuple[str, ...]
+    control_selection_policy_version: str
+    maximum_control_reuse: int
+    distinct_controls: int
+    maximum_observed_control_reuse: int
+    mean_control_reuse: float
+    independent_control_clusters: int
+    minimum_independent_control_clusters: int
 
     def __post_init__(self) -> None:
         if not self.hypothesis_id.strip():
@@ -218,6 +239,21 @@ class ProspectiveEvidenceCoverage:
             raise ValueError("every triggered event must be matched or unmatched")
         if len(self.matched_event_ids) != len(set(self.matched_event_ids)):
             raise ValueError("matched event ids must be unique")
+        if not self.control_selection_policy_version.strip():
+            raise ValueError("control selection policy version must not be empty")
+        if self.maximum_control_reuse <= 0:
+            raise ValueError("maximum control reuse must be positive")
+        if (
+            self.distinct_controls < 0
+            or self.maximum_observed_control_reuse < 0
+            or self.mean_control_reuse < 0.0
+            or self.independent_control_clusters < 0
+        ):
+            raise ValueError("control reuse statistics must not be negative")
+        if self.maximum_observed_control_reuse > self.maximum_control_reuse:
+            raise ValueError("observed control reuse exceeds configured maximum")
+        if self.minimum_independent_control_clusters <= 0:
+            raise ValueError("minimum independent control clusters must be positive")
 
     @property
     def common_support_rate(self) -> float | None:
@@ -283,6 +319,12 @@ class AssessProspectiveScientificEvidence:
         self._controls = BuildMatchedControls(
             controls_per_event=5,
             scenario_exclusion_window=timedelta(minutes=5),
+        )
+        self._bounded_reuse_controls = BuildMatchedControls(
+            controls_per_event=5,
+            scenario_exclusion_window=timedelta(minutes=5),
+            maximum_control_reuse=BOUNDED_CONTROL_REUSE_LIMIT,
+            selection_policy_version=(BOUNDED_CONTROL_SELECTION_POLICY_VERSION),
         )
         self._portfolio = AssessEvidencePortfolio(policy)
 
@@ -461,7 +503,14 @@ class AssessProspectiveScientificEvidence:
             (events if treated else candidates).append(point)
 
         candidates_with_exclusions = _with_scenario_exclusions(candidates, events)
-        matched = self._controls.execute(events, candidates_with_exclusions)
+        controls = (
+            self._bounded_reuse_controls
+            if hypothesis in BOUNDED_CONTROL_REUSE_HYPOTHESES
+            else self._controls
+        )
+        matched = controls.execute(events, candidates_with_exclusions)
+        reuse = matched.reuse_statistics
+        minimum_independent_clusters = self.policy.minimum_trading_days
         coverage = ProspectiveEvidenceCoverage(
             hypothesis_id=hypothesis.value,
             available_holdout_observations=available_holdout_count,
@@ -470,6 +519,13 @@ class AssessProspectiveScientificEvidence:
             unmatched_events=len(matched.unmatched_event_ids),
             control_candidates=len(candidates_with_exclusions),
             matched_event_ids=tuple(group.event.point_id for group in matched.groups),
+            control_selection_policy_version=matched.selection_policy_version,
+            maximum_control_reuse=matched.maximum_control_reuse,
+            distinct_controls=reuse.distinct_controls,
+            maximum_observed_control_reuse=reuse.maximum_reuse,
+            mean_control_reuse=reuse.mean_reuse,
+            independent_control_clusters=reuse.independent_clusters,
+            minimum_independent_control_clusters=minimum_independent_clusters,
         )
         return (
             EvidenceRequest(
@@ -489,6 +545,10 @@ class AssessProspectiveScientificEvidence:
                         for reason, count in sorted(diagnostic_reasons.items())
                     ),
                 ),
+                control_reuse_statistics=reuse,
+                control_selection_policy_version=(matched.selection_policy_version),
+                maximum_control_reuse=matched.maximum_control_reuse,
+                minimum_independent_control_clusters=(minimum_independent_clusters),
             ),
             coverage,
         )
