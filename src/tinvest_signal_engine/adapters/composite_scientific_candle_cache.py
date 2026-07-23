@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import sleep
 from typing import Callable, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
@@ -282,6 +284,9 @@ class CompositeScientificCandleCache:
         self._fallback_live_snapshot: tuple[VersionedHistoricalCandle, ...] | None = None
         self._snapshot: tuple[HistoricalCandle, ...] | None = None
         self._descriptor: CandleCacheDescriptor | None = None
+        self._partition_store: TemporaryDirectory[str] | None = None
+        self._partition_paths: tuple[Path, ...] = ()
+        self._partition_checksums: tuple[str, ...] = ()
 
     def describe(self) -> CandleCacheDescriptor:
         if self._descriptor is None:
@@ -294,7 +299,80 @@ class CompositeScientificCandleCache:
         return self._descriptor
 
     def load(self) -> tuple[HistoricalCandle, ...]:
+        if self._partition_paths:
+            return tuple(
+                candle
+                for partition in self.iter_ticker_partitions()
+                for candle in partition
+            )
         return self._seal()
+
+    def materialize_ticker_partitions(self, working_root: str | Path) -> None:
+        """Seal one immutable disk-backed view without retaining all candles.
+
+        A portfolio evaluates several independently versioned hypothesis
+        families against the same point-in-time dataset.  This method performs
+        the expensive merge once, stores one file per ticker, and lets every
+        family reread bounded partitions without another ClickHouse scan.
+        """
+
+        if self._partition_paths:
+            return
+        root = Path(working_root)
+        root.mkdir(parents=True, exist_ok=True)
+        store = TemporaryDirectory(prefix="candle-partitions-", dir=root)
+        paths: list[Path] = []
+        checksums: list[str] = []
+        previous_ticker: str | None = None
+        try:
+            for index, partition in enumerate(self._iter_merged_partitions()):
+                if not partition:
+                    continue
+                tickers = {item.ticker for item in partition}
+                if len(tickers) != 1:
+                    raise ValueError(
+                        "materialized candle partitions require one ticker"
+                    )
+                ticker = next(iter(tickers))
+                if previous_ticker is not None and ticker <= previous_ticker:
+                    raise ValueError(
+                        "materialized candle partitions must be ticker ordered"
+                    )
+                if any(
+                    left.at >= right.at
+                    for left, right in zip(partition, partition[1:])
+                ):
+                    raise ValueError(
+                        "materialized candle partitions must be time ordered"
+                    )
+                path = Path(store.name) / f"{index:04d}.jsonl"
+                _write_materialized_partition(path, partition)
+                paths.append(path)
+                checksums.append(_file_sha256(path))
+                previous_ticker = ticker
+            if not paths:
+                raise ValueError("composite candle cache contains no causal candles")
+        except Exception:
+            store.cleanup()
+            raise
+        self._partition_store = store
+        self._partition_paths = tuple(paths)
+        self._partition_checksums = tuple(checksums)
+        # Fallback sources may have needed a full live tuple during sealing.
+        # It is now represented by the private disk store and can be released.
+        self._fallback_live_snapshot = None
+        self._snapshot = None
+
+    def close_materialized_partitions(self) -> None:
+        """Release the private working set after one replay job."""
+
+        self._partition_paths = ()
+        self._partition_checksums = ()
+        self._snapshot = None
+        self._fallback_live_snapshot = None
+        if self._partition_store is not None:
+            self._partition_store.cleanup()
+            self._partition_store = None
 
     def _seal(self) -> tuple[HistoricalCandle, ...]:
         if self._snapshot is not None:
@@ -312,6 +390,14 @@ class CompositeScientificCandleCache:
     def iter_ticker_partitions(self) -> Iterator[tuple[HistoricalCandle, ...]]:
         """Merge local and live revisions while retaining one ticker in memory."""
 
+        if self._partition_paths:
+            for path, expected_checksum in zip(
+                self._partition_paths,
+                self._partition_checksums,
+                strict=True,
+            ):
+                yield _read_materialized_partition(path, expected_checksum)
+            return
         # ``load`` seals the exact point-in-time composite used by the legacy,
         # R2, and next-candle engines.  Portfolio replay then asks for the same
         # ticker partitions once per prospective hypothesis.  Re-querying
@@ -322,6 +408,11 @@ class CompositeScientificCandleCache:
             yield from _partition_historical(self._snapshot)
             return
 
+        yield from self._iter_merged_partitions()
+
+    def _iter_merged_partitions(
+        self,
+    ) -> Iterator[tuple[HistoricalCandle, ...]]:
         historical = _iter_historical_partitions(self._historical, self._as_of)
         live = self._iter_live_partitions()
         historical_partition = next(historical, None)
@@ -602,6 +693,72 @@ def _merge_ticker_partition(
         }
     )
     return tuple(selected[key] for key in sorted(selected))
+
+
+def _write_materialized_partition(
+    path: Path,
+    partition: tuple[HistoricalCandle, ...],
+) -> None:
+    """Write a private, safe and exactly round-trippable working partition."""
+
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for candle in partition:
+            handle.write(json.dumps(
+                (
+                    candle.ticker,
+                    candle.at.isoformat(timespec="microseconds"),
+                    candle.open,
+                    candle.high,
+                    candle.low,
+                    candle.close,
+                    candle.volume,
+                    candle.complete,
+                ),
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            ))
+            handle.write("\n")
+
+
+def _read_materialized_partition(
+    path: Path,
+    expected_checksum: str,
+) -> tuple[HistoricalCandle, ...]:
+    rows: list[HistoricalCandle] = []
+    raw_partition = path.read_bytes()
+    if sha256(raw_partition).hexdigest() != expected_checksum:
+        raise ValueError("materialized candle partition failed checksum validation")
+    for raw_line in raw_partition.splitlines():
+        if not raw_line.strip():
+            continue
+        payload = json.loads(raw_line)
+        if not isinstance(payload, list) or len(payload) != 8:
+            raise ValueError("materialized candle partition is invalid")
+        if not isinstance(payload[7], bool):
+            raise ValueError("materialized candle completeness flag is invalid")
+        rows.append(HistoricalCandle(
+            ticker=str(payload[0]),
+            at=datetime.fromisoformat(str(payload[1])),
+            open=float(payload[2]),
+            high=float(payload[3]),
+            low=float(payload[4]),
+            close=float(payload[5]),
+            volume=float(payload[6]),
+            complete=payload[7],
+        ))
+    partition = tuple(rows)
+    if not partition:
+        raise ValueError("materialized candle partition is empty")
+    return partition
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _versioned_fingerprint_row(item: VersionedHistoricalCandle) -> bytes:

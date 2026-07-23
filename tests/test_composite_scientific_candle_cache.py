@@ -593,7 +593,7 @@ def test_composite_merges_local_cache_and_live_revisions_without_future_data(
     assert live.calls == [datetime(2026, 7, 17, 11, 0, tzinfo=UTC)]
 
 
-def test_sealed_composite_reuses_snapshot_for_every_partitioned_model(
+def test_disk_sealed_composite_reuses_partitions_without_retaining_snapshot(
     tmp_path: Path,
 ) -> None:
     cache_dir = tmp_path / "candles"
@@ -612,15 +612,25 @@ def test_sealed_composite_reuses_snapshot_for_every_partitioned_model(
     )
 
     cache.describe()
+    cache.materialize_ticker_partitions(tmp_path / "working")
     sealed = cache.load()
     first_model = tuple(cache.iter_ticker_partitions())
     second_model = tuple(cache.iter_ticker_partitions())
 
     assert tuple(item for partition in first_model for item in partition) == sealed
     assert first_model == second_model
-    # One descriptor scan and one sealing scan.  Any number of downstream
-    # models reuse the sealed snapshot without another ClickHouse read.
+    assert cache._snapshot is None
+    assert len(cache._partition_paths) == 1
+    # One descriptor scan and one bounded materialization scan.  Any number of
+    # downstream models reuse the private disk partitions without another
+    # ClickHouse read or a process-wide candle tuple.
     assert live.calls == [cutoff, cutoff]
+    cache._partition_paths[0].write_text("corrupt\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum"):
+        tuple(cache.iter_ticker_partitions())
+    cache.close_materialized_partitions()
+    assert cache._partition_paths == ()
+    assert tuple((tmp_path / "working").iterdir()) == ()
 
 
 def test_composite_fingerprint_is_stable_and_contains_no_storage_credentials(

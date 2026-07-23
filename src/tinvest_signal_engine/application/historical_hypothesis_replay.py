@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from hashlib import sha256
 import json
 from statistics import fmean, pstdev
-from typing import Protocol, Sequence
+from typing import Iterable, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.application.hypothesis_evidence import (
@@ -83,6 +83,14 @@ class HistoricalCandleCachePort(Protocol):
     def describe(self) -> CandleCacheDescriptor: ...
 
     def load(self) -> tuple[HistoricalCandle, ...]: ...
+
+
+class PartitionedHistoricalCandleCachePort(HistoricalCandleCachePort, Protocol):
+    """Application-owned port for repeatable, ticker-bounded candle reads."""
+
+    def iter_ticker_partitions(
+        self,
+    ) -> Iterable[tuple[HistoricalCandle, ...]]: ...
 
 
 class HistoricalReplayArtifactPort(Protocol):
@@ -171,16 +179,119 @@ class RunHistoricalHypothesisReplay:
                     ),
                     report=None,
                 )
-        candles = self._cache.load()
-        report = self._build_report(
+        partition_reader = getattr(self._cache, "iter_ticker_partitions", None)
+        if callable(partition_reader):
+            report = self._build_partitioned_report(
+                run_id=run_id,
+                descriptor=descriptor,
+                selected=selected,
+                request=request,
+                cache=self._cache,  # type: ignore[arg-type]
+            )
+        else:
+            report = self._build_report(
+                run_id=run_id,
+                descriptor=descriptor,
+                selected=selected,
+                request=request,
+                candles=self._cache.load(),
+            )
+        completion = self._artifacts.save(report)
+        return HistoricalReplayExecution(completion=completion, report=report)
+
+    def _build_partitioned_report(
+        self,
+        *,
+        run_id: str,
+        descriptor: CandleCacheDescriptor,
+        selected: tuple[HypothesisId, ...],
+        request: HistoricalReplayRequest,
+        cache: PartitionedHistoricalCandleCachePort,
+    ) -> HistoricalReplayReport:
+        """Replay per ticker and retain full candles only for fixed-basket H6.
+
+        The first bounded pass seals the exact chronological split.  The
+        second pass evaluates ticker-local hypotheses.  H6 is the sole
+        cross-sectional formula in this engine, so only its preregistered
+        liquid universe is retained until that formula is evaluated.
+        """
+
+        trading_days: set[date] = set()
+        moscow = ZoneInfo("Europe/Moscow")
+        for partition in cache.iter_ticker_partitions():
+            trading_days.update(
+                candle.at.astimezone(moscow).date()
+                for candle in partition
+                if candle.complete
+                and MOEX_EQUITY_PHASE_SCHEDULE_V1.is_signal_eligible(candle.at)
+            )
+        ordered_days = tuple(sorted(trading_days))
+        split = (
+            chronological_split_60_20_20(ordered_days)
+            if len(ordered_days) >= 5
+            else None
+        )
+        outcomes: list[ReplayOutcome] = []
+        event_points: dict[HypothesisId, list[StudyPoint]] = defaultdict(list)
+        candidate_values: dict[HypothesisId, list[_CandidateValue]] = defaultdict(list)
+        retained_h6: dict[tuple[str, date], _DaySeries] = {}
+        seen_tickers: set[str] = set()
+        ticker_local = tuple(
+            item for item in selected if item is not HypothesisId.H6
+        )
+        h6_universe = frozenset(request.liquid_universe)
+
+        for partition in cache.iter_ticker_partitions():
+            series, _ = _build_series(partition)
+            if not series:
+                continue
+            tickers = {ticker for ticker, _ in series}
+            if len(tickers) != 1:
+                raise ValueError(
+                    "partitioned historical replay requires one ticker per partition"
+                )
+            ticker = next(iter(tickers))
+            if ticker in seen_tickers:
+                raise ValueError(
+                    "partitioned historical replay requires unique ticker partitions"
+                )
+            seen_tickers.add(ticker)
+            for hypothesis_id in ticker_local:
+                self._replay_one(
+                    hypothesis_id,
+                    series,
+                    split,
+                    request,
+                    outcomes,
+                    event_points[hypothesis_id],
+                    candidate_values[hypothesis_id],
+                )
+            if (
+                HypothesisId.H6 in selected
+                and ticker in h6_universe
+            ):
+                retained_h6.update(series)
+
+        if HypothesisId.H6 in selected:
+            self._replay_one(
+                HypothesisId.H6,
+                retained_h6,
+                split,
+                request,
+                outcomes,
+                event_points[HypothesisId.H6],
+                candidate_values[HypothesisId.H6],
+            )
+        return self._complete_report(
             run_id=run_id,
             descriptor=descriptor,
             selected=selected,
             request=request,
-            candles=candles,
+            split=split,
+            outcomes=outcomes,
+            event_points=event_points,
+            candidate_values=candidate_values,
         )
-        completion = self._artifacts.save(report)
-        return HistoricalReplayExecution(completion=completion, report=report)
 
     def _build_report(
         self,
@@ -202,45 +313,87 @@ class RunHistoricalHypothesisReplay:
         candidate_values: dict[HypothesisId, list[_CandidateValue]] = defaultdict(list)
 
         for hypothesis_id in selected:
-            if hypothesis_id in (HypothesisId.H1, HypothesisId.H2):
-                self._replay_morning(
-                    hypothesis_id,
-                    series,
-                    split,
-                    request.cost_model,
-                    outcomes,
-                    event_points[hypothesis_id],
-                    candidate_values[hypothesis_id],
-                )
-            elif hypothesis_id is HypothesisId.H5:
-                self._replay_phase_recurrence(
-                    series,
-                    split,
-                    request.cost_model,
-                    outcomes,
-                    event_points[hypothesis_id],
-                    candidate_values[hypothesis_id],
-                )
-            elif hypothesis_id is HypothesisId.H6:
-                self._replay_open_close(
-                    series,
-                    split,
-                    request.cost_model,
-                    request.liquid_universe,
-                    outcomes,
-                    event_points[hypothesis_id],
-                    candidate_values[hypothesis_id],
-                )
-            else:
-                self._replay_activity(
-                    series,
-                    split,
-                    request.cost_model,
-                    outcomes,
-                    event_points[hypothesis_id],
-                    candidate_values[hypothesis_id],
-                )
+            self._replay_one(
+                hypothesis_id,
+                series,
+                split,
+                request,
+                outcomes,
+                event_points[hypothesis_id],
+                candidate_values[hypothesis_id],
+            )
+        return self._complete_report(
+            run_id=run_id,
+            descriptor=descriptor,
+            selected=selected,
+            request=request,
+            split=split,
+            outcomes=outcomes,
+            event_points=event_points,
+            candidate_values=candidate_values,
+        )
 
+    def _replay_one(
+        self,
+        hypothesis_id: HypothesisId,
+        series: dict[tuple[str, date], _DaySeries],
+        split: ChronologicalSplit | None,
+        request: HistoricalReplayRequest,
+        outcomes: list[ReplayOutcome],
+        events: list[StudyPoint],
+        candidates: list[_CandidateValue],
+    ) -> None:
+        if hypothesis_id in (HypothesisId.H1, HypothesisId.H2):
+            self._replay_morning(
+                hypothesis_id,
+                series,
+                split,
+                request.cost_model,
+                outcomes,
+                events,
+                candidates,
+            )
+        elif hypothesis_id is HypothesisId.H5:
+            self._replay_phase_recurrence(
+                series,
+                split,
+                request.cost_model,
+                outcomes,
+                events,
+                candidates,
+            )
+        elif hypothesis_id is HypothesisId.H6:
+            self._replay_open_close(
+                series,
+                split,
+                request.cost_model,
+                request.liquid_universe,
+                outcomes,
+                events,
+                candidates,
+            )
+        else:
+            self._replay_activity(
+                series,
+                split,
+                request.cost_model,
+                outcomes,
+                events,
+                candidates,
+            )
+
+    def _complete_report(
+        self,
+        *,
+        run_id: str,
+        descriptor: CandleCacheDescriptor,
+        selected: tuple[HypothesisId, ...],
+        request: HistoricalReplayRequest,
+        split: ChronologicalSplit | None,
+        outcomes: list[ReplayOutcome],
+        event_points: dict[HypothesisId, list[StudyPoint]],
+        candidate_values: dict[HypothesisId, list[_CandidateValue]],
+    ) -> HistoricalReplayReport:
         evidence_requests: list[EvidenceRequest] = []
         holdout_eligible: dict[HypothesisId, int] = {}
         for hypothesis_id in selected:

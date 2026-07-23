@@ -669,6 +669,35 @@ class LocalHypothesisPortfolioRunner:
         dataset_as_of: datetime | None = None,
     ) -> Mapping[str, Any]:
         candle_cache = self._execution_candle_cache(dataset_as_of)
+        materialize = getattr(
+            candle_cache,
+            "materialize_ticker_partitions",
+            None,
+        )
+        if callable(materialize):
+            materialize(self._artifact_root / ".replay-working")
+        try:
+            return self._execute_materialized(
+                request,
+                run_fingerprint=run_fingerprint,
+                candle_cache=candle_cache,
+            )
+        finally:
+            close_materialized = getattr(
+                candle_cache,
+                "close_materialized_partitions",
+                None,
+            )
+            if callable(close_materialized):
+                close_materialized()
+
+    def _execute_materialized(
+        self,
+        request: StartReplayRequest,
+        *,
+        run_fingerprint: str,
+        candle_cache: HistoricalCandleCachePort,
+    ) -> Mapping[str, Any]:
         engines: list[Mapping[str, Any]] = []
         evidence: list[Mapping[str, Any]] = []
         generated_at = _now()
@@ -717,6 +746,7 @@ class LocalHypothesisPortfolioRunner:
                 tuple(item.value for item in requested_general),
                 generated_at=generated_at,
             ))
+            del execution
         if set(request.hypothesis_ids) & JUMP_HYPOTHESES:
             jump = RunJumpActivityReplay(
                 candle_cache=ParquetCandleCacheAdapter(self._cache_dir),
@@ -811,6 +841,7 @@ class LocalHypothesisPortfolioRunner:
                 "resumed": False,
             })
             evidence.extend(artifact.evidence)
+            del report
         requested_prospective = tuple(
             ProspectiveHypothesis(item)
             for item in request.hypothesis_ids

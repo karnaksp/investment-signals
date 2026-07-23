@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 import json
 from pathlib import Path
+import tracemalloc
 
 import pytest
 
+import tinvest_signal_engine.adapters.local_hypothesis_replay as replay_artifacts
 from tinvest_signal_engine.adapters.local_hypothesis_replay import (
     ImmutableReplayArtifactStore,
     LocalCandleCache,
@@ -53,6 +54,29 @@ class _Cache:
     def load(self) -> tuple[HistoricalCandle, ...]:
         self.load_calls += 1
         return self.candles
+
+
+class _PartitionedCache(_Cache):
+    def __init__(self, candles: tuple[HistoricalCandle, ...]) -> None:
+        super().__init__(candles)
+        self.partition_passes = 0
+        self.maximum_partition_size = 0
+
+    def load(self) -> tuple[HistoricalCandle, ...]:
+        self.load_calls += 1
+        raise AssertionError("partitioned replay must not load the full candle cache")
+
+    def iter_ticker_partitions(self):
+        self.partition_passes += 1
+        for ticker in self.descriptor.tickers:
+            partition = tuple(
+                item for item in self.candles if item.ticker == ticker
+            )
+            self.maximum_partition_size = max(
+                self.maximum_partition_size,
+                len(partition),
+            )
+            yield partition
 
 
 def _costs() -> ReplayCostModel:
@@ -176,6 +200,60 @@ def test_full_portfolio_replay_is_causal_partitioned_and_resumable(tmp_path: Pat
     assert second.completion.resumed is True
     assert second.completion.artifact_fingerprint == first.completion.artifact_fingerprint
     assert cache.load_calls == 1
+
+
+def test_partitioned_full_portfolio_is_bitwise_equivalent_and_never_loads_all(
+    tmp_path: Path,
+) -> None:
+    candles = _fixture_candles()
+    monolithic = RunHistoricalHypothesisReplay(
+        cache=_Cache(candles),
+        artifacts=ImmutableReplayArtifactStore(tmp_path / "monolithic"),
+        gate_policy=_gate(),
+    ).execute(_request())
+    partitioned_cache = _PartitionedCache(candles)
+    partitioned = RunHistoricalHypothesisReplay(
+        cache=partitioned_cache,
+        artifacts=ImmutableReplayArtifactStore(tmp_path / "partitioned"),
+        gate_policy=_gate(),
+    ).execute(_request())
+
+    assert partitioned.report == monolithic.report
+    assert (
+        partitioned.completion.artifact_fingerprint
+        == monolithic.completion.artifact_fingerprint
+    )
+    assert partitioned_cache.load_calls == 0
+    assert partitioned_cache.partition_passes == 2
+    assert partitioned_cache.maximum_partition_size < len(candles)
+
+
+def test_outcome_artifact_writer_has_bounded_incremental_memory(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "outcomes.jsonl"
+
+    def rows():
+        for index in range(20_000):
+            yield {"index": index, "payload": "x" * 1_024}
+
+    tracemalloc.start()
+    try:
+        artifact_hash = replay_artifacts._write_jsonl_once_or_verify(
+            path,
+            rows(),
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert path.stat().st_size > 20_000_000
+    assert artifact_hash.startswith("sha256:")
+    assert peak < 4_000_000
+    assert replay_artifacts._write_jsonl_once_or_verify(
+        path,
+        rows(),
+    ) == artifact_hash
 
 
 def test_future_price_changes_labels_but_not_h1_trigger_decisions(tmp_path: Path) -> None:

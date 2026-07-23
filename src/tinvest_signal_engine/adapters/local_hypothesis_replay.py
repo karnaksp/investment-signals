@@ -217,16 +217,19 @@ class ImmutableReplayArtifactStore:
             }),
             "split.json": _json_bytes(_json_value(report.split)),
             "summaries.json": _json_bytes(_json_value(report.summaries)),
-            "outcomes.jsonl": b"".join(
-                _json_bytes(_json_value(item), newline=True) for item in report.outcomes
-            ),
             "evidence.json": _json_bytes(_json_value(report.evidence)),
         }
         hashes: dict[str, str] = {}
         for name in self._ARTIFACT_NAMES:
             path = run_dir / name
-            _write_once_or_verify(path, payloads[name])
-            hashes[name] = _file_hash(path)
+            if name == "outcomes.jsonl":
+                hashes[name] = _write_jsonl_once_or_verify(
+                    path,
+                    report.outcomes,
+                )
+            else:
+                _write_once_or_verify(path, payloads[name])
+                hashes[name] = _file_hash(path)
         artifact_fingerprint = "sha256:" + sha256(
             json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -322,8 +325,48 @@ def _write_once_or_verify(path: Path, content: bytes) -> None:
         raise
 
 
+def _write_jsonl_once_or_verify(
+    path: Path,
+    rows: Iterable[object],
+) -> str:
+    """Write deterministic JSON Lines without building one giant byte string."""
+
+    if path.exists():
+        expected = sha256()
+        expected_size = 0
+        for row in rows:
+            payload = _json_bytes(_json_value(row), newline=True)
+            expected.update(payload)
+            expected_size += len(payload)
+        expected_hash = "sha256:" + expected.hexdigest()
+        if path.stat().st_size != expected_size or _file_hash(path) != expected_hash:
+            raise ValueError(
+                f"refusing to overwrite immutable replay artifact: {path.name}"
+            )
+        return expected_hash
+
+    digest = sha256()
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            for row in rows:
+                payload = _json_bytes(_json_value(row), newline=True)
+                handle.write(payload)
+                digest.update(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return "sha256:" + digest.hexdigest()
+
+
 def _file_hash(path: Path) -> str:
-    return "sha256:" + sha256(path.read_bytes()).hexdigest()
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 
 
 def _partition_day(path: Path) -> date:

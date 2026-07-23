@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -8,7 +9,52 @@ from tinvest_signal_engine.services.hypothesis_replay_api import (
     LocalHypothesisPortfolioRunner,
     StartReplayRequest,
 )
+from tinvest_signal_engine.domain.historical_hypothesis_replay import (
+    CandleCacheDescriptor,
+)
 import tinvest_signal_engine.services.hypothesis_replay_api as replay_api
+
+
+def test_internal_runner_closes_materialized_cache_after_portfolio(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeMaterializedCache:
+        def describe(self) -> CandleCacheDescriptor:
+            return CandleCacheDescriptor(
+                dataset_fingerprint="sha256:" + "b" * 64,
+                partition_count=1,
+                tickers=("SBER",),
+                start_day=date(2026, 1, 1),
+                end_day=date(2026, 1, 1),
+            )
+
+        def load(self) -> tuple[object, ...]:
+            raise AssertionError("order-book-only replay must not load candles")
+
+        def materialize_ticker_partitions(self, root: Path) -> None:
+            calls.append(("materialize", root))
+
+        def close_materialized_partitions(self) -> None:
+            calls.append(("close", None))
+
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "cache",
+        artifact_root=tmp_path / "artifacts",
+    )
+    runner._descriptor_cache = FakeMaterializedCache()  # type: ignore[assignment]
+
+    result = runner.execute(
+        StartReplayRequest(hypothesis_ids=("H8",)),
+        run_fingerprint="sha256:" + "d" * 64,
+    )
+
+    assert tuple(item["hypothesis_id"] for item in result["evidence"]) == ("H8",)
+    assert calls == [
+        ("materialize", tmp_path / "artifacts" / ".replay-working"),
+        ("close", None),
+    ]
 
 
 def test_internal_runner_wires_non_r2_next_candle_hypotheses(
