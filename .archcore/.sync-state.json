@@ -131,6 +131,26 @@
       "source": "productization/scientific-hypotheses/scientific-evidence-selection-to-working-product.plan.md",
       "target": "productization/scientific-hypotheses/scientific-hypothesis-literature-gate.rnd.md",
       "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-daily-product.plan.md",
+      "target": "architecture/clean-architecture.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-daily-product.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-literature-gate.rnd.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-daily-product.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-provenance.prd.md",
+      "type": "implements"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-hypothesis-portfolio-to-daily-product.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-evidence-selection-to-working-product.plan.md",
+      "type": "extends"
     }
   ]
 }
