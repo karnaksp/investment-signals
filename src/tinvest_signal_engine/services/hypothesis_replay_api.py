@@ -11,8 +11,10 @@ import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+import ctypes
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import gc
 from hashlib import sha256
 import json
 import os
@@ -735,6 +737,7 @@ class LocalHypothesisPortfolioRunner:
         combination_evidence_reader: (
             ScientificCombinationEvidenceArtifactPort | None
         ) = None,
+        memory_reclaimer: Callable[[], None] | None = None,
     ) -> None:
         self._cache_dir = Path(cache_dir)
         self._artifact_root = Path(artifact_root)
@@ -758,6 +761,7 @@ class LocalHypothesisPortfolioRunner:
                 self._artifact_root / "h3v2-h4v2-h7v3-h15v2-h16-h17"
             )
         )
+        self._memory_reclaimer = memory_reclaimer or _reclaim_replay_memory
         # A new submission seals its dataset fingerprint at an exact ``as_of``.
         # The worker receives that same timestamp moments later.  Retaining the
         # lightweight cache object lets execution reuse the descriptor already
@@ -829,6 +833,11 @@ class LocalHypothesisPortfolioRunner:
         )
         if callable(materialize):
             materialize(self._artifact_root / ".replay-working")
+            # Materialisation decodes every live JSON row once, but retains
+            # only private disk partitions.  CPython/glibc can otherwise keep
+            # that transient high-water mark mapped until a later model adds
+            # its own graph and crosses the container memory limit.
+            self._memory_reclaimer()
         try:
             return self._execute_materialized(
                 request,
@@ -844,6 +853,7 @@ class LocalHypothesisPortfolioRunner:
             )
             if callable(close_materialized):
                 close_materialized()
+            self._memory_reclaimer()
 
     def _execute_materialized(
         self,
@@ -924,6 +934,7 @@ class LocalHypothesisPortfolioRunner:
                 )
             )
             del execution
+            self._memory_reclaimer()
             completed_units += len(requested_general)
         if set(request.hypothesis_ids) & JUMP_HYPOTHESES:
             requested_jump = tuple(
@@ -966,6 +977,8 @@ class LocalHypothesisPortfolioRunner:
                     generated_at=generated_at,
                 )
             )
+            del jump
+            self._memory_reclaimer()
             completed_units += len(requested_jump)
         requested_r2 = tuple(
             R2ExtensionHypothesis(item)
@@ -984,6 +997,7 @@ class LocalHypothesisPortfolioRunner:
                 R2ExtensionRequest(
                     selected_hypotheses=requested_r2,
                     market_universe=request.liquid_universe,
+                    target_universe=request.tickers or request.liquid_universe,
                     policy=R2ExtensionPolicy(
                         cost_model_version=request.cost_model.version,
                         round_trip_cost_bps=request.cost_model.round_trip_bps,
@@ -1011,7 +1025,8 @@ class LocalHypothesisPortfolioRunner:
                 }
             )
             evidence.extend(r2_artifact.evidence)
-            del r2_report
+            del r2_artifact, r2_report
+            self._memory_reclaimer()
             completed_units += len(requested_r2)
         requested_scientific = tuple(
             ScientificCandleHypothesis(item)
@@ -1053,7 +1068,8 @@ class LocalHypothesisPortfolioRunner:
                 }
             )
             evidence.extend(artifact.evidence)
-            del report
+            del artifact, report
+            self._memory_reclaimer()
             completed_units += len(requested_scientific)
         requested_prospective = tuple(
             ProspectiveHypothesis(item)
@@ -1195,6 +1211,7 @@ class LocalHypothesisPortfolioRunner:
                                 cost_model_version=request.cost_model.version,
                             )
                         )
+                    self._memory_reclaimer()
                     completed_units += 1
                     continue
 
@@ -1221,6 +1238,7 @@ class LocalHypothesisPortfolioRunner:
                 )
                 if callable(prepare_report):
                     del report
+                self._memory_reclaimer()
                 completed_units += 1
 
             save_prepared = getattr(
@@ -1252,6 +1270,8 @@ class LocalHypothesisPortfolioRunner:
                 }
             )
             evidence.extend(artifact.evidence)
+            del prepared_replays
+            self._memory_reclaimer()
             if combination_source is not None:
                 _report_progress(
                     progress,
@@ -1269,10 +1289,13 @@ class LocalHypothesisPortfolioRunner:
                 ):
                     if hypothesis in requested_prospective:
                         continue
+                    combination_report = build_one(hypothesis)
                     combination_source.stage(
-                        build_one(hypothesis),
+                        combination_report,
                         cost_model_version=request.cost_model.version,
                     )
+                    del combination_report
+                    self._memory_reclaimer()
                 combination_completion = EvaluateScientificCombinationPartitions(
                     artifacts=FileScientificCombinationStreamingArtifacts(
                         self._artifact_root / "scientific-combinations" / "evidence"
@@ -1308,6 +1331,8 @@ class LocalHypothesisPortfolioRunner:
                         generated_at=datetime.fromisoformat(generated_at),
                     )
                 )
+                del combination_completion
+                self._memory_reclaimer()
         requested_orderbook = tuple(
             item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
         )
@@ -1682,6 +1707,29 @@ def _report_progress(
             total_units,
             current_hypothesis_id,
         )
+
+
+def _reclaim_replay_memory() -> None:
+    """Return transient replay allocations to the container when possible.
+
+    Candle decoding and model construction create large, short-lived object
+    graphs.  They are no longer reachable at the boundaries where this helper
+    is called, but glibc may retain their free arenas and make the next model
+    appear additive to the cgroup.  Collection releases Python cycles;
+    ``malloc_trim`` then returns completely free glibc pages to the kernel.
+    Other C libraries and operating systems safely keep the collection-only
+    behaviour.
+    """
+
+    gc.collect()
+    try:
+        process = ctypes.CDLL(None)
+        malloc_trim = getattr(process, "malloc_trim")
+    except (AttributeError, OSError):
+        return
+    malloc_trim.argtypes = (ctypes.c_size_t,)
+    malloc_trim.restype = ctypes.c_int
+    malloc_trim(0)
 
 
 def _now() -> str:

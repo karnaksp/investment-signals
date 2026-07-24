@@ -215,6 +215,7 @@ def test_internal_runner_routes_h10_h11_only_to_causal_r2(
     )
     assert request.policy.round_trip_cost_bps == 10.0
     assert request.policy.cost_model_version == "research-cost-v1.0.0"
+    assert request.target_universe == request.market_universe
     assert captured["artifact_report"] is report
     assert captured["artifact_requested"] == ("H10", "H11")
     assert captured["blocking_reason_codes"] == (
@@ -625,3 +626,66 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
     assert tuple(item["hypothesis_id"] for item in result["evidence"]) == tuple(
         sorted(source_ids)
     )
+
+
+def test_internal_runner_reclaims_transient_heap_at_materialized_boundaries(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class FakeCache:
+        def describe(self) -> object:
+            return SimpleNamespace(dataset_fingerprint="sha256:" + "a" * 64)
+
+        def materialize_ticker_partitions(self, root: object) -> None:
+            assert root == tmp_path / "artifacts" / ".replay-working"
+            events.append("materialized")
+
+        def close_materialized_partitions(self) -> None:
+            events.append("closed")
+
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "cache",
+        artifact_root=tmp_path / "artifacts",
+        memory_reclaimer=lambda: events.append("reclaimed"),
+    )
+    runner._descriptor_cache = FakeCache()  # type: ignore[assignment]
+
+    result = runner.execute(
+        StartReplayRequest(
+            hypothesis_ids=("H8",),
+            cost_model={"version": "cost-v1"},
+        ),
+        run_fingerprint="sha256:" + "b" * 64,
+    )
+
+    assert events == ["materialized", "reclaimed", "closed", "reclaimed"]
+    assert result["engines"][0]["availability"] == "requires_live_orderbook"
+
+
+def test_replay_memory_reclaimer_collects_and_trims_glibc(
+    monkeypatch: Any,
+) -> None:
+    calls: list[object] = []
+
+    class FakeTrim:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, padding: int) -> int:
+            calls.append(("trim", padding))
+            return 1
+
+    trim = FakeTrim()
+    monkeypatch.setattr(replay_api.gc, "collect", lambda: calls.append("collect"))
+    monkeypatch.setattr(
+        replay_api.ctypes,
+        "CDLL",
+        lambda _: SimpleNamespace(malloc_trim=trim),
+    )
+
+    replay_api._reclaim_replay_memory()
+
+    assert calls == ["collect", ("trim", 0)]
+    assert trim.argtypes == (replay_api.ctypes.c_size_t,)
+    assert trim.restype is replay_api.ctypes.c_int

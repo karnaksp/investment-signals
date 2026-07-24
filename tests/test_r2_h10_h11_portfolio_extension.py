@@ -16,6 +16,7 @@ from tinvest_signal_engine.application.hypothesis_portfolio_runner import (
 from tinvest_signal_engine.application.prospective_portfolio_extensions import (
     R2ExtensionRequest,
     build_extended_prospective_scientific_research,
+    build_partitioned_r2_extension_research,
     build_r2_extension_research,
 )
 from tinvest_signal_engine.application.prospective_scientific_models import (
@@ -144,6 +145,55 @@ def test_r2_h10_h11_are_deterministic_causal_and_keep_both_horizons() -> None:
         and item.hypothesis is R2ExtensionHypothesis.MARKET_RESIDUAL_REVERSION
         for item in first.features
     )
+
+
+def test_partitioned_r2_is_exactly_equivalent_without_materializing_candles() -> None:
+    candles = _research_candles()
+    request = _request(candles)
+    expected = build_r2_extension_research(
+        candles,
+        dataset_fingerprint=DATASET,
+        request=request,
+    )
+    partitions = tuple(
+        tuple(item for item in candles if item.ticker == ticker)
+        for ticker in sorted({item.ticker for item in candles})
+    )
+
+    class PartitionedCache:
+        def load(self) -> tuple[HistoricalCandle, ...]:
+            raise AssertionError("partitioned R2 must not materialize the cache")
+
+        def describe(self) -> object:
+            raise AssertionError("builder receives the sealed fingerprint")
+
+        def iter_ticker_partitions(
+            self,
+        ) -> tuple[tuple[HistoricalCandle, ...], ...]:
+            return partitions
+
+    actual = build_partitioned_r2_extension_research(
+        PartitionedCache(),
+        dataset_fingerprint=DATASET,
+        request=request,
+    )
+
+    assert actual == expected
+    assert actual.report_fingerprint == expected.report_fingerprint
+
+    scoped_request = replace(request, target_universe=("SBER",))
+    scoped = build_partitioned_r2_extension_research(
+        PartitionedCache(),
+        dataset_fingerprint=DATASET,
+        request=scoped_request,
+    )
+    scoped_batch = build_r2_extension_research(
+        candles,
+        dataset_fingerprint=DATASET,
+        request=scoped_request,
+    )
+    assert scoped == scoped_batch
+    assert {item.ticker for item in scoped.features} == {"SBER"}
 
 
 def test_future_price_change_does_not_change_already_available_features() -> None:
