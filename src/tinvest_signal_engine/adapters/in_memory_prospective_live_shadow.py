@@ -20,6 +20,15 @@ class InMemoryProspectiveLiveShadowStore:
         self._observations: dict[str, ProspectiveLiveObservation] = {}
         self._outcomes: dict[str, ProspectiveLiveOutcome] = {}
 
+    def existing_observation_ids(
+        self, observation_ids: tuple[str, ...]
+    ) -> frozenset[str]:
+        return frozenset(
+            observation_id
+            for observation_id in observation_ids
+            if observation_id in self._observations
+        )
+
     def persist_observation(
         self, observation: ProspectiveLiveObservation
     ) -> PersistenceDisposition:

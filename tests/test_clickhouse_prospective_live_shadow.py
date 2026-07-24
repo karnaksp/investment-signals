@@ -55,6 +55,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
 )
 from tinvest_signal_engine.domain.prospective_scientific_observations import (
     PersistenceDisposition,
+    ProspectiveEvidenceConflict,
 )
 from tinvest_signal_engine.domain.scientific_candles import (
     ScientificCandle,
@@ -349,6 +350,66 @@ def test_live_clickhouse_store_persists_and_reads_immutable_records(
     assert query["param_limit"] == ["7"]
 
 
+def test_live_clickhouse_store_finds_existing_ids_in_one_bounded_query(
+    monkeypatch,
+) -> None:
+    observation = _live_observation()
+    captured = _mock_http(
+        monkeypatch,
+        (
+            (
+                json.dumps(
+                    {
+                        "observation_id": observation.observation_id,
+                        "payload_fingerprint_count": 1,
+                    }
+                )
+                + "\n"
+            ).encode(),
+        ),
+    )
+
+    existing = _clickhouse_store().existing_observation_ids(
+        (observation.observation_id,)
+    )
+
+    assert existing == frozenset((observation.observation_id,))
+    query = captured[0][0].data.decode()
+    assert "uniqExact(payload_fingerprint)" in query
+    assert "GROUP BY observation_id" in query
+    assert "LIMIT 64" in query
+    assert "max_rows_to_read = 500000" in query
+    parameters = parse_qs(urlparse(captured[0][0].full_url).query)
+    assert parameters["param_observation_ids"] == [
+        f"['{observation.observation_id}']"
+    ]
+
+
+def test_live_clickhouse_store_rejects_conflicting_physical_payloads(
+    monkeypatch,
+) -> None:
+    observation = _live_observation()
+    _mock_http(
+        monkeypatch,
+        (
+            (
+                json.dumps(
+                    {
+                        "observation_id": observation.observation_id,
+                        "payload_fingerprint_count": 2,
+                    }
+                )
+                + "\n"
+            ).encode(),
+        ),
+    )
+
+    with pytest.raises(ProspectiveEvidenceConflict, match="conflicting physical"):
+        _clickhouse_store().existing_observation_ids(
+            (observation.observation_id,)
+        )
+
+
 def test_live_clickhouse_store_persists_outcome_with_observation_lineage(
     monkeypatch,
 ) -> None:
@@ -411,6 +472,7 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
     assert "result_overflow_mode = 'throw'" in sql
     assert "max_memory_usage = 100663296" in sql
     assert "max_threads = 1" in sql
+    assert "output_format_parallel_formatting = 0" in sql
     assert "max_execution_time = 30" in sql
     assert "timeout_before_checking_execution_speed = 0" in sql
     assert "FORMAT JSONCompactEachRow" in sql

@@ -140,6 +140,7 @@ SETTINGS max_execution_time = 30,
          result_overflow_mode = 'throw',
          max_memory_usage = 100663296,
          max_threads = 1,
+         output_format_parallel_formatting = 0,
          timeout_before_checking_execution_speed = 0
 FORMAT JSONCompactEachRow
 """.strip()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
@@ -81,6 +81,7 @@ class ProspectiveSnapshotBatchSchedule:
     instrument_ids: tuple[str, ...]
     batch_size: int = 1
     slot_minutes: int = 30
+    settlement_delay_minutes: int = 2
     _slot_at: datetime | None = None
     _cursor: int = 0
 
@@ -92,14 +93,19 @@ class ProspectiveSnapshotBatchSchedule:
             raise ValueError("snapshot schedule batch_size must be positive")
         if self.slot_minutes <= 0 or 60 % self.slot_minutes:
             raise ValueError("snapshot schedule slot_minutes must divide one hour")
+        if not 0 <= self.settlement_delay_minutes < self.slot_minutes:
+            raise ValueError(
+                "snapshot schedule settlement delay must fit inside one slot"
+            )
         self.instrument_ids = normalized
 
     def pending(self, *, now: datetime, limit: int) -> ProspectiveSnapshotBatch | None:
         cutoff = _aware_utc(now)
         if limit <= 0:
             raise ValueError("snapshot schedule limit must be positive")
-        current_slot = cutoff.replace(
-            minute=(cutoff.minute // self.slot_minutes) * self.slot_minutes,
+        settled_cutoff = cutoff - timedelta(minutes=self.settlement_delay_minutes)
+        current_slot = settled_cutoff.replace(
+            minute=(settled_cutoff.minute // self.slot_minutes) * self.slot_minutes,
             second=0,
             microsecond=0,
         )
@@ -149,7 +155,7 @@ class ClickHouseProspectiveLiveShadowRuntime:
         )
         snapshots = (
             self.snapshot_source.load_snapshots(
-                as_of=now,
+                as_of=snapshot_batch.slot_at,
                 policy=self.policy,
                 limit=len(snapshot_batch.instrument_ids),
                 instrument_ids=snapshot_batch.instrument_ids,

@@ -35,7 +35,7 @@ from tinvest_signal_engine.domain.prospective_scientific_observations import (
 )
 
 
-DEFAULT_LIVE_OUTCOME_POLICY_VERSION = "prospective-live-outcomes-v1"
+DEFAULT_LIVE_OUTCOME_POLICY_VERSION = "prospective-live-outcomes-v2"
 DEFAULT_LIVE_OUTCOME_CONFIRMATION_INTERVAL = timedelta(minutes=1)
 DEFAULT_LIVE_OUTCOME_RETRY_TIMEOUT = timedelta(hours=1)
 LIVE_SHADOW_HYPOTHESES = frozenset(
@@ -51,6 +51,10 @@ LIVE_SHADOW_HYPOTHESES = frozenset(
 
 
 class ProspectiveLiveShadowStore(Protocol):
+    def existing_observation_ids(
+        self, observation_ids: tuple[str, ...]
+    ) -> frozenset[str]: ...
+
     def persist_observation(
         self, observation: ProspectiveLiveObservation
     ) -> PersistenceDisposition: ...
@@ -230,10 +234,8 @@ class RecordProspectivePortfolioSnapshot:
         self, snapshot: ProspectivePortfolioSnapshot
     ) -> ProspectivePortfolioIngestResult:
         features = _portfolio_features(snapshot, self._policy)
-        stored = replayed = 0
-        observation_ids: list[str] = []
-        for feature in features:
-            observation = build_live_observation(
+        observations = tuple(
+            build_live_observation(
                 instrument_id=snapshot.instrument_id,
                 policy_version=self._policy.version,
                 feature=feature,
@@ -242,6 +244,18 @@ class RecordProspectivePortfolioSnapshot:
                 input_fingerprint=snapshot.input_fingerprint,
                 recorded_at=snapshot.recorded_at,
             )
+            for feature in features
+        )
+        existing_ids = self._store.existing_observation_ids(
+            tuple(item.observation_id for item in observations)
+        )
+        stored = replayed = 0
+        observation_ids: list[str] = []
+        for observation in observations:
+            if observation.observation_id in existing_ids:
+                replayed += 1
+                observation_ids.append(observation.observation_id)
+                continue
             disposition = self._store.persist_observation(observation)
             if disposition is PersistenceDisposition.INSERTED:
                 stored += 1

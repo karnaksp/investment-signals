@@ -216,6 +216,25 @@ SETTINGS max_execution_time = 10,
 FORMAT JSONEachRow
 """.strip()
 
+_LIVE_EXISTING_OBSERVATION_IDS_SQL = f"""
+SELECT
+    observation_id,
+    uniqExact(payload_fingerprint) AS payload_fingerprint_count
+FROM scientific_hypothesis_observations
+WHERE record_schema_version = {{record_schema_version:String}}
+  AND observation_id IN {{observation_ids:Array(String)}}
+  AND (hypothesis_id, hypothesis_version) IN {_LIVE_HYPOTHESES}
+  AND instrument_id IN {{instrument_ids:Array(String)}}
+  AND trading_day >= today() - 365
+GROUP BY observation_id
+LIMIT 64
+SETTINGS max_execution_time = 10,
+         max_rows_to_read = 500000,
+         max_bytes_to_read = 500000000,
+         timeout_before_checking_execution_speed = 0
+FORMAT JSONEachRow
+""".strip()
+
 _LIVE_OUTCOMES_SQL = f"""
 SELECT
     outcome_id,
@@ -468,6 +487,37 @@ class ClickHouseProspectiveLiveShadowStore(ClickHouseProspectiveScientificStore)
                 self._live_instrument_ids
             )
         }
+
+    def existing_observation_ids(
+        self, observation_ids: tuple[str, ...]
+    ) -> frozenset[str]:
+        normalized = tuple(dict.fromkeys(item.strip() for item in observation_ids))
+        if not normalized:
+            return frozenset()
+        if any(not item for item in normalized) or len(normalized) > 64:
+            raise ValueError(
+                "live observation identity lookup must contain at most 64 ids"
+            )
+        payload = self._request(
+            _LIVE_EXISTING_OBSERVATION_IDS_SQL,
+            parameters={
+                "record_schema_version": LIVE_SHADOW_RECORD_VERSION,
+                "observation_ids": _clickhouse_string_array_parameter(normalized),
+                **self._live_parameters(),
+            },
+        )
+        rows = _json_each_row(payload)
+        conflicting_ids = tuple(
+            str(row["observation_id"])
+            for row in rows
+            if int(row["payload_fingerprint_count"]) != 1
+        )
+        if conflicting_ids:
+            raise ProspectiveEvidenceConflict(
+                "live scientific observation identity has conflicting physical rows: "
+                + ", ".join(conflicting_ids)
+            )
+        return frozenset(str(row["observation_id"]) for row in rows)
 
     def persist_observation(
         self, observation: ProspectiveLiveObservation

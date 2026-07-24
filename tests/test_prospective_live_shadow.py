@@ -32,11 +32,6 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveScientificPolicy,
     TargetMetric,
 )
-from tinvest_signal_engine.domain.prospective_scientific_observations import (
-    ProspectiveEvidenceConflict,
-)
-
-
 UTC = timezone.utc
 OBSERVED_AT = datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
 HISTORY_AT = OBSERVED_AT - timedelta(days=1)
@@ -440,10 +435,22 @@ def test_next_ingest_event_retains_accumulated_outcome_statistics() -> None:
     assert h7.available_outcome_count == 1
 
 
-def test_same_identity_with_changed_source_payload_is_rejected() -> None:
+def test_same_identity_with_late_revised_source_keeps_first_sealed_payload() -> None:
     store = InMemoryProspectiveLiveShadowStore()
     recorder = RecordProspectivePortfolioSnapshot(store=store, policy=POLICY)
-    recorder.execute(_snapshot())
+    first = recorder.execute(_snapshot())
+    sealed = store.observations()
 
-    with pytest.raises(ProspectiveEvidenceConflict):
-        recorder.execute(replace(_snapshot(), input_fingerprint="sha256:" + "d" * 64))
+    replay = recorder.execute(
+        replace(
+            _snapshot(),
+            dataset_fingerprint="sha256:" + "e" * 64,
+            input_fingerprint="sha256:" + "d" * 64,
+            recorded_at=OBSERVED_AT + timedelta(hours=1),
+        )
+    )
+
+    assert replay.stored == 0
+    assert replay.replayed == len(first.observation_ids)
+    assert replay.observation_ids == first.observation_ids
+    assert store.observations() == sealed
