@@ -1,6 +1,6 @@
 ---
 title: "Следующий большой инкремент: научный портфель до рабочего продукта"
-status: draft
+status: accepted
 tags:
   - "clean-architecture"
   - "evidence"
