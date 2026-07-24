@@ -271,6 +271,8 @@ class RuntimeSettings:
     detector_overrides_path: Path
     config_reload_interval_seconds: int
     ingestor_orderbook_min_interval_ms: int
+    ingestor_health_snapshot_path: Path
+    ingestor_health_stale_after_seconds: int
     threshold_recalc_interval_hours: int
     threshold_lookback_days: int
     threshold_hourly_deviation_multiplier: float
@@ -435,6 +437,21 @@ class RuntimeSettings:
             ),
             ingestor_orderbook_min_interval_ms=max(
                 0, int(os.getenv("INGESTOR_ORDERBOOK_MIN_INTERVAL_MS", "0"))
+            ),
+            ingestor_health_snapshot_path=Path(
+                os.getenv(
+                    "INGESTOR_HEALTH_SNAPSHOT_PATH",
+                    "/tmp/investment-signals/ingestor-health.json",
+                )
+            ),
+            ingestor_health_stale_after_seconds=max(
+                1,
+                int(
+                    os.getenv(
+                        "INGESTOR_HEALTH_STALE_AFTER_SECONDS",
+                        "180",
+                    )
+                ),
             ),
             threshold_recalc_interval_hours=int(
                 os.getenv("THRESHOLD_RECALC_INTERVAL_HOURS", "24")

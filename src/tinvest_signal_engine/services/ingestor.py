@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import socket
+import threading
 import time
 from typing import Any
 from uuid import uuid4
@@ -20,7 +22,18 @@ from tinkoff.invest import (
 from tinkoff.invest.constants import INVEST_GRPC_API_SANDBOX
 from tinkoff.invest.exceptions import RequestError
 
+from ..adapters.ingestor_health_file import AtomicJsonIngestorHealthStore
+from ..application.ingestor_health import IngestorHealthTracker
 from ..config import RuntimeSettings, load_instrument_configs
+from ..domain.ingestor_health import (
+    INGESTOR_CONFIGURATION_RELOAD,
+    INGESTOR_CONNECTING,
+    INGESTOR_DNS_RESOLUTION_FAILED,
+    INGESTOR_MARKET_STREAM_FAILED,
+    INGESTOR_PUBLISH_FAILED,
+    INGESTOR_RECONNECTING,
+    INGESTOR_TINVEST_REQUEST_FAILED,
+)
 from ..kafka_proto import build_raw_value_serializer
 from ..kafka_wire_config import validate_kafka_wire_settings
 from ..schema_registry import register_protobuf_schema, schema_subject_for_topic
@@ -70,6 +83,10 @@ INTERVAL_MAP = {
         SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE,
     ),
 }
+
+
+class _KafkaPublishError(RuntimeError):
+    pass
 
 
 def _kafka_compression_type(settings: RuntimeSettings) -> str | None:
@@ -201,15 +218,50 @@ def main() -> None:
     if not settings.tinvest_token:
         raise RuntimeError("TINVEST_TOKEN is required")
 
-    kafka_producer = build_kafka_producer(settings)
+    health = IngestorHealthTracker(
+        store=AtomicJsonIngestorHealthStore(
+            settings.ingestor_health_snapshot_path
+        ),
+        clock=utc_now,
+        stale_after_seconds=settings.ingestor_health_stale_after_seconds,
+    )
+    health_watchdog_stop = threading.Event()
+    health_watchdog = threading.Thread(
+        target=_watch_for_stale_stream,
+        kwargs={
+            "tracker": health,
+            "stop": health_watchdog_stop,
+            "interval_seconds": min(
+                5.0,
+                max(
+                    1.0,
+                    settings.ingestor_health_stale_after_seconds / 4.0,
+                ),
+            ),
+        },
+        name="ingestor-health-watchdog",
+        daemon=True,
+    )
+    health_watchdog.start()
     target = INVEST_GRPC_API_SANDBOX if settings.tinvest_use_sandbox else None
     reload_iv = settings.config_reload_interval_seconds
+    reconnecting = False
+    kafka_producer: KafkaProducer | None = None
 
     try:
+        kafka_producer = build_kafka_producer(settings)
         while True:
             try:
                 instrument_configs = load_instrument_configs(
                     settings.instruments_path
+                )
+                health.connecting(
+                    configured_instruments=len(instrument_configs),
+                    reason_code=(
+                        INGESTOR_RECONNECTING
+                        if reconnecting
+                        else INGESTOR_CONNECTING
+                    ),
                 )
                 logger.info(
                     "Starting raw ingestor for %s instruments",
@@ -251,6 +303,15 @@ def main() -> None:
                                             "instruments.yaml changed; "
                                             "reconnecting market data stream"
                                         )
+                                        health.connecting(
+                                            configured_instruments=len(
+                                                instrument_configs
+                                            ),
+                                            reason_code=(
+                                                INGESTOR_CONFIGURATION_RELOAD
+                                            ),
+                                        )
+                                        reconnecting = True
                                         break
                                 except OSError:
                                     logger.exception(
@@ -266,32 +327,108 @@ def main() -> None:
                             if settings.kafka_raw_value_format == "protobuf"
                             else normalized.to_dict()
                         )
-                        kafka_producer.send(
-                            settings.kafka_raw_topic,
-                            key=normalized.instrument_id,
-                            value=out_val,
+                        try:
+                            kafka_producer.send(
+                                settings.kafka_raw_topic,
+                                key=normalized.instrument_id,
+                                value=out_val,
+                            )
+                        except Exception as exc:
+                            raise _KafkaPublishError from exc
+                        health.publish_succeeded(
+                            market_event_at=normalized.source_time,
                         )
+                        reconnecting = False
                         logger.info(
                             "raw_kafka_send event_id=%s instrument_id=%s event_type=%s",
                             normalized.event_id,
                             normalized.instrument_id,
                             normalized.event_type,
                         )
+                    else:
+                        health.failed(
+                            reason_code=INGESTOR_MARKET_STREAM_FAILED,
+                        )
+                        reconnecting = True
             except KeyboardInterrupt:
                 raise
             except RequestError as exc:
+                health.failed(
+                    reason_code=_health_reason_code(exc),
+                )
+                reconnecting = True
                 retry_delay = request_error_retry_delay_seconds(exc)
                 logger.exception(
                     "T-Invest request failed; reconnecting in %ss",
                     retry_delay,
                 )
                 time.sleep(retry_delay)
-            except Exception:
+            except Exception as exc:
+                health.failed(reason_code=_health_reason_code(exc))
+                reconnecting = True
                 logger.exception("Market data stream crashed; reconnecting in 5s")
                 time.sleep(5)
     finally:
-        kafka_producer.flush()
-        kafka_producer.close()
+        health_watchdog_stop.set()
+        health_watchdog.join(timeout=10)
+        if kafka_producer is not None:
+            kafka_producer.flush()
+            kafka_producer.close()
+
+
+def _watch_for_stale_stream(
+    *,
+    tracker: IngestorHealthTracker,
+    stop: threading.Event,
+    interval_seconds: float,
+) -> None:
+    while not stop.wait(interval_seconds):
+        try:
+            tracker.evaluate_staleness()
+        except Exception:
+            logger.exception("Failed to persist ingestor health snapshot")
+
+
+def _health_reason_code(exc: BaseException) -> str:
+    if isinstance(exc, _KafkaPublishError):
+        return INGESTOR_PUBLISH_FAILED
+    if isinstance(exc, RequestError):
+        if _exception_chain_contains(
+            exc,
+            socket.gaierror,
+        ) or _request_error_indicates_dns(exc):
+            return INGESTOR_DNS_RESOLUTION_FAILED
+        return INGESTOR_TINVEST_REQUEST_FAILED
+    if _exception_chain_contains(exc, socket.gaierror):
+        return INGESTOR_DNS_RESOLUTION_FAILED
+    return INGESTOR_MARKET_STREAM_FAILED
+
+
+def _request_error_indicates_dns(exc: RequestError) -> bool:
+    details = str(getattr(exc, "details", "")).casefold()
+    return any(
+        marker in details
+        for marker in (
+            "dns resolution failed",
+            "name resolution failed",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+        )
+    )
+
+
+def _exception_chain_contains(
+    exc: BaseException,
+    expected_type: type[BaseException],
+) -> bool:
+    visited: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in visited:
+        if isinstance(current, expected_type):
+            return True
+        visited.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _extract_plain_field(message, field_name: str) -> dict[str, Any] | None:
