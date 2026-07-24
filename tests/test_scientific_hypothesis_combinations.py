@@ -47,12 +47,13 @@ NON_DIRECTIONAL = {
 }
 
 
-def test_catalog_is_closed_to_exactly_four_preregistered_combinations() -> None:
+def test_catalog_is_closed_to_exactly_five_preregistered_combinations() -> None:
     assert tuple(item.value for item in ScientificCombinationId) == (
         "C1",
         "C2",
         "C3",
         "C4",
+        "C5",
     )
     assert tuple(
         definition.combination_id
@@ -64,7 +65,7 @@ def test_catalog_is_closed_to_exactly_four_preregistered_combinations() -> None:
     )
     assert (
         len({combination_formula_fingerprint(item) for item in ScientificCombinationId})
-        == 4
+        == 5
     )
 
 

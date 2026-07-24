@@ -1,4 +1,4 @@
-"""Batch evidence use cases for the preregistered C1-C4 combinations.
+"""Batch evidence use cases for the preregistered C1-C5 combinations.
 
 The application layer consumes already sealed prospective features and their
 outcomes.  It never reads candles, databases, or framework records.  A
@@ -381,7 +381,7 @@ class StoreScientificCombinationPortfolio:
 
 
 class EvaluateScientificCombinationPortfolio:
-    """Compose C1-C4, compare them with their standalone basis, and gate them."""
+    """Compose C1-C5, compare them with their standalone basis, and gate them."""
 
     def __init__(self, policy: EvidenceGatePolicy = EvidenceGatePolicy()) -> None:
         if policy.controls_per_event != 5:
@@ -500,11 +500,11 @@ class EvaluateScientificCombinationPortfolio:
             request.combination_ids, key=lambda item: item.value
         ):
             definition = preregistered_combination_definition(combination_id)
-            anchors = tuple(
-                feature
-                for feature in report.features
-                if feature.hypothesis in definition.comparison_hypothesis_ids
-                and feature.horizon_seconds in definition.horizons_seconds
+            anchors = _combination_anchors(
+                combination_id,
+                report.features,
+                definition.horizons_seconds,
+                definition.comparison_hypothesis_ids,
             )
             for anchor in anchors:
                 key = (
@@ -521,8 +521,11 @@ class EvaluateScientificCombinationPortfolio:
                     item.role is CombinationComponentRole.MARKET_CONTEXT
                     for item in definition.requirements
                 )
-                market_context_scope = (
-                    request.market_context_scope if uses_market_context else None
+                market_context_scope = _combination_context_scope(
+                    combination_id=combination_id,
+                    primary_scope=anchor.ticker,
+                    default_market_context_scope=request.market_context_scope,
+                    uses_market_context=uses_market_context,
                 )
                 components: list[ProspectiveFeature] = []
                 for requirement in definition.requirements:
@@ -780,7 +783,7 @@ class _StreamingEvidenceAccumulator:
 
 
 class EvaluateScientificCombinationPartitions:
-    """Bounded-memory C1-C4 evaluation over trading-day partitions.
+    """Bounded-memory C1-C5 evaluation over trading-day partitions.
 
     Only event and standalone-control points survive the current partition.
     Full feature graphs and composed observations are sealed by the artifact
@@ -1106,11 +1109,11 @@ def _compose_feature_partition(
     seen: set[tuple[object, ...]] = set()
     for combination_id in sorted(combination_ids, key=lambda item: item.value):
         definition = preregistered_combination_definition(combination_id)
-        anchors = tuple(
-            feature
-            for feature in features
-            if feature.hypothesis in definition.comparison_hypothesis_ids
-            and feature.horizon_seconds in definition.horizons_seconds
+        anchors = _combination_anchors(
+            combination_id,
+            features,
+            definition.horizons_seconds,
+            definition.comparison_hypothesis_ids,
         )
         for anchor in anchors:
             key = (
@@ -1127,7 +1130,12 @@ def _compose_feature_partition(
                 item.role is CombinationComponentRole.MARKET_CONTEXT
                 for item in definition.requirements
             )
-            context_scope = market_context_scope if uses_market_context else None
+            context_scope = _combination_context_scope(
+                combination_id=combination_id,
+                primary_scope=anchor.ticker,
+                default_market_context_scope=market_context_scope,
+                uses_market_context=uses_market_context,
+            )
             components: list[ProspectiveFeature] = []
             for requirement in definition.requirements:
                 scope = (
@@ -1160,6 +1168,49 @@ def _compose_feature_partition(
                 )
             )
     return composer.execute(ComposeScientificCombinationBatchRequest(tuple(requests)))
+
+
+def _combination_anchors(
+    combination_id: ScientificCombinationId,
+    features: Iterable[ProspectiveFeature],
+    horizons_seconds: tuple[int, ...],
+    comparison_hypotheses: tuple[ProspectiveHypothesis, ...],
+) -> tuple[ProspectiveFeature, ...]:
+    """Return the causal primary clock for one registered composition.
+
+    C5 is clocked by H12V2 because its primary scope is the sealed pair.  H11V2
+    is resolved for the left member of that pair at exactly the same completed
+    candle boundary.  It must never create an independent stock-timed C5 row.
+    """
+
+    anchors = (
+        (ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,)
+        if combination_id is ScientificCombinationId.C5
+        else comparison_hypotheses
+    )
+    return tuple(
+        feature
+        for feature in features
+        if feature.hypothesis in anchors
+        and feature.horizon_seconds in horizons_seconds
+    )
+
+
+def _combination_context_scope(
+    *,
+    combination_id: ScientificCombinationId,
+    primary_scope: str,
+    default_market_context_scope: str,
+    uses_market_context: bool,
+) -> str | None:
+    if not uses_market_context:
+        return None
+    if combination_id is ScientificCombinationId.C5:
+        left, separator, right = primary_scope.partition("/")
+        if not separator or not left.strip() or not right.strip():
+            return None
+        return left
+    return default_market_context_scope
 
 
 @dataclass(frozen=True, slots=True)

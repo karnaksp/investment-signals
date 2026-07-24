@@ -1,4 +1,4 @@
-"""Bounded and resume-safe file adapters for C1-C4 historical evidence."""
+"""Bounded and resume-safe file adapters for C1-C5 historical evidence."""
 
 from __future__ import annotations
 

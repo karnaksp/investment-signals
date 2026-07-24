@@ -1035,6 +1035,39 @@ hypotheses:
       data_split_policy: expanding chronological trading days; every threshold and control outcome must mature strictly before the new observation
       multiple_testing_policy: Benjamini-Hochberg within volatility-risk research at q<=0.05; Holm across future primary release tests
 
+  - hypothesis_id: c5-joint-residual-reversion
+    version: "1.0.0"
+    title: Совместный возврат рыночного и парного остатка
+    origin: research_extension
+    source_ids: [da-liu-schaumburg-2014, jegadeesh-titman-1995, gatev-goetzmann-rouwenhorst-2006]
+    testable_statement: Если H11V2 фиксирует возврат пятиминутного остатка левой акции относительно рынка, H12V2 одновременно фиксирует возврат остатка заранее выбранной пары и оба причинно замороженных расчёта указывают одно направление, то результат после издержек на горизонтах 15 и 30 минут превосходит каждую одиночную гипотезу.
+    economic_mechanism: Одновременное индивидуальное отклонение от рынка и относительное отклонение от близкой бумаги отделяет локальное давление ликвидности от общего движения рынка; согласие двух независимых норм возврата повышает избирательность.
+    market_phase: main_liquid_session
+    trigger_conditions: [H11V2 decision == matched, H12V2 decision == matched, H11V2 expected_direction == H12V2 expected_direction, identical completed observation boundary, left_pair_member == market_residual_ticker]
+    expected_direction: joint_residual_reversion
+    horizon_seconds: [900, 1800]
+    abstention_conditions: [H11V2 unavailable_or_abstained, H12V2 unavailable_or_abstained, direction_disagreement, incomplete_component_set, component_timestamp_mismatch, pair_left_member_mismatch]
+    falsification_criterion: Нижняя 95-процентная граница прироста результата после издержек к H11V2 или H12V2 не выше нуля на независимой выборке либо знак неустойчив по парам и четырём из пяти последовательных временных блоков.
+    original_market_result: Исследования остаточного разворота и торговли парами по отдельности находили возврат краткосрочных отклонений; их причинное одновременное пересечение является новой проверяемой версией для Московской биржи.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-c5-v1
+      hypothesis_id: c5-joint-residual-reversion
+      hypothesis_version: "1.0.0"
+      sealed_at: "2026-07-24T00:00:00+03:00"
+      expected_direction: joint_residual_reversion
+      feature_definitions: [C5 is clocked only by an H12V2 pair observation, H11V2 must belong to the left pair member at the identical completed-candle boundary and horizon, both component models and thresholds are frozen on completed prior trading days, no current or future outcome enters the feature, disagreement produces abstention]
+      thresholds: {market_residual_version: "2.0.0", pair_residual_version: "2.0.0", primary_horizon_seconds: 900, supported_horizons_seconds: "900,1800", controls_per_event: 5, minimum_release_events: 300, minimum_release_days: 30}
+      market_phase: main_liquid_session
+      horizon_seconds: [900, 1800]
+      success_criterion: At least 300 jointly matched observations over 30 trading days; cost-adjusted lift over both H11V2 and H12V2 has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, and stable sign in 4 of 5 chronological blocks.
+      abstention_conditions: [H11V2 unavailable_or_abstained, H12V2 unavailable_or_abstained, direction_disagreement, incomplete_component_set, component_timestamp_mismatch, pair_left_member_mismatch]
+      cost_model_version: "1.0.0"
+      data_split_policy: expanding chronological trading days; both components use parameters frozen before the evaluation day; outcome embargo equals 1800 seconds
+      multiple_testing_policy: Benjamini-Hochberg within residual-reversion combinations at q<=0.05; Holm across future primary release claims
+
   - hypothesis_id: h8-best-queue-imbalance
     version: "1.0.0"
     title: Дисбаланс лучших очередей стакана

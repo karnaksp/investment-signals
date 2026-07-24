@@ -93,6 +93,8 @@ def test_default_batch_retains_every_registered_combination_and_horizon() -> Non
         ("C4", 900),
         ("C4", 1800),
         ("C4", 3600),
+        ("C5", 900),
+        ("C5", 1800),
     )
     assert portfolio.results[0].statistical_state is CombinationStatisticalState.PASSED
     assert all(
@@ -252,7 +254,13 @@ def test_completed_combination_artifact_exposes_bounded_derived_aggregates(
         generated_at=datetime(2026, 7, 24, 10, 0, tzinfo=ZoneInfo("UTC")),
     )
 
-    assert tuple(item.hypothesis_id for item in derived) == ("C1", "C2", "C3", "C4")
+    assert tuple(item.hypothesis_id for item in derived) == (
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+    )
     c1 = derived[0]
     assert c1.catalog_hypothesis_id == "c1-volume-risk-confirmed-continuation"
     assert c1.formula_fingerprint.startswith("sha256:")

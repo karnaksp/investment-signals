@@ -1,4 +1,4 @@
-"""Product-safe C1-C4 aggregates derived from immutable replay artifacts."""
+"""Product-safe C1-C5 aggregates derived from immutable replay artifacts."""
 
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ class CombinationEvidenceArtifactSnapshot:
             )
         )
         if actual != expected:
-            raise ValueError("derived artifact must contain every C1-C4 horizon once")
+            raise ValueError("derived artifact must contain every C1-C5 horizon once")
         if any(
             row.dataset_fingerprint != self.dataset_fingerprint
             or row.cost_model_version != self.cost_model_version
@@ -186,12 +186,14 @@ _CATALOG_IDS = {
     ScientificCombinationId.C2: "c2-unconfirmed-jump-reversal",
     ScientificCombinationId.C3: "c3-morning-regime-selection",
     ScientificCombinationId.C4: "c4-calm-market-pair-reversion",
+    ScientificCombinationId.C5: "c5-joint-residual-reversion",
 }
 _MARKET_PHASES = {
     ScientificCombinationId.C1: "intraday",
     ScientificCombinationId.C2: "intraday",
     ScientificCombinationId.C3: "morning",
     ScientificCombinationId.C4: "intraday",
+    ScientificCombinationId.C5: "main_liquid_session",
 }
 
 
@@ -261,7 +263,7 @@ class BuildDerivedScientificCombinationEvidence:
             source_data_state=source_data_state,
             decision=primary.decision,
             reason_codes=reason_codes,
-            # Current C1-C4 artifacts use one chronological holdout from the
+            # Current C1-C5 artifacts use one chronological holdout from the
             # same source dataset.  They are never independent validation.
             independent_validation=False,
             cost_adjusted=True,

@@ -1,6 +1,6 @@
 """Preregistered causal compositions of prospective scientific observations.
 
-Only C1-C4 are admitted by this module.  It deliberately composes already
+Only C1-C5 are admitted by this module.  It deliberately composes already
 sealed :class:`ProspectiveFeature` decisions instead of inspecting raw candles
 or searching arbitrary feature combinations.
 """
@@ -28,6 +28,7 @@ class ScientificCombinationId(str, Enum):
     C2 = "C2"
     C3 = "C3"
     C4 = "C4"
+    C5 = "C5"
 
     @property
     def version(self) -> str:
@@ -39,6 +40,7 @@ class CombinationExpectedEffect(str, Enum):
     REVERSAL = "reversal"
     CONDITIONAL_MORNING_DIRECTION = "conditional_morning_direction"
     PAIR_RESIDUAL_REVERSION = "pair_residual_reversion"
+    JOINT_RESIDUAL_REVERSION = "joint_residual_reversion"
 
 
 class CombinationComponentRole(str, Enum):
@@ -62,6 +64,7 @@ class CombinationReason(str, Enum):
     CONFLICTING_REGIMES = "conflicting_regimes"
     REGIME_UNRESOLVED = "regime_unresolved"
     DIRECTION_UNAVAILABLE = "direction_unavailable"
+    DIRECTION_DISAGREEMENT = "direction_disagreement"
     UNSUPPORTED_HORIZON = "unsupported_horizon"
 
 
@@ -291,6 +294,39 @@ PREREGISTERED_COMBINATION_DEFINITIONS = (
             "результат исчезает при исключении одного инструмента или периода."
         ),
     ),
+    PreregisteredCombinationDefinition(
+        combination_id=ScientificCombinationId.C5,
+        title="Совместный возврат рыночного и парного остатка",
+        expected_effect=CombinationExpectedEffect.JOINT_RESIDUAL_REVERSION,
+        horizons_seconds=(900, 1800),
+        primary_horizon_seconds=900,
+        requirements=(
+            _requirement(ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2),
+            _requirement(
+                ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
+                role=CombinationComponentRole.MARKET_CONTEXT,
+            ),
+        ),
+        comparison_hypothesis_ids=(
+            ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
+        ),
+        scientific_source_ids=(
+            "da-liu-schaumburg-2014",
+            "jegadeesh-titman-1995",
+            "gatev-goetzmann-rouwenhorst-2006",
+        ),
+        economic_mechanism=(
+            "Совпадающие направления возврата индивидуального остатка акции "
+            "относительно рынка и остатка заранее выбранной устойчивой пары "
+            "отсекают общерыночные движения и неоднозначные расхождения."
+        ),
+        falsification_criterion=(
+            "После издержек совместное подтверждение не улучшает отдельно "
+            "H11V2 и H12V2 на независимой выборке либо направления часто "
+            "расходятся или эффект неустойчив по парам и временным блокам."
+        ),
+    ),
 )
 
 
@@ -422,7 +458,7 @@ def compose_preregistered_combination(
     horizon_seconds: int,
     components: Iterable[ProspectiveFeature],
 ) -> ScientificCombinationObservation:
-    """Compose one sealed C1-C4 decision without looking beyond ``observed_at``."""
+    """Compose one sealed C1-C5 decision without looking beyond ``observed_at``."""
 
     if not primary_scope.strip():
         raise ValueError("primary_scope must not be empty")
@@ -757,6 +793,28 @@ def _evaluate_complete_combination(
         )
         matched = primary.decision is ProspectiveDecision.MATCHED and calm_market
         return _directional_result(matched, primary.expected_direction)
+    if combination_id is ScientificCombinationId.C5:
+        market = by_hypothesis[
+            ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2
+        ]
+        pair = by_hypothesis[ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2]
+        both_matched = (
+            market.decision is ProspectiveDecision.MATCHED
+            and pair.decision is ProspectiveDecision.MATCHED
+        )
+        if (
+            both_matched
+            and market.expected_direction != pair.expected_direction
+        ):
+            return (
+                ProspectiveDecision.ABSTAIN,
+                CombinationReason.DIRECTION_DISAGREEMENT,
+                0,
+            )
+        return _directional_result(
+            both_matched,
+            market.expected_direction if both_matched else 0,
+        )
     raise AssertionError("unregistered scientific combination")
 
 

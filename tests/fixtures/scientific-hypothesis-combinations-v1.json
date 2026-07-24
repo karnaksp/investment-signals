@@ -47,6 +47,17 @@
         {"hypothesis": "H12", "version": "1.0.0", "role": "primary", "horizon": "output_horizon"},
         {"hypothesis": "H17", "version": "1.0.0", "role": "market_context", "horizon_seconds": 1800}
       ]
+    },
+    {
+      "id": "C5",
+      "version": "1.0.0",
+      "formula_fingerprint": "sha256:b62a0d8e706a7103e03d8a66170a366b7892716fb6b6a980904744debbb17a1e",
+      "horizons_seconds": [900, 1800],
+      "primary_horizon_seconds": 900,
+      "components": [
+        {"hypothesis": "H12V2", "version": "2.0.0", "role": "primary", "horizon": "output_horizon"},
+        {"hypothesis": "H11V2", "version": "2.0.0", "role": "market_context", "horizon": "output_horizon"}
+      ]
     }
   ]
 }

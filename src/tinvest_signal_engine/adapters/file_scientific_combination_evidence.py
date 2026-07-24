@@ -1,4 +1,4 @@
-"""Immutable local research artifacts for C1-C4 evidence portfolios."""
+"""Immutable local research artifacts for C1-C5 evidence portfolios."""
 
 from __future__ import annotations
 

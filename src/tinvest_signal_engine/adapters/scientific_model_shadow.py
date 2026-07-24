@@ -187,7 +187,7 @@ def build_shadow_dataset_from_sealed_portfolio(
     prospective_artifact_root: str | Path,
     combination_artifact_dir: str | Path,
 ) -> SealedShadowDataset:
-    """Map existing H1-H17 and C1-C4 artifacts at the outer boundary.
+    """Map existing H1-H17 and C1-C5 artifacts at the outer boundary.
 
     Only observations whose outcome is already sealed and available become
     examples. Non-events and unavailable results stay accounted for by the

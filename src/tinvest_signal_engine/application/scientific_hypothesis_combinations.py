@@ -1,4 +1,4 @@
-"""Use cases for deterministic C1-C4 scientific observation composition."""
+"""Use cases for deterministic C1-C5 scientific observation composition."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class ComposeScientificCombinationRequest:
 
 
 class ComposeScientificCombination:
-    """Map an already sealed base-observation snapshot to one C1-C4 decision."""
+    """Map an already sealed base-observation snapshot to one C1-C5 decision."""
 
     def execute(
         self,

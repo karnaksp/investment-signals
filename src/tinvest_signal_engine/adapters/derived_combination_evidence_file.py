@@ -1,4 +1,4 @@
-"""Strict bounded reader for completed C1-C4 evidence artifacts."""
+"""Strict bounded reader for completed C1-C5 evidence artifacts."""
 
 from __future__ import annotations
 
@@ -501,7 +501,7 @@ def _verify_complete_portfolio(
         )
     )
     if actual != expected:
-        raise ValueError("combination artifact must contain each C1-C4 horizon once")
+        raise ValueError("combination artifact must contain each C1-C5 horizon once")
 
 
 def _optional_interval(

@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from tinvest_signal_engine.application.scientific_hypothesis_combinations import (
+    ComposeScientificCombination,
+    ComposeScientificCombinationRequest,
+)
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     FrozenMarketResidualParameters,
     FrozenPairParameters,
@@ -17,6 +21,10 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveScientificPolicy,
     market_residual_reversion_v2_feature,
     pair_residual_reversion_v2_feature,
+)
+from tinvest_signal_engine.domain.scientific_hypothesis_combinations import (
+    ScientificCombinationId,
+    ScientificCombinationObservation,
 )
 
 
@@ -109,4 +117,51 @@ class BuildRelativeValueLiveFeatures:
                     item.horizon_seconds,
                 ),
             )
+        )
+
+
+class BuildJointResidualLiveShadow:
+    """Compose live C5 only when causal H11V2 and H12V2 inputs coexist.
+
+    The adapter must provide already observed prices, returns, and parameters
+    frozen strictly before ``observed_at``.  This use case performs no data
+    access and emits the same domain formula fingerprint as historical replay.
+    """
+
+    def __init__(self, policy: ProspectiveScientificPolicy) -> None:
+        self._features = BuildRelativeValueLiveFeatures(policy)
+        self._composer = ComposeScientificCombination()
+        self._horizons = tuple(
+            sorted(
+                set(policy.market_residual_horizons_seconds)
+                & set(policy.pair_horizons_seconds)
+                & {900, 1800}
+            )
+        )
+        if not self._horizons:
+            raise ValueError("C5 requires a shared H11V2/H12V2 horizon")
+
+    def execute(
+        self,
+        snapshot: RelativeValueLiveSnapshot,
+    ) -> tuple[ScientificCombinationObservation, ...]:
+        if snapshot.market is None or snapshot.pair is None:
+            raise ValueError("C5 live shadow requires both market and pair inputs")
+        if snapshot.market.ticker != snapshot.pair.left_ticker:
+            raise ValueError("C5 market ticker must equal the pair left ticker")
+        features = self._features.execute(snapshot)
+        pair_scope = f"{snapshot.pair.left_ticker}/{snapshot.pair.right_ticker}"
+        return tuple(
+            self._composer.execute(
+                ComposeScientificCombinationRequest(
+                    combination_id=ScientificCombinationId.C5,
+                    primary_scope=pair_scope,
+                    market_context_scope=snapshot.market.ticker,
+                    trading_day=snapshot.trading_day,
+                    observed_at=snapshot.observed_at,
+                    horizon_seconds=horizon,
+                    components=features,
+                )
+            )
+            for horizon in self._horizons
         )
