@@ -166,10 +166,6 @@ class ClickHouseProspectiveLiveShadowRuntime:
         ingested: list[ProspectivePortfolioIngestResult] = []
         for snapshot in snapshots:
             result = self.recorder.execute(snapshot)
-            if len(result.observation_ids) != 6:
-                raise RuntimeError(
-                    "production live-shadow pass must seal six observations"
-                )
             ingested.append(result)
         if snapshot_batch is not None:
             self.snapshot_schedule.complete(snapshot_batch)

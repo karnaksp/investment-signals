@@ -6,6 +6,7 @@ from decimal import Decimal
 from io import BytesIO
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from threading import Event
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
@@ -62,6 +63,7 @@ from tinvest_signal_engine.domain.scientific_candles import (
     scientific_candle_fingerprint,
 )
 from tinvest_signal_engine.services.prospective_live_shadow_worker import (
+    ClickHouseProspectiveLiveShadowRuntime,
     PRODUCTION_LIVE_POLICY,
     ProspectiveSnapshotBatchSchedule,
     _instrument_ids,
@@ -194,6 +196,49 @@ def test_live_worker_uses_bounded_backoff_for_classified_clickhouse_failure() ->
 
     assert runtime.calls == 2
     assert stop.waits == [0.25]
+
+
+def test_live_runtime_accepts_application_owned_portfolio_cardinality() -> None:
+    observation_ids = tuple(f"observation-{index}" for index in range(8))
+
+    class Recorder:
+        def execute(self, _snapshot):
+            return SimpleNamespace(
+                stored=len(observation_ids),
+                replayed=0,
+                observation_ids=observation_ids,
+                event="portfolio-recorded",
+            )
+
+    class SnapshotSource:
+        def load_snapshots(self, **_kwargs):
+            return (_snapshot(),)
+
+    class OutcomeWorker:
+        def run_once(self, **_kwargs):
+            return SimpleNamespace(event="outcomes-processed")
+
+    runtime = ClickHouseProspectiveLiveShadowRuntime(
+        recorder=Recorder(),  # type: ignore[arg-type]
+        outcome_worker=OutcomeWorker(),  # type: ignore[arg-type]
+        snapshot_source=SnapshotSource(),  # type: ignore[arg-type]
+        store=object(),  # type: ignore[arg-type]
+        policy=PRODUCTION_LIVE_POLICY,
+        snapshot_schedule=ProspectiveSnapshotBatchSchedule(
+            instrument_ids=("SBER_TQBR",),
+        ),
+    )
+
+    result = runtime.run_once(
+        now=OBSERVED_AT + timedelta(minutes=3),
+        snapshot_limit=1,
+        outcome_limit=1,
+    )
+
+    assert result.snapshots == 1
+    assert result.observations_stored == 8
+    assert result.observations_replayed == 0
+    assert result.events == ("portfolio-recorded", "outcomes-processed")
 
 
 def test_live_store_classifies_clickhouse_500_without_response_body(
