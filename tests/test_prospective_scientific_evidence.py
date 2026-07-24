@@ -167,6 +167,8 @@ def test_selected_hypotheses_use_bounded_reuse_and_fail_closed_on_one_cluster(
 ) -> None:
     expected = {
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,

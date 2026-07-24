@@ -441,6 +441,72 @@ hypotheses:
       data_split_policy: existing 180-day cache is development-only; primary holdout starts strictly after sealed_at with a 900-second embargo
       multiple_testing_policy: Benjamini-Hochberg within jump-regime research at q<=0.05; Holm across future primary H3V2 and H4V2 release tests
 
+  - hypothesis_id: h3-jump-low-activity-reversal
+    version: "3.0.0"
+    title: Возврат после экстремального импульса в слабом режиме
+    origin: research_extension
+    source_ids: [jegadeesh-titman-1995, butt-hogholm-sadaqat-2021, chiang-kirby-nie-2021]
+    testable_statement: Экстремальный пятиминутный импульс разворачивается после издержек, если его объём ниже медианы собственной фазы, текущая оценочная неликвидность не ниже 90-го процентиля, а диапазон не достигает 90-го процентиля.
+    economic_mechanism: Слабый объём, повышенное ценовое воздействие на единицу оборота и отсутствие широкого диапазона соответствуют временному дисбалансу ликвидности, а не подтверждённому информационному движению.
+    market_phase: main_session
+    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume_percentile < 0.50, illiquidity_percentile >= 0.90, range_percentile < 0.90]
+    expected_direction: reversal
+    horizon_seconds: [300, 900]
+    abstention_conditions: [trading_gap, missing_prior_phase_history, direction_unavailable, continuation_regime_selected, activity_regime_ambiguous]
+    falsification_criterion: Доходность возврата после версионированных издержек не превосходит сопоставленные контроли на будущей выборке, устойчивое продолжение сильнее возврата либо знак не сохраняется в четырёх из пяти временных блоков.
+    original_market_result: Исходные исследования связывают краткосрочный разворот с временным ценовым давлением и показывают ослабление разворота при высокой торговой активности; точная трёхрежимная формула является заранее заданным развитием для Московской биржи.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h3-v3
+      hypothesis_id: h3-jump-low-activity-reversal
+      hypothesis_version: "3.0.0"
+      sealed_at: "2026-07-24T00:00:00+03:00"
+      expected_direction: reversal
+      feature_definitions: [five-minute return volume range and illiquidity end at observation time, all phase percentiles use exactly 40 completed prior trading days, the current trading day never enters its own reference history, H3V3 and H4V3 regimes are mutually exclusive, every mixed regime produces explicit abstention]
+      thresholds: {return_5m_percentile_min: 0.99, relative_volume_percentile_max_exclusive: 0.50, illiquidity_percentile_min: 0.90, range_percentile_max_exclusive: 0.90, prior_phase_days: 40, primary_horizon_seconds: 900, minimum_shadow_events: 200, minimum_shadow_days: 20, minimum_release_events: 300, minimum_release_days: 30, minimum_coverage: 0.10}
+      market_phase: main_session
+      horizon_seconds: [300, 900]
+      success_criterion: Future cost-adjusted reversal lift to five matched controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, at least 10 instruments, maximum ticker share<=0.25, and 4/5 block stability; selective accuracy is always reported with coverage.
+      abstention_conditions: [trading_gap, missing_prior_phase_history, direction_unavailable, continuation_regime_selected, activity_regime_ambiguous]
+      cost_model_version: "1.0.0"
+      data_split_policy: existing history is development evidence; independent primary holdout starts strictly after sealed_at with a 900-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within exploratory jump-regime slices at q<=0.05; Holm across future primary H3V3 and H4V3 release tests
+
+  - hypothesis_id: h4-jump-high-activity-continuation
+    version: "3.0.0"
+    title: Продолжение экстремального импульса в подтверждённом режиме
+    origin: research_extension
+    source_ids: [chiang-kirby-nie-2021]
+    testable_statement: Экстремальный пятиминутный импульс продолжается после издержек, если объём и диапазон не ниже 90-го процентиля собственной фазы, а оценочная неликвидность ниже 90-го процентиля.
+    economic_mechanism: Согласованные высокий объём и широкий диапазон при достаточной ликвидности чаще соответствуют поступлению информации и постепенному включению её в цену, чем временному ценовому давлению.
+    market_phase: main_session
+    trigger_conditions: [absolute_return_5m_percentile >= 0.99, relative_volume_percentile >= 0.90, range_percentile >= 0.90, illiquidity_percentile < 0.90]
+    expected_direction: continuation
+    horizon_seconds: [300, 900]
+    abstention_conditions: [trading_gap, missing_prior_phase_history, direction_unavailable, reversal_regime_selected, activity_regime_ambiguous]
+    falsification_criterion: Доходность продолжения после версионированных издержек не превосходит сопоставленные контроли на будущей выборке, возврат устойчиво сильнее продолжения либо знак не сохраняется в четырёх из пяти временных блоков.
+    original_market_result: В исходном исследовании высокая торговая активность отделяла режим краткосрочного продолжения от разворота; точная внутридневная трёхрежимная формула является новой версией для Московской биржи.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h4-v3
+      hypothesis_id: h4-jump-high-activity-continuation
+      hypothesis_version: "3.0.0"
+      sealed_at: "2026-07-24T00:00:00+03:00"
+      expected_direction: continuation
+      feature_definitions: [five-minute return volume range and illiquidity end at observation time, all phase percentiles use exactly 40 completed prior trading days, the current trading day never enters its own reference history, H3V3 and H4V3 regimes are mutually exclusive, every mixed regime produces explicit abstention]
+      thresholds: {return_5m_percentile_min: 0.99, relative_volume_percentile_min: 0.90, range_percentile_min: 0.90, illiquidity_percentile_max_exclusive: 0.90, prior_phase_days: 40, primary_horizon_seconds: 900, minimum_shadow_events: 200, minimum_shadow_days: 20, minimum_release_events: 300, minimum_release_days: 30, minimum_coverage: 0.10}
+      market_phase: main_session
+      horizon_seconds: [300, 900]
+      success_criterion: Future cost-adjusted continuation lift to five matched controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, at least 10 instruments, maximum ticker share<=0.25, and 4/5 block stability; selective accuracy is always reported with coverage.
+      abstention_conditions: [trading_gap, missing_prior_phase_history, direction_unavailable, reversal_regime_selected, activity_regime_ambiguous]
+      cost_model_version: "1.0.0"
+      data_split_policy: existing history is development evidence; independent primary holdout starts strictly after sealed_at with a 900-second embargo
+      multiple_testing_policy: Benjamini-Hochberg within exploratory jump-regime slices at q<=0.05; Holm across future primary H3V3 and H4V3 release tests
+
   - hypothesis_id: h5-same-phase-return-recurrence
     version: "1.0.0"
     title: Повторяемость доходности в одной фазе дня

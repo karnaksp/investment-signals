@@ -321,11 +321,11 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
     assert registry.schema_version == "1.2.0"
     assert len(registry.sources) == 14
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 20
+    assert len(registry.hypotheses) == 22
     assert sum(
         item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
         for item in registry.hypotheses
-    ) == 18
+    ) == 20
     assert sum(
         item.lifecycle is HypothesisLifecycle.SHADOW
         for item in registry.hypotheses
@@ -338,6 +338,8 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
     } >= {
         "prereg-h3-v2",
         "prereg-h4-v2",
+        "prereg-h3-v3",
+        "prereg-h4-v3",
         "prereg-h7-v3",
         "prereg-h15-v2",
         "prereg-h16-v1",
@@ -346,6 +348,23 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
     }
     assert registry.replication_evidence == ()
     assert registry.applied_catalog == ()
+    h3v3 = registry.get_hypothesis(
+        "h3-jump-low-activity-reversal",
+        "3.0.0",
+    )
+    h4v3 = registry.get_hypothesis(
+        "h4-jump-high-activity-continuation",
+        "3.0.0",
+    )
+    assert h3v3 is not None and h4v3 is not None
+    assert h3v3.source_ids
+    assert h4v3.source_ids
+    assert h3v3.falsification_criterion
+    assert h4v3.falsification_criterion
+    assert h3v3.preregistration is not None
+    assert h4v3.preregistration is not None
+    assert "activity_regime_ambiguous" in h3v3.abstention_conditions
+    assert "activity_regime_ambiguous" in h4v3.abstention_conditions
 
 
 def test_registry_rejects_duplicate_source_ids() -> None:
@@ -412,7 +431,7 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["sources"] == 14
-    assert payload["hypotheses"] == 20
+    assert payload["hypotheses"] == 22
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

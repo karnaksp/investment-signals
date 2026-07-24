@@ -30,7 +30,7 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
     )
 
     assert validate_contract(registry, fixture) == ()
-    assert fixture["contract_version"] == "1.4.0"
+    assert fixture["contract_version"] == "1.5.0"
     assert tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1) == (
         "H1",
         "H2",
@@ -46,6 +46,8 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
         "H12",
         "H3V2",
         "H4V2",
+        "H3V3",
+        "H4V3",
         "H15",
         "H15V2",
         "H16",
@@ -74,6 +76,8 @@ def test_checked_in_contract_matches_registry_domain_and_transport() -> None:
         "H12": "1.0.0",
         "H3V2": "2.0.0",
         "H4V2": "2.0.0",
+        "H3V3": "3.0.0",
+        "H4V3": "3.0.0",
         "H15": "1.0.0",
         "H15V2": "2.0.0",
         "H16": "1.0.0",

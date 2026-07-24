@@ -33,6 +33,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     har_v2_feature,
     har_v2_outcome,
     jump_regime_features,
+    jump_regime_v3_features,
     morning_regime_features,
     open_close_basket_feature,
     pair_residual_reversion_feature,
@@ -70,13 +71,26 @@ DEFAULT_PAIR_CANDIDATES = (
     ("TATN", "TATNP"),
     ("SNGS", "SNGSP"),
 )
+SEALED_PROSPECTIVE_HYPOTHESES_V1 = (
+    ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+    ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+    ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+    ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+    ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
+    ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
+    ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+    ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+    ProspectiveHypothesis.HAR_VOLATILITY_V2,
+    ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+    ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveScientificRequest:
-    selected_hypotheses: tuple[ProspectiveHypothesis, ...] = tuple(
-        ProspectiveHypothesis
-    )
+    selected_hypotheses: tuple[
+        ProspectiveHypothesis, ...
+    ] = SEALED_PROSPECTIVE_HYPOTHESES_V1
     policy: ProspectiveScientificPolicy = ProspectiveScientificPolicy()
     market_universe: tuple[str, ...] = DEFAULT_FIXED_MARKET_UNIVERSE
     pair_candidates: tuple[tuple[str, str], ...] = DEFAULT_PAIR_CANDIDATES
@@ -166,7 +180,7 @@ def iter_independent_prospective_row_partitions(
 ) -> Iterable[tuple[ProspectiveRow, ...]]:
     """Yield one ticker's derived rows for models without cross-ticker state.
 
-    This is the bounded production path for the dense H3V2/H4V2 jump models.
+    This is the bounded production path for the dense H3/H4 jump models.
     The caller owns external ordering and durable staging; this application
     use case never retains rows from more than one ticker.
     """
@@ -177,6 +191,8 @@ def iter_independent_prospective_row_partitions(
     if hypothesis not in {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
     }:
         raise ValueError("hypothesis requires the materialized replay path")
     selected = frozenset((hypothesis,))
@@ -315,6 +331,8 @@ def build_prospective_scientific_research(
     if selected & {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
     }:
         rows.extend(_jump_rows(ordered, selected, request.policy))
     if ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3 in selected:
@@ -437,6 +455,8 @@ def build_partitioned_prospective_scientific_research(
         elif hypothesis in {
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         }:
             feature_outcomes.extend(
                 _jump_rows(by_ticker, selected, request.policy)
@@ -1066,6 +1086,14 @@ def _jump_rows(
     histories: defaultdict[
         tuple[str, int], deque[tuple[JumpHistoryPoint, datetime]]
     ] = defaultdict(lambda: deque(maxlen=policy.jump_history_days))
+    selected_v2 = selected & {
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+    }
+    selected_v3 = selected & {
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+    }
     result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
     for trading_day, day_items in _items_by_day(candidates):
         for item in day_items:
@@ -1073,35 +1101,55 @@ def _jump_rows(
             values = tuple(value[0] for value in history)
             history_until = history[-1][1] if history else None
             for horizon in policy.jump_horizons_seconds:
-                h3, h4 = jump_regime_features(
-                    ticker=item.ticker,
-                    trading_day=trading_day,
-                    observed_at=item.observed_at,
-                    horizon_seconds=horizon,
-                    signed_return_bps=item.signed_return_bps,
-                    volume=item.volume,
-                    range_bps=item.range_bps,
-                    illiquidity=item.illiquidity,
-                    prior_history=values,
-                    history_observed_until=history_until,
-                    trading_gap=False,
-                    policy=policy,
-                )
                 forward = _forward_return(item.rows, item.index, horizon // 60)
-                for feature in (h3, h4):
-                    if feature.hypothesis not in selected:
-                        continue
-                    result.append(
-                        (
-                            feature,
-                            directional_outcome(
-                                feature,
-                                target_at=item.observed_at + timedelta(seconds=horizon),
-                                forward_return_bps=forward,
-                                round_trip_cost_bps=policy.round_trip_cost_bps,
-                            ),
+                features: list[ProspectiveFeature] = []
+                if selected_v2:
+                    features.extend(
+                        jump_regime_features(
+                            ticker=item.ticker,
+                            trading_day=trading_day,
+                            observed_at=item.observed_at,
+                            horizon_seconds=horizon,
+                            signed_return_bps=item.signed_return_bps,
+                            volume=item.volume,
+                            range_bps=item.range_bps,
+                            illiquidity=item.illiquidity,
+                            prior_history=values,
+                            history_observed_until=history_until,
+                            trading_gap=False,
+                            policy=policy,
                         )
                     )
+                if selected_v3:
+                    features.extend(
+                        jump_regime_v3_features(
+                            ticker=item.ticker,
+                            trading_day=trading_day,
+                            observed_at=item.observed_at,
+                            horizon_seconds=horizon,
+                            signed_return_bps=item.signed_return_bps,
+                            volume=item.volume,
+                            range_bps=item.range_bps,
+                            illiquidity=item.illiquidity,
+                            prior_history=values,
+                            history_observed_until=history_until,
+                            trading_gap=False,
+                            policy=policy,
+                        )
+                    )
+                result.extend(
+                    (
+                        feature,
+                        directional_outcome(
+                            feature,
+                            target_at=item.observed_at + timedelta(seconds=horizon),
+                            forward_return_bps=forward,
+                            round_trip_cost_bps=policy.round_trip_cost_bps,
+                        ),
+                    )
+                    for feature in features
+                    if feature.hypothesis in selected
+                )
         for item in day_items:
             histories[(item.ticker, item.bucket)].append(
                 (item.history_point, item.observed_at)

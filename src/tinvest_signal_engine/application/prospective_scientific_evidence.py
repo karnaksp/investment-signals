@@ -112,6 +112,28 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
             "continuation",
         )
     ),
+    ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+            "h3-jump-low-activity-reversal",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls_multi_horizon",
+            TargetMetric.FORWARD_RETURN,
+            "reversal",
+        )
+    ),
+    ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+            "h4-jump-high-activity-continuation",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls_multi_horizon",
+            TargetMetric.FORWARD_RETURN,
+            "continuation",
+        )
+    ),
     ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: (
         ProspectiveEvidenceDefinition(
             ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
@@ -192,6 +214,8 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
 BOUNDED_CONTROL_REUSE_HYPOTHESES = frozenset(
     {
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
@@ -390,8 +414,10 @@ class AssessProspectiveScientificEvidence:
         if hypothesis not in {
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         }:
-            raise ValueError("streaming evidence is sealed for H3V2/H4V2 only")
+            raise ValueError("streaming evidence is sealed for H3/H4 versions only")
         if not cost_model_version.strip():
             raise ValueError("cost_model_version must not be empty")
         request, coverage = self._request_from_rows(
@@ -635,6 +661,8 @@ def _effect_value(
         ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
         ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
@@ -699,6 +727,8 @@ def _volatility_cutoffs(
     if hypothesis in {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.HAR_VOLATILITY_V2,
     }:
         return {}

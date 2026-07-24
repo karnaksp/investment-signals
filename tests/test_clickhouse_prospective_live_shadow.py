@@ -247,7 +247,7 @@ def _live_observation(*, target: TargetMetric = TargetMetric.FORWARD_RETURN):
         store=store,
         policy=PRODUCTION_LIVE_POLICY,
     ).execute(_snapshot())
-    assert len(result.observation_ids) == 6
+    assert len(result.observation_ids) == 8
     return next(item for item in store.observations() if item.feature.target is target)
 
 
@@ -434,7 +434,7 @@ def test_live_clickhouse_store_persists_outcome_with_observation_lineage(
     assert inserted["measurements_json"]
 
 
-def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> None:
+def test_snapshot_source_uses_only_causal_completed_candles_and_seals_eight() -> None:
     first = OBSERVED_AT - timedelta(minutes=120)
     candles = tuple(
         _candle(first + timedelta(minutes=index), index) for index in range(120)
@@ -486,7 +486,7 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_six() -> N
         store=store,
         policy=PRODUCTION_LIVE_POLICY,
     ).execute(snapshot)
-    assert result.stored == 6
+    assert result.stored == 8
     assert all(
         item.feature.feature_max_observed_at <= OBSERVED_AT
         for item in store.observations()
@@ -658,6 +658,8 @@ def test_policy_seals_sufficient_history_for_every_supported_hypothesis() -> Non
         ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION: 40,
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2: 40,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2: 40,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3: 40,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3: 40,
         ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: 20,
         ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: 1,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: 40,

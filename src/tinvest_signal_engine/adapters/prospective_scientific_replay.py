@@ -406,6 +406,8 @@ def _evidence_row(
             ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
             ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
             ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
             ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
@@ -548,6 +550,8 @@ def _horizons(
     if hypothesis in {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
     }:
         return report.policy.jump_horizons_seconds
     if hypothesis is ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3:

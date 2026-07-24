@@ -181,12 +181,12 @@ def test_full_portfolio_is_built_once_versioned_and_idempotent() -> None:
     first = recorder.execute(_snapshot())
     second = recorder.execute(_snapshot())
 
-    assert first.stored == 8
+    assert first.stored == 12
     assert first.replayed == 0
     assert second.stored == 0
-    assert second.replayed == 8
+    assert second.replayed == 12
     assert first.observation_ids == second.observation_ids
-    assert len(store.observations()) == 8
+    assert len(store.observations()) == 12
     assert {
         item.feature.hypothesis for item in store.observations()
     } == LIVE_SHADOW_HYPOTHESES
@@ -196,7 +196,7 @@ def test_full_portfolio_is_built_once_versioned_and_idempotent() -> None:
         and item.feature.hypothesis_version == item.feature.hypothesis.version
         for item in store.observations()
     )
-    assert len(first.event.statistics.rows) == 8
+    assert len(first.event.statistics.rows) == 12
     assert first.event.statistics.descriptive_only is True
 
 
@@ -234,8 +234,8 @@ def test_mature_worker_never_loads_future_outcomes() -> None:
         limit=20,
     )
 
-    assert result.scanned == 8
-    assert result.pending == 8
+    assert result.scanned == 12
+    assert result.pending == 12
     assert result.stored == 0
     assert source.calls == 0
 
@@ -255,10 +255,10 @@ def test_mature_outcomes_accumulate_descriptive_live_shadow_statistics() -> None
     first = worker.run_once(now=now, limit=20)
     second = worker.run_once(now=now + timedelta(seconds=1), limit=20)
 
-    assert first.stored == 8
-    assert first.unavailable == 0
+    assert first.stored == 12
+    assert first.unavailable == 4
     assert second.scanned == 0
-    assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 8
+    assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 12
     h3 = _row(
         first,
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
@@ -276,6 +276,20 @@ def test_mature_outcomes_accumulate_descriptive_live_shadow_statistics() -> None
     assert h4.not_matched_count == 1
     assert h4.matched_outcome_count == 0
     assert h4.mean_effect is None
+    h3v3 = _row(
+        first,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        POLICY.jump_horizons_seconds[0],
+    )
+    h4v3 = _row(
+        first,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+        POLICY.jump_horizons_seconds[0],
+    )
+    assert h3v3.abstained_count == 1
+    assert h4v3.abstained_count == 1
+    assert h3v3.matched_outcome_count == 0
+    assert h4v3.matched_outcome_count == 0
     h7 = _row(
         first,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
@@ -315,12 +329,12 @@ def test_temporarily_unavailable_mature_outcomes_are_retried_during_grace() -> N
     )
 
     assert first.stored == 0
-    assert first.pending == 8
+    assert first.pending == 12
     assert first.unavailable == 0
-    assert second.stored == 2
-    assert second.pending == 6
-    assert second.unavailable == 0
-    assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 2
+    assert second.stored == 4
+    assert second.pending == 8
+    assert second.unavailable == 2
+    assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 4
 
 
 def test_stable_unavailable_outcomes_are_sealed_after_confirmation() -> None:
@@ -343,10 +357,10 @@ def test_stable_unavailable_outcomes_are_sealed_after_confirmation() -> None:
     )
 
     assert first.stored == 0
-    assert first.pending == 8
-    assert result.stored == 8
+    assert first.pending == 12
+    assert result.stored == 12
     assert result.pending == 0
-    assert result.unavailable == 8
+    assert result.unavailable == 12
     assert all(row.data_coverage == 0.0 for row in result.event.statistics.rows)
     assert all(row.mean_effect is None for row in result.event.statistics.rows)
 
@@ -368,11 +382,11 @@ def test_changed_unavailable_evidence_restarts_confirmation() -> None:
     changed = worker.run_once(now=matured_at + timedelta(minutes=1), limit=20)
     sealed = worker.run_once(now=matured_at + timedelta(minutes=2), limit=20)
 
-    assert first.pending == 8
-    assert changed.pending == 8
+    assert first.pending == 12
+    assert changed.pending == 12
     assert changed.stored == 0
-    assert sealed.stored == 8
-    assert sealed.unavailable == 8
+    assert sealed.stored == 12
+    assert sealed.unavailable == 12
 
 
 def test_unavailable_retry_timeout_prevents_infinite_pending() -> None:
@@ -391,10 +405,10 @@ def test_unavailable_retry_timeout_prevents_infinite_pending() -> None:
     source.evidence_fingerprint = "sha256:" + "e" * 64
     timed_out = worker.run_once(now=matured_at + timedelta(hours=1), limit=20)
 
-    assert first.pending == 8
+    assert first.pending == 12
     assert timed_out.pending == 0
-    assert timed_out.stored == 8
-    assert timed_out.unavailable == 8
+    assert timed_out.stored == 12
+    assert timed_out.unavailable == 12
 
 
 def test_next_ingest_event_retains_accumulated_outcome_statistics() -> None:

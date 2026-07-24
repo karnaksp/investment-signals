@@ -125,7 +125,7 @@ ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 R2_EXTENSION_HYPOTHESES = frozenset({"H10", "H11"})
 SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H15", "H7V2"})
 PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
-    {"H3V2", "H4V2", "H7V3", "H12", "H15V2", "H16", "H17"}
+    {"H3V2", "H4V2", "H3V3", "H4V3", "H7V3", "H12", "H15V2", "H16", "H17"}
 )
 COMBINATION_SOURCE_HYPOTHESES = (
     ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
@@ -960,6 +960,8 @@ class LocalHypothesisPortfolioRunner:
             bounded_hypotheses = {
                 ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
                 ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+                ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+                ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
             }
             bounded_split = (
                 partitioned_prospective_split(candle_cache)  # type: ignore[arg-type]

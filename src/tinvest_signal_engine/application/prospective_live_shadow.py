@@ -1,4 +1,4 @@
-"""Application use cases for the six-model prospective live-shadow portfolio."""
+"""Application use cases for the prospective live-shadow portfolio."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     har_v2_feature,
     har_v2_outcome,
     jump_regime_features,
+    jump_regime_v3_features,
     relative_volume_volatility_feature,
     variance_uplift_outcome,
     volatility_jump_feature,
@@ -42,6 +43,8 @@ LIVE_SHADOW_HYPOTHESES = frozenset(
     {
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
         ProspectiveHypothesis.HAR_VOLATILITY_V2,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
@@ -402,6 +405,22 @@ def _portfolio_features(
     for horizon in policy.jump_horizons_seconds:
         features.extend(
             jump_regime_features(
+                ticker=snapshot.ticker,
+                trading_day=snapshot.trading_day,
+                observed_at=snapshot.observed_at,
+                horizon_seconds=horizon,
+                signed_return_bps=snapshot.jump.signed_return_bps,
+                volume=snapshot.jump.volume,
+                range_bps=snapshot.jump.range_bps,
+                illiquidity=snapshot.jump.illiquidity,
+                prior_history=snapshot.jump.prior_history,
+                history_observed_until=snapshot.jump.history_observed_until,
+                trading_gap=snapshot.trading_gap,
+                policy=policy,
+            )
+        )
+        features.extend(
+            jump_regime_v3_features(
                 ticker=snapshot.ticker,
                 trading_day=snapshot.trading_day,
                 observed_at=snapshot.observed_at,

@@ -60,8 +60,8 @@ def _candle(
     )
 
 
-def test_portfolio_has_eleven_exactly_versioned_hypotheses() -> None:
-    assert len(tuple(ProspectiveHypothesis)) == 11
+def test_portfolio_has_thirteen_exactly_versioned_hypotheses() -> None:
+    assert len(tuple(ProspectiveHypothesis)) == 13
     versions = {item.value: item.version for item in ProspectiveHypothesis}
     assert {
         key: versions[key] for key in ("H1", "H2", "H5", "H6", "H12")
@@ -72,6 +72,8 @@ def test_portfolio_has_eleven_exactly_versioned_hypotheses() -> None:
         "H6": "1.0.0",
         "H12": "1.0.0",
     }
+    assert versions["H3V3"] == "3.0.0"
+    assert versions["H4V3"] == "3.0.0"
 
 
 def test_morning_reversion_and_continuation_are_mutually_exclusive() -> None:
@@ -453,6 +455,8 @@ def test_partitioned_replay_matches_monolithic_without_loading_full_dataset(
     (
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
     ),
 )
 def test_dense_jump_replay_spools_rows_with_exact_report_and_evidence_equivalence(

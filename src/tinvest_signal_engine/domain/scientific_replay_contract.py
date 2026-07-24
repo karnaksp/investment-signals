@@ -132,6 +132,16 @@ SCIENTIFIC_REPLAY_CONTRACT_V1 = (
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
     ),
     ScientificReplayDefinition(
+        "H3V3", "h3-jump-low-activity-reversal", "3.0.0", "reversal",
+        "main_session", (300, 900),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
+        "H4V3", "h4-jump-high-activity-continuation", "3.0.0", "continuation",
+        "main_session", (300, 900),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
         "H15", "h15-multi-window-volatility-forecast", "1.0.0",
         "volatility_increase", "any_liquid_session_phase", (1800, 3600),
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,

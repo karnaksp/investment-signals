@@ -26,6 +26,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     har_v2_feature,
     har_v2_outcome,
     jump_regime_features,
+    jump_regime_v3_features,
     relative_volume_volatility_feature,
     volatility_jump_feature,
 )
@@ -160,6 +161,84 @@ def test_jump_reversal_and_continuation_regimes_are_mutually_exclusive() -> None
             sum(feature.decision is ProspectiveDecision.MATCHED for feature in (h3, h4))
             <= 1
         )
+
+
+def test_jump_v3_selects_one_causal_regime_or_abstains_explicitly() -> None:
+    policy = ProspectiveScientificPolicy(jump_history_days=4)
+    observed_at = datetime(2026, 7, 24, 11, 0, tzinfo=MOSCOW)
+    history_until = observed_at - timedelta(days=1)
+    history = tuple(
+        JumpHistoryPoint(
+            absolute_return_bps=10.0 + index,
+            volume=100.0 * (index + 1),
+            range_bps=10.0 + index,
+            illiquidity=10.0 + index,
+        )
+        for index in range(4)
+    )
+    common = dict(
+        ticker="SBER",
+        trading_day=observed_at.date(),
+        observed_at=observed_at,
+        horizon_seconds=300,
+        signed_return_bps=100.0,
+        prior_history=history,
+        history_observed_until=history_until,
+        trading_gap=False,
+        policy=policy,
+    )
+
+    reversal, continuation = jump_regime_v3_features(
+        volume=50.0,
+        range_bps=5.0,
+        illiquidity=100.0,
+        **common,
+    )
+    assert reversal.decision is ProspectiveDecision.MATCHED
+    assert reversal.reason is ProspectiveReason.REVERSAL_REGIME_SELECTED
+    assert reversal.expected_direction == -1
+    assert continuation.decision is ProspectiveDecision.ABSTAIN
+    assert continuation.reason is ProspectiveReason.REVERSAL_REGIME_SELECTED
+
+    reversal, continuation = jump_regime_v3_features(
+        volume=500.0,
+        range_bps=100.0,
+        illiquidity=1.0,
+        **common,
+    )
+    assert reversal.decision is ProspectiveDecision.ABSTAIN
+    assert reversal.reason is ProspectiveReason.CONTINUATION_REGIME_SELECTED
+    assert continuation.decision is ProspectiveDecision.MATCHED
+    assert continuation.reason is ProspectiveReason.CONTINUATION_REGIME_SELECTED
+    assert continuation.expected_direction == 1
+
+    ambiguous = jump_regime_v3_features(
+        volume=250.0,
+        range_bps=100.0,
+        illiquidity=1.0,
+        **common,
+    )
+    assert all(
+        feature.decision is ProspectiveDecision.ABSTAIN
+        and feature.reason is ProspectiveReason.ACTIVITY_REGIME_AMBIGUOUS
+        for feature in ambiguous
+    )
+    below_threshold = jump_regime_v3_features(
+        volume=50.0,
+        range_bps=5.0,
+        illiquidity=100.0,
+        **(common | {"signed_return_bps": 5.0}),
+    )
+    assert all(
+        feature.decision is ProspectiveDecision.NOT_MATCHED
+        and feature.reason is ProspectiveReason.JUMP_THRESHOLD_NOT_MET
+        for feature in below_threshold
+    )
+    assert all(
+        feature.feature_max_observed_at == observed_at
+        and feature.history_observed_until == history_until
+        for feature in (*ambiguous, *below_threshold)
+    )
 
 
 def test_history_boundary_must_be_strictly_before_observation() -> None:

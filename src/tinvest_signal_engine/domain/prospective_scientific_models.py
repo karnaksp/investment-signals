@@ -20,6 +20,8 @@ class ProspectiveHypothesis(str, Enum):
     MORNING_HIGH_VOLUME_CONTINUATION = "H2"
     JUMP_LOW_ACTIVITY_REVERSAL_V2 = "H3V2"
     JUMP_HIGH_ACTIVITY_CONTINUATION_V2 = "H4V2"
+    JUMP_LOW_ACTIVITY_REVERSAL_V3 = "H3V3"
+    JUMP_HIGH_ACTIVITY_CONTINUATION_V3 = "H4V3"
     SAME_PHASE_RETURN_RECURRENCE = "H5"
     OPEN_CLOSE_MARKET_CONTINUATION = "H6"
     RELATIVE_VOLUME_VOLATILITY_V3 = "H7V3"
@@ -35,6 +37,8 @@ class ProspectiveHypothesis(str, Enum):
             ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION: "1.0.0",
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2: "2.0.0",
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2: "2.0.0",
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3: "3.0.0",
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3: "3.0.0",
             ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: "1.0.0",
             ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: "1.0.0",
             ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: "3.0.0",
@@ -89,6 +93,10 @@ class ProspectiveReason(str, Enum):
     PAIR_RELATIONSHIP_UNSTABLE = "pair_relationship_unstable"
     CORPORATE_ACTION_SUSPECTED = "corporate_action_suspected"
     INSUFFICIENT_LIQUIDITY = "insufficient_liquidity"
+    JUMP_THRESHOLD_NOT_MET = "jump_threshold_not_met"
+    REVERSAL_REGIME_SELECTED = "reversal_regime_selected"
+    CONTINUATION_REGIME_SELECTED = "continuation_regime_selected"
+    ACTIVITY_REGIME_AMBIGUOUS = "activity_regime_ambiguous"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +173,12 @@ class ProspectiveScientificPolicy:
                 self.jump_history_days
             ),
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2: (
+                self.jump_history_days
+            ),
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3: (
+                self.jump_history_days
+            ),
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3: (
                 self.jump_history_days
             ),
             ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: (
@@ -593,6 +607,111 @@ def jump_regime_features(
         _classified_directional_feature(
             hypothesis=ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
             matched=high_activity,
+            direction=direction,
+            ticker=ticker,
+            trading_day=trading_day,
+            observed_at=observed_at,
+            horizon_seconds=horizon_seconds,
+            history_observed_until=history_observed_until,
+            trading_gap=trading_gap,
+            sufficient=sufficient,
+            common=common,
+        ),
+    )
+
+
+def jump_regime_v3_features(
+    *,
+    ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    horizon_seconds: int,
+    signed_return_bps: float,
+    volume: float,
+    range_bps: float,
+    illiquidity: float,
+    prior_history: Iterable[JumpHistoryPoint],
+    history_observed_until: datetime | None,
+    trading_gap: bool,
+    policy: ProspectiveScientificPolicy,
+) -> tuple[ProspectiveFeature, ProspectiveFeature]:
+    """Classify one jump into reversal, continuation, or explicit abstention.
+
+    All percentiles use completed prior trading days from the same phase
+    bucket.  The current window ends at ``observed_at`` and is never reused as
+    history for another observation from the same trading day.
+    """
+
+    history = tuple(prior_history)
+    values = (signed_return_bps, volume, range_bps, illiquidity)
+    if (
+        any(not isfinite(value) for value in values)
+        or min(volume, range_bps, illiquidity) < 0.0
+    ):
+        raise ValueError("jump feature values are invalid")
+    sufficient = len(history) == policy.jump_history_days
+    absolute_percentile = _percentile(
+        (item.absolute_return_bps for item in history), abs(signed_return_bps)
+    )
+    volume_percentile = _percentile((item.volume for item in history), volume)
+    range_percentile = _percentile((item.range_bps for item in history), range_bps)
+    illiquidity_percentile = _percentile(
+        (item.illiquidity for item in history), illiquidity
+    )
+    jump = sufficient and absolute_percentile >= policy.jump_percentile
+    reversal_regime = (
+        jump
+        and volume_percentile < policy.jump_low_volume_percentile
+        and illiquidity_percentile >= policy.jump_high_illiquidity_percentile
+        and range_percentile < policy.jump_high_range_percentile
+    )
+    continuation_regime = (
+        jump
+        and volume_percentile >= policy.jump_high_volume_percentile
+        and range_percentile >= policy.jump_high_range_percentile
+        and illiquidity_percentile < policy.jump_high_illiquidity_percentile
+    )
+    if reversal_regime and continuation_regime:
+        raise AssertionError("H3V3 and H4V3 regimes must be mutually exclusive")
+    selected_regime = (
+        "reversal"
+        if reversal_regime
+        else "continuation"
+        if continuation_regime
+        else None
+    )
+    direction = 1 if signed_return_bps > 0.0 else -1 if signed_return_bps < 0.0 else 0
+    common = (
+        MetricValue("signed_return", MetricUnit.BASIS_POINTS, signed_return_bps),
+        MetricValue(
+            "absolute_return_percentile", MetricUnit.RATIO, absolute_percentile
+        ),
+        MetricValue("volume_percentile", MetricUnit.RATIO, volume_percentile),
+        MetricValue("range_percentile", MetricUnit.RATIO, range_percentile),
+        MetricValue("illiquidity_percentile", MetricUnit.RATIO, illiquidity_percentile),
+        MetricValue("prior_day_count", MetricUnit.COUNT, float(len(history))),
+    )
+    return (
+        _jump_v3_directional_feature(
+            hypothesis=ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+            regime="reversal",
+            selected_regime=selected_regime,
+            jump=jump,
+            direction=-direction,
+            ticker=ticker,
+            trading_day=trading_day,
+            observed_at=observed_at,
+            horizon_seconds=horizon_seconds,
+            history_observed_until=history_observed_until,
+            trading_gap=trading_gap,
+            sufficient=sufficient,
+            common=common,
+        ),
+        _jump_v3_directional_feature(
+            hypothesis=ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+            regime="continuation",
+            selected_regime=selected_regime,
+            jump=jump,
             direction=direction,
             ticker=ticker,
             trading_day=trading_day,
@@ -1344,6 +1463,67 @@ def _classified_directional_feature(
         trading_day=trading_day,
         observed_at=observed_at,
         feature_max_observed_at=feature_max_observed_at,
+        history_observed_until=history_observed_until,
+        horizon_seconds=horizon_seconds,
+        target=TargetMetric.FORWARD_RETURN,
+        decision=decision,
+        reason=reason,
+        expected_direction=direction,
+        forecast=None,
+        feature_values=common,
+    )
+
+
+def _jump_v3_directional_feature(
+    *,
+    hypothesis: ProspectiveHypothesis,
+    regime: str,
+    selected_regime: str | None,
+    jump: bool,
+    direction: int,
+    ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    horizon_seconds: int,
+    history_observed_until: datetime | None,
+    trading_gap: bool,
+    sufficient: bool,
+    common: tuple[MetricValue, ...],
+) -> ProspectiveFeature:
+    if trading_gap:
+        decision = ProspectiveDecision.ABSTAIN
+        reason = ProspectiveReason.NON_CONTIGUOUS_WINDOW
+    elif not sufficient:
+        decision = ProspectiveDecision.ABSTAIN
+        reason = ProspectiveReason.INSUFFICIENT_PRIOR_DAYS
+    elif direction == 0:
+        decision = ProspectiveDecision.ABSTAIN
+        reason = ProspectiveReason.DIRECTION_UNAVAILABLE
+    elif not jump:
+        decision = ProspectiveDecision.NOT_MATCHED
+        reason = ProspectiveReason.JUMP_THRESHOLD_NOT_MET
+    elif selected_regime is None:
+        decision = ProspectiveDecision.ABSTAIN
+        reason = ProspectiveReason.ACTIVITY_REGIME_AMBIGUOUS
+    elif selected_regime == regime:
+        decision = ProspectiveDecision.MATCHED
+        reason = (
+            ProspectiveReason.REVERSAL_REGIME_SELECTED
+            if regime == "reversal"
+            else ProspectiveReason.CONTINUATION_REGIME_SELECTED
+        )
+    else:
+        decision = ProspectiveDecision.ABSTAIN
+        reason = (
+            ProspectiveReason.CONTINUATION_REGIME_SELECTED
+            if selected_regime == "continuation"
+            else ProspectiveReason.REVERSAL_REGIME_SELECTED
+        )
+    return _feature(
+        hypothesis=hypothesis,
+        ticker=ticker,
+        trading_day=trading_day,
+        observed_at=observed_at,
         history_observed_until=history_observed_until,
         horizon_seconds=horizon_seconds,
         target=TargetMetric.FORWARD_RETURN,
