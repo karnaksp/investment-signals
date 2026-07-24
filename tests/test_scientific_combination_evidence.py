@@ -14,6 +14,12 @@ from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import 
     FileProspectiveScientificPartitionStage,
     FileScientificCombinationStreamingArtifacts,
 )
+from tinvest_signal_engine.adapters.derived_combination_evidence_file import (
+    FileDerivedScientificCombinationEvidenceReader,
+)
+from tinvest_signal_engine.application.derived_combination_evidence import (
+    BuildDerivedScientificCombinationEvidence,
+)
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificReport,
@@ -224,6 +230,52 @@ def test_bounded_partition_pipeline_matches_batch_and_resumes_without_reading_so
     )
     assert resumed.resumed is True
     assert resumed.artifact == first.artifact
+
+
+def test_completed_combination_artifact_exposes_bounded_derived_aggregates(
+    tmp_path: Path,
+) -> None:
+    source = _stage_by_hypothesis(
+        _c1_report(event_forward_bps=30.0),
+        tmp_path / "source",
+    )
+    completion = EvaluateScientificCombinationPartitions(
+        artifacts=FileScientificCombinationStreamingArtifacts(tmp_path / "evidence"),
+        policy=_policy(),
+    ).execute(source, cost_model_version="cost-v1")
+
+    derived = BuildDerivedScientificCombinationEvidence(
+        FileDerivedScientificCombinationEvidenceReader()
+    ).execute(
+        completion.artifact.artifact_uri,
+        expected_artifact_fingerprint=completion.artifact.artifact_fingerprint,
+        generated_at=datetime(2026, 7, 24, 10, 0, tzinfo=ZoneInfo("UTC")),
+    )
+
+    assert tuple(item.hypothesis_id for item in derived) == ("C1", "C2", "C3", "C4")
+    c1 = derived[0]
+    assert c1.catalog_hypothesis_id == "c1-volume-risk-confirmed-continuation"
+    assert c1.formula_fingerprint.startswith("sha256:")
+    assert c1.independent_validation is False
+    assert tuple(item.horizon_seconds for item in c1.horizons) == (300, 900)
+    assert not hasattr(c1, "control_matches")
+
+    results_path = Path(completion.artifact.artifact_uri) / "results.json"
+    stored = json.loads(results_path.read_text(encoding="utf-8"))
+    stored[0]["unexpected"] = "schema drift"
+    results_path.write_text(json.dumps(stored), encoding="utf-8")
+    try:
+        BuildDerivedScientificCombinationEvidence(
+            FileDerivedScientificCombinationEvidenceReader()
+        ).execute(
+            completion.artifact.artifact_uri,
+            expected_artifact_fingerprint=completion.artifact.artifact_fingerprint,
+            generated_at=datetime(2026, 7, 24, 10, 0, tzinfo=ZoneInfo("UTC")),
+        )
+    except ValueError as exc:
+        assert "hash verification" in str(exc)
+    else:
+        raise AssertionError("tampered combination artifact must be rejected")
 
 
 def test_partition_source_loads_one_trading_day_and_preserves_no_future_guard(

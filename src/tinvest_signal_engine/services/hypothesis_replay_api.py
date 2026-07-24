@@ -11,7 +11,7 @@ import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -53,6 +53,13 @@ from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import 
     FileProspectiveScientificPartitionStage,
     FileProspectiveScientificRowSpool,
     FileScientificCombinationStreamingArtifacts,
+)
+from tinvest_signal_engine.adapters.derived_combination_evidence_file import (
+    FileDerivedScientificCombinationEvidenceReader,
+)
+from tinvest_signal_engine.application.derived_combination_evidence import (
+    BuildDerivedScientificCombinationEvidence,
+    ScientificCombinationEvidenceArtifactPort,
 )
 from tinvest_signal_engine.application.historical_hypothesis_replay import (
     DEFAULT_LIQUID_UNIVERSE,
@@ -233,6 +240,7 @@ class ReplayResultResponse(BaseModel):
     hypothesis_ids: tuple[str, ...]
     engines: tuple[Mapping[str, Any], ...]
     evidence: tuple["ReplayEvidenceResponse", ...]
+    derived_evidence: tuple["DerivedReplayEvidenceResponse", ...] = ()
     network_download_performed: Literal[False] = False
 
 
@@ -330,6 +338,12 @@ class ReplayEvidenceResponse(BaseModel):
     effect_unit: str = Field(default="cost_adjusted_signed_return_bps", min_length=1)
     claim_scope: str = Field(default="price_direction", min_length=1)
     target_metric: str = Field(default="forward_return", min_length=1)
+
+
+class DerivedReplayEvidenceResponse(ReplayEvidenceResponse):
+    """Aggregate for a derived C1-C4 hypothesis, separate from requested evidence."""
+
+    hypothesis_id: str = Field(pattern=r"^C[1-4]$")
 
 
 class ReplayHorizonEvidenceResponse(BaseModel):
@@ -575,6 +589,7 @@ class ReplayJobManager:
                 "hypothesis_ids": request.hypothesis_ids,
                 "engines": result["engines"],
                 "evidence": result["evidence"],
+                "derived_evidence": result.get("derived_evidence", ()),
                 "network_download_performed": False,
             }
             self._store.save_result(job_id, completed)
@@ -614,11 +629,18 @@ class LocalHypothesisPortfolioRunner:
         scientific_artifacts: ScientificCandleReplayArtifactAdapter | None = None,
         prospective_artifacts: ProspectiveScientificReplayArtifactAdapter | None = None,
         live_candles: VersionedScientificCandleSource | None = None,
+        combination_evidence_reader: (
+            ScientificCombinationEvidenceArtifactPort | None
+        ) = None,
     ) -> None:
         self._cache_dir = Path(cache_dir)
         self._artifact_root = Path(artifact_root)
         self._descriptor_cache = LocalCandleCache(self._cache_dir)
         self._live_candles = live_candles
+        self._derived_combination_evidence = BuildDerivedScientificCombinationEvidence(
+            combination_evidence_reader
+            or FileDerivedScientificCombinationEvidenceReader()
+        )
         self._evidence_reader = evidence_reader or LocalReplayEvidenceReader()
         self._r2_artifacts = r2_artifacts or R2ExtensionReplayArtifactAdapter(
             self._artifact_root / "h10-h11-r2"
@@ -725,6 +747,7 @@ class LocalHypothesisPortfolioRunner:
     ) -> Mapping[str, Any]:
         engines: list[Mapping[str, Any]] = []
         evidence: list[Mapping[str, Any]] = []
+        derived_evidence: list[Mapping[str, Any]] = []
         generated_at = _now()
         requested_general = tuple(
             HypothesisId(value)
@@ -1104,6 +1127,16 @@ class LocalHypothesisPortfolioRunner:
                         "resumed": combination_completion.resumed,
                     }
                 )
+                derived_evidence.extend(
+                    asdict(item)
+                    for item in self._derived_combination_evidence.execute(
+                        combination_completion.artifact.artifact_uri,
+                        expected_artifact_fingerprint=(
+                            combination_completion.artifact.artifact_fingerprint
+                        ),
+                        generated_at=datetime.fromisoformat(generated_at),
+                    )
+                )
         requested_orderbook = tuple(
             item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
         )
@@ -1134,6 +1167,7 @@ class LocalHypothesisPortfolioRunner:
             "run_fingerprint": run_fingerprint,
             "engines": tuple(engines),
             "evidence": ordered,
+            "derived_evidence": tuple(derived_evidence),
         }
 
 

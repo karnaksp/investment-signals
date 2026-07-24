@@ -6,11 +6,19 @@ from types import SimpleNamespace
 from typing import Any
 
 from tinvest_signal_engine.services.hypothesis_replay_api import (
+    DerivedReplayEvidenceResponse,
     LocalHypothesisPortfolioRunner,
     StartReplayRequest,
 )
+from tinvest_signal_engine.application.derived_combination_evidence import (
+    CombinationEvidenceArtifactSnapshot,
+    CombinationHorizonArtifactSnapshot,
+)
 from tinvest_signal_engine.domain.historical_hypothesis_replay import (
     CandleCacheDescriptor,
+)
+from tinvest_signal_engine.domain.scientific_hypothesis_combinations import (
+    preregistered_combination_definition,
 )
 import tinvest_signal_engine.services.hypothesis_replay_api as replay_api
 
@@ -386,6 +394,52 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
                 resumed=False,
             )
 
+    class FakeCombinationEvidenceReader:
+        def read(
+            self,
+            artifact_uri: str,
+            *,
+            expected_artifact_fingerprint: str,
+        ) -> CombinationEvidenceArtifactSnapshot:
+            captured["derived_artifact"] = (
+                artifact_uri,
+                expected_artifact_fingerprint,
+            )
+            rows = []
+            for combination_id in replay_api.ScientificCombinationId:
+                definition = preregistered_combination_definition(combination_id)
+                for horizon in definition.horizons_seconds:
+                    rows.append(
+                        CombinationHorizonArtifactSnapshot(
+                            combination_id=combination_id,
+                            combination_version=definition.version,
+                            horizon_seconds=horizon,
+                            dataset_fingerprint="sha256:" + "b" * 64,
+                            decision="blocked_by_data",
+                            reason_codes=("minimum_eligible_events_not_met",),
+                            total_observations=10,
+                            abstained_observations=2,
+                            eligible_events=8,
+                            matched_events=0,
+                            matched_controls=0,
+                            trading_days=2,
+                            cost_model_version="cost-v4",
+                            mean_lift_bps=None,
+                            lift_interval=None,
+                            adjusted_q_value=None,
+                            positive_stability_blocks=0,
+                            total_stability_blocks=0,
+                            maximum_instrument_share=None,
+                            diagnostics=None,
+                        )
+                    )
+            return CombinationEvidenceArtifactSnapshot(
+                artifact_fingerprint=expected_artifact_fingerprint,
+                dataset_fingerprint="sha256:" + "b" * 64,
+                cost_model_version="cost-v4",
+                horizons=tuple(rows),
+            )
+
     def fake_build(
         candles: object,
         *,
@@ -417,6 +471,7 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
         cache_dir=tmp_path / "cache",
         artifact_root=tmp_path / "artifacts",
         prospective_artifacts=FakeProspectiveArtifacts(),  # type: ignore[arg-type]
+        combination_evidence_reader=FakeCombinationEvidenceReader(),
     )
     runner._descriptor_cache = FakeCache()  # type: ignore[assignment]
 
@@ -444,3 +499,16 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
         "result_count": 8,
         "resumed": False,
     }
+    assert tuple(item["hypothesis_id"] for item in result["derived_evidence"]) == (
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+    )
+    assert all(
+        DerivedReplayEvidenceResponse.model_validate(item)
+        for item in result["derived_evidence"]
+    )
+    assert tuple(item["hypothesis_id"] for item in result["evidence"]) == tuple(
+        sorted(source_ids)
+    )
