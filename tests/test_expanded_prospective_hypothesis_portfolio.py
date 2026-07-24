@@ -457,9 +457,13 @@ def test_partitioned_replay_matches_monolithic_without_loading_full_dataset(
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
     ),
 )
-def test_dense_jump_replay_spools_rows_with_exact_report_and_evidence_equivalence(
+def test_dense_instrument_local_replay_spools_with_exact_evidence_equivalence(
     hypothesis: ProspectiveHypothesis,
     tmp_path: Path,
 ) -> None:
@@ -489,8 +493,8 @@ def test_dense_jump_replay_spools_rows_with_exact_report_and_evidence_equivalenc
             request=request,
             rows=spool.iter_rows,
         )
-        actual_evidence = AssessProspectiveScientificEvidence().prepare_rows(
-            spool.iter_rows(),
+        actual_evidence = AssessProspectiveScientificEvidence().prepare_replayable_rows(
+            spool.iter_rows,
             hypothesis=hypothesis,
             split=split,
             policy=request.policy,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -322,6 +322,119 @@ def test_internal_runner_wires_prospective_portfolio_as_one_evidence_family(
         request.hypothesis_ids
     )
     assert result["engines"][0]["engine"] == "prospective_scientific_replay"
+
+
+def test_internal_runner_streams_dense_non_jump_model_without_cache_load(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {"load_calls": 0, "row_factory_calls": 0}
+    dataset_fingerprint = "sha256:" + "b" * 64
+    derived_pair = (object(), object())
+
+    class FakeCache:
+        def describe(self) -> object:
+            return SimpleNamespace(dataset_fingerprint=dataset_fingerprint)
+
+        def iter_ticker_partitions(self):
+            yield (object(),)
+
+        def load(self) -> tuple[object, ...]:
+            captured["load_calls"] += 1
+            raise AssertionError("bounded replay must not materialize the cache")
+
+    class FakeSpool:
+        def __init__(self, root: object) -> None:
+            captured["spool_root"] = root
+            self.rows: list[object] = []
+            self.latest_target_at = datetime(2026, 1, 5, tzinfo=timezone.utc)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def stage_partition(self, rows: object) -> None:
+            self.rows.extend(rows)  # type: ignore[arg-type]
+
+        def iter_rows(self):
+            captured["row_factory_calls"] += 1
+            return iter(self.rows)
+
+    class FakeArtifacts:
+        def prepare_replayable_rows(
+            self,
+            rows: object,
+            **kwargs: object,
+        ) -> object:
+            assert callable(rows)
+            assert tuple(rows()) == (derived_pair,)  # type: ignore[operator]
+            captured["prepared_hypothesis"] = kwargs["hypothesis"]
+            return SimpleNamespace(hypothesis=kwargs["hypothesis"])
+
+        def save_prepared_portfolio(
+            self,
+            entries: object,
+            requested: tuple[object, ...],
+            *,
+            cost_model_version: str,
+        ) -> object:
+            captured["entries"] = tuple(entries)  # type: ignore[arg-type]
+            return SimpleNamespace(
+                artifact_uri=str(tmp_path / "prospective"),
+                artifact_fingerprint="sha256:" + "c" * 64,
+                evidence=tuple({"hypothesis_id": item.value} for item in requested),
+            )
+
+    monkeypatch.setattr(replay_api, "FileProspectiveScientificRowSpool", FakeSpool)
+    monkeypatch.setattr(
+        replay_api,
+        "partitioned_prospective_split",
+        lambda cache: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        replay_api,
+        "iter_independent_prospective_row_partitions",
+        lambda cache, *, request: ((derived_pair,),),
+    )
+
+    def fingerprint_from_rows(*, rows: object, **_: object) -> str:
+        assert callable(rows)
+        assert tuple(rows()) == (derived_pair,)  # type: ignore[operator]
+        return "sha256:" + "a" * 64
+
+    monkeypatch.setattr(
+        replay_api,
+        "prospective_report_fingerprint_from_rows",
+        fingerprint_from_rows,
+    )
+    monkeypatch.setattr(
+        replay_api,
+        "build_partitioned_prospective_scientific_research",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("dense model must use the external spool")
+        ),
+    )
+    runner = LocalHypothesisPortfolioRunner(
+        cache_dir=tmp_path / "cache",
+        artifact_root=tmp_path / "artifacts",
+        prospective_artifacts=FakeArtifacts(),  # type: ignore[arg-type]
+    )
+    runner._descriptor_cache = FakeCache()  # type: ignore[assignment]
+
+    result = runner.execute(
+        StartReplayRequest(
+            hypothesis_ids=("H7V3",),
+            cost_model={"version": "cost-v3"},
+        ),
+        run_fingerprint="sha256:" + "d" * 64,
+    )
+
+    assert captured["load_calls"] == 0
+    assert captured["prepared_hypothesis"].value == "H7V3"
+    assert captured["row_factory_calls"] >= 2
+    assert tuple(item["hypothesis_id"] for item in result["evidence"]) == ("H7V3",)
 
 
 def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evidence(

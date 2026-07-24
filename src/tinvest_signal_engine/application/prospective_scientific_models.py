@@ -85,6 +85,22 @@ SEALED_PROSPECTIVE_HYPOTHESES_V1 = (
     ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
 )
 
+# These models have no cross-instrument state.  Their rows can therefore be
+# derived from one ticker partition at a time and externally merged without
+# changing either the formula or the chronological evidence split.
+INDEPENDENT_PARTITIONED_HYPOTHESES = frozenset(
+    {
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+        ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveScientificRequest:
@@ -180,20 +196,16 @@ def iter_independent_prospective_row_partitions(
 ) -> Iterable[tuple[ProspectiveRow, ...]]:
     """Yield one ticker's derived rows for models without cross-ticker state.
 
-    This is the bounded production path for the dense H3/H4 jump models.
     The caller owns external ordering and durable staging; this application
-    use case never retains rows from more than one ticker.
+    use case never retains rows from more than one ticker.  Every supported
+    formula is instrument-local, so processing partitions independently is
+    exactly equivalent to the materialised builder.
     """
 
     if len(request.selected_hypotheses) != 1:
         raise ValueError("partitioned replay requires exactly one hypothesis")
     hypothesis = request.selected_hypotheses[0]
-    if hypothesis not in {
-        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
-        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
-        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
-        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
-    }:
+    if hypothesis not in INDEPENDENT_PARTITIONED_HYPOTHESES:
         raise ValueError("hypothesis requires the materialized replay path")
     selected = frozenset((hypothesis,))
     seen_tickers: set[str] = set()
@@ -208,7 +220,23 @@ def iter_independent_prospective_row_partitions(
         if any(left.at >= right.at for left, right in zip(rows, rows[1:])):
             raise ValueError("partitioned candles must be strictly time ordered")
         seen_tickers.add(ticker)
-        derived = tuple(_jump_rows({ticker: rows}, selected, request.policy))
+        by_ticker = {ticker: rows}
+        if hypothesis in {
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+            ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+            ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+        }:
+            derived = tuple(_jump_rows(by_ticker, selected, request.policy))
+        elif hypothesis is ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3:
+            derived = tuple(_relative_volume_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE:
+            derived = tuple(_phase_recurrence_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK:
+            derived = tuple(_semivariance_rows(by_ticker, request.policy))
+        else:
+            assert hypothesis is ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE
+            derived = tuple(_volatility_jump_rows(by_ticker, request.policy))
         if derived:
             emitted = True
             yield derived

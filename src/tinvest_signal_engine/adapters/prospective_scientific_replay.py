@@ -8,7 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from tinvest_signal_engine.application.hypothesis_evidence import EvidenceGatePolicy
 from tinvest_signal_engine.application.prospective_scientific_evidence import (
@@ -191,6 +191,37 @@ class ProspectiveScientificReplayArtifactAdapter:
         return PreparedProspectiveScientificReplay(
             hypothesis=hypothesis,
             evidence=self._evidence_gate.prepare_rows(
+                rows,
+                hypothesis=hypothesis,
+                split=split,
+                policy=policy,
+                dataset_fingerprint=dataset_fingerprint,
+                cost_model_version=cost_model_version,
+            ),
+            dataset_fingerprint=dataset_fingerprint,
+            report_fingerprint=report_fingerprint,
+            split=split,
+            policy=policy,
+            generated_at=generated_at,
+        )
+
+    def prepare_replayable_rows(
+        self,
+        rows: Callable[[], Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]]],
+        *,
+        hypothesis: ProspectiveHypothesis,
+        dataset_fingerprint: str,
+        report_fingerprint: str,
+        split: ChronologicalSplit,
+        policy: ProspectiveScientificPolicy,
+        generated_at: str,
+        cost_model_version: str,
+    ) -> PreparedProspectiveScientificReplay:
+        """Prepare evidence from a bounded, replayable external row spool."""
+
+        return PreparedProspectiveScientificReplay(
+            hypothesis=hypothesis,
+            evidence=self._evidence_gate.prepare_replayable_rows(
                 rows,
                 hypothesis=hypothesis,
                 split=split,

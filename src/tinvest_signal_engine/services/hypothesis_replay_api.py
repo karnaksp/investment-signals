@@ -74,6 +74,7 @@ from tinvest_signal_engine.application.scientific_candle_models import (
     ScientificCandleResearchRequest,
 )
 from tinvest_signal_engine.application.prospective_scientific_models import (
+    INDEPENDENT_PARTITIONED_HYPOTHESES,
     ProspectiveScientificRequest,
     build_partitioned_prospective_scientific_research,
     build_prospective_scientific_research,
@@ -957,12 +958,7 @@ class LocalHypothesisPortfolioRunner:
                 else None
             )
 
-            bounded_hypotheses = {
-                ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
-                ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
-                ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
-                ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
-            }
+            bounded_hypotheses = INDEPENDENT_PARTITIONED_HYPOTHESES
             bounded_split = (
                 partitioned_prospective_split(candle_cache)  # type: ignore[arg-type]
                 if partitioned
@@ -985,19 +981,17 @@ class LocalHypothesisPortfolioRunner:
                         / hypothesis.value
                     )
                     with FileProspectiveScientificRowSpool(spool_root) as spool:
-                        for row_partition in (
-                            iter_independent_prospective_row_partitions(
-                                candle_cache,  # type: ignore[arg-type]
-                                request=scientific_request,
-                            )
+                        for (
+                            row_partition
+                        ) in iter_independent_prospective_row_partitions(
+                            candle_cache,  # type: ignore[arg-type]
+                            request=scientific_request,
                         ):
                             spool.stage_partition(row_partition)
-                        report_fingerprint = (
-                            prospective_report_fingerprint_from_rows(
-                                dataset_fingerprint=descriptor.dataset_fingerprint,
-                                request=scientific_request,
-                                rows=spool.iter_rows,
-                            )
+                        report_fingerprint = prospective_report_fingerprint_from_rows(
+                            dataset_fingerprint=descriptor.dataset_fingerprint,
+                            request=scientific_request,
+                            rows=spool.iter_rows,
                         )
                         if (
                             combination_source is not None
@@ -1022,8 +1016,24 @@ class LocalHypothesisPortfolioRunner:
                                 tzinfo=timezone.utc,
                             ).isoformat()
                         )
+                        prepare_replayable = getattr(
+                            self._prospective_artifacts,
+                            "prepare_replayable_rows",
+                            None,
+                        )
                         prepared_replays.append(
-                            self._prospective_artifacts.prepare_rows(
+                            prepare_replayable(
+                                spool.iter_rows,
+                                hypothesis=hypothesis,
+                                dataset_fingerprint=descriptor.dataset_fingerprint,
+                                report_fingerprint=report_fingerprint,
+                                split=split,
+                                policy=policy,
+                                generated_at=generated_at,
+                                cost_model_version=request.cost_model.version,
+                            )
+                            if callable(prepare_replayable)
+                            else self._prospective_artifacts.prepare_rows(
                                 spool.iter_rows(),
                                 hypothesis=hypothesis,
                                 dataset_fingerprint=descriptor.dataset_fingerprint,

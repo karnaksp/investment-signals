@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.application.hypothesis_evidence import (
@@ -23,6 +23,7 @@ from tinvest_signal_engine.application.hypothesis_evidence import (
     EvidenceRequest,
 )
 from tinvest_signal_engine.application.prospective_scientific_models import (
+    INDEPENDENT_PARTITIONED_HYPOTHESES,
     ProspectiveScientificReport,
 )
 from tinvest_signal_engine.domain.hypothesis_evidence import (
@@ -432,6 +433,44 @@ class AssessProspectiveScientificEvidence:
         )
         return PreparedProspectiveEvidence(request=request, coverage=coverage)
 
+    def prepare_replayable_rows(
+        self,
+        rows: Callable[[], Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]]],
+        *,
+        hypothesis: ProspectiveHypothesis,
+        split: ChronologicalSplit,
+        policy: ProspectiveScientificPolicy,
+        dataset_fingerprint: str,
+        cost_model_version: str,
+    ) -> PreparedProspectiveEvidence:
+        """Prepare an instrument-local model from a replayable row stream.
+
+        Some models need validation-only volatility strata before matching the
+        holdout.  The supplied factory permits a bounded second pass over an
+        external spool instead of retaining the full feature/outcome graph.
+        """
+
+        if hypothesis not in INDEPENDENT_PARTITIONED_HYPOTHESES:
+            raise ValueError("streaming evidence requires an instrument-local model")
+        if not cost_model_version.strip():
+            raise ValueError("cost_model_version must not be empty")
+        volatility_cutoffs = _volatility_cutoffs_from_rows(
+            hypothesis,
+            rows,
+            split=split,
+        )
+        request, coverage = self._request_from_rows(
+            rows(),
+            hypothesis,
+            split=split,
+            policy=policy,
+            dataset_fingerprint=dataset_fingerprint,
+            cost_model_version=cost_model_version,
+            event_thresholds={},
+            volatility_cutoffs=volatility_cutoffs,
+        )
+        return PreparedProspectiveEvidence(request=request, coverage=coverage)
+
     def assess_prepared(
         self,
         prepared: Sequence[PreparedProspectiveEvidence],
@@ -735,6 +774,35 @@ def _volatility_cutoffs(
     values: defaultdict[tuple[str, str, int], list[float]] = defaultdict(list)
     for feature, _ in validation:
         values[_stratum_key(feature)].append(_volatility_proxy(feature))
+    return {
+        key: (_quantile(group, 1.0 / 3.0), _quantile(group, 2.0 / 3.0))
+        for key, group in sorted(values.items())
+    }
+
+
+def _volatility_cutoffs_from_rows(
+    hypothesis: ProspectiveHypothesis,
+    rows: Callable[[], Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]]],
+    *,
+    split: ChronologicalSplit,
+) -> Mapping[tuple[str, str, int], tuple[float, float]]:
+    """Derive the same validation strata without materialising report rows."""
+
+    if hypothesis in {
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+        ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
+        ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
+        ProspectiveHypothesis.HAR_VOLATILITY_V2,
+    }:
+        return {}
+    values: defaultdict[tuple[str, str, int], list[float]] = defaultdict(list)
+    for feature, _ in rows():
+        if (
+            feature.hypothesis is hypothesis
+            and split.partition_for(feature.trading_day) is DatasetPartition.VALIDATION
+        ):
+            values[_stratum_key(feature)].append(_volatility_proxy(feature))
     return {
         key: (_quantile(group, 1.0 / 3.0), _quantile(group, 2.0 / 3.0))
         for key, group in sorted(values.items())
