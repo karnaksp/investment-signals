@@ -42,6 +42,9 @@ from tinvest_signal_engine.adapters.local_hypothesis_replay import (
     ImmutableReplayArtifactStore,
     LocalCandleCache,
 )
+from tinvest_signal_engine.adapters.replay_artifact_retention import (
+    LocalReplayArtifactRetention,
+)
 from tinvest_signal_engine.adapters.scientific_candle_replay import (
     ScientificCandleReplayArtifactAdapter,
 )
@@ -441,6 +444,10 @@ class ReplayEvidenceReader(Protocol):
     ) -> tuple[Mapping[str, Any], ...]: ...
 
 
+class ReplayArtifactRetentionCollector(Protocol):
+    def collect(self, *, safe_to_remove_working: bool) -> object: ...
+
+
 ReplayProgressReporter = Callable[
     [str, int, int, str | None],
     None,
@@ -509,6 +516,7 @@ class ReplayJobManager:
         runner: ReplayRunner,
         store: LocalReplayJobStore,
         max_workers: int = 1,
+        retention: ReplayArtifactRetentionCollector | None = None,
     ) -> None:
         self._runner = runner
         self._store = store
@@ -518,6 +526,8 @@ class ReplayJobManager:
         )
         self._lock = RLock()
         self._futures: dict[str, Future[None]] = {}
+        self._single_worker = max_workers == 1
+        self._retention = retention
 
     def readiness(self) -> tuple[bool, str | None]:
         try:
@@ -527,6 +537,7 @@ class ReplayJobManager:
             return False, str(exc)
 
     def recover(self) -> int:
+        self._collect_retention(safe_to_remove_working=True)
         recovered = 0
         with self._lock:
             for record in self._store.records():
@@ -693,6 +704,7 @@ class ReplayJobManager:
                     ),
                 )
                 self._store.save(record)
+        self._collect_retention(safe_to_remove_working=self._single_worker)
 
     def _record_progress(
         self,
@@ -715,6 +727,18 @@ class ReplayJobManager:
             )
             record["updated_at"] = record["progress"]["updated_at"]
             self._store.save(record)
+
+    def _collect_retention(self, *, safe_to_remove_working: bool) -> None:
+        if self._retention is None:
+            return
+        try:
+            self._retention.collect(
+                safe_to_remove_working=safe_to_remove_working,
+            )
+        except Exception:
+            # Retention is a best-effort outer-layer maintenance action.  It
+            # must never change an already sealed replay success/failure state.
+            return
 
 
 class IdempotencyConflict(RuntimeError):
@@ -1571,6 +1595,10 @@ def build_app(
             live_candles=live_candles,
         ),
         store=LocalReplayJobStore(state_dir),
+        retention=LocalReplayArtifactRetention(
+            state_root=state_dir,
+            artifact_root=artifact_dir,
+        ),
     )
     return create_app(manager=manager, close_manager=True)
 

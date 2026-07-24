@@ -233,6 +233,23 @@ def test_bounded_partition_pipeline_matches_batch_and_resumes_without_reading_so
     assert resumed.resumed is True
     assert resumed.artifact == first.artifact
 
+    assert artifacts.compact_completed(first.artifact.artifact_uri) is True
+    assert not Path(first.artifact.artifact_uri, "partitions").exists()
+    assert Path(first.artifact.artifact_uri, "results.json").is_file()
+    assert Path(first.artifact.artifact_uri, "completion.json").is_file()
+    assert artifacts.compact_completed(first.artifact.artifact_uri) is False
+
+    compacted_resume = EvaluateScientificCombinationPartitions(
+        artifacts=artifacts,
+        policy=_policy(),
+    ).execute(
+        CompletedSourceMustNotIterate(),  # type: ignore[arg-type]
+        cost_model_version="cost-v1",
+        combination_ids=(ScientificCombinationId.C1,),
+    )
+    assert compacted_resume.resumed is True
+    assert compacted_resume.artifact == first.artifact
+
 
 def test_completed_combination_artifact_exposes_bounded_derived_aggregates(
     tmp_path: Path,

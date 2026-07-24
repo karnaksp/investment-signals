@@ -41,6 +41,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
 
 _SOURCE_SCHEMA = "prospective-scientific-partitions-v1"
 _COMBINATION_SCHEMA = "scientific-combination-stream-v1"
+_COMBINATION_RETENTION_SCHEMA = "scientific-combination-retention-v1"
 
 
 class FileProspectiveScientificPartitionStage:
@@ -366,6 +367,69 @@ class FileScientificCombinationStreamingArtifacts:
         self._verify_completion(run_dir, payload)
         return _completion(run_dir, payload, resumed=True)
 
+    def compact_completed(self, artifact_dir: str | Path) -> bool:
+        """Remove replayable day checkpoints after sealing aggregate evidence.
+
+        ``results.json`` and the original completion envelope remain byte
+        identical.  A retention seal records the original hashes, allowing a
+        later resume to verify the same artifact fingerprint without retaining
+        multi-gigabyte observation checkpoints.
+        """
+
+        run_dir = Path(artifact_dir).resolve(strict=False)
+        root = self._root.resolve(strict=False)
+        if run_dir.parent != root or run_dir.is_symlink():
+            raise ValueError("combination artifact is outside its retention root")
+        completion_path = run_dir / "completion.json"
+        if not completion_path.is_file() or completion_path.is_symlink():
+            raise ValueError("combination completion is missing or unsafe")
+        payload = json.loads(completion_path.read_text(encoding="utf-8"))
+        self._verify_completion(run_dir, payload)
+        retention_path = run_dir / "retention.json"
+        already_compacted = retention_path.is_file() and not any(
+            (run_dir / str(relative)).exists()
+            for relative in payload.get("hashes", {})
+            if str(relative).startswith("partitions/")
+        )
+        if already_compacted:
+            return False
+        hashes = payload.get("hashes")
+        if not isinstance(hashes, Mapping):
+            raise ValueError("combination completion hashes are invalid")
+        removed_hashes = {
+            str(relative): str(expected)
+            for relative, expected in hashes.items()
+            if str(relative).startswith("partitions/")
+        }
+        if not removed_hashes:
+            return False
+        retention = {
+            "schema": _COMBINATION_RETENTION_SCHEMA,
+            "completion_hash": _file_hash(completion_path),
+            "artifact_fingerprint": payload.get("artifact_fingerprint"),
+            "removed_hashes": removed_hashes,
+        }
+        _write_once_or_verify(retention_path, _json_bytes(retention))
+        # The retention seal is written only after every original hash has
+        # passed verification.  Deleting partitions one-by-one is therefore
+        # crash safe and idempotent.
+        for relative, expected in sorted(removed_hashes.items()):
+            path = run_dir / relative
+            if not path.exists():
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("combination checkpoint is unsafe")
+            if _file_hash(path) != expected:
+                raise ValueError("combination checkpoint changed before compaction")
+            path.unlink()
+        partitions = run_dir / "partitions"
+        if partitions.exists():
+            if partitions.is_symlink() or not partitions.is_dir():
+                raise ValueError("combination partitions directory is unsafe")
+            partitions.rmdir()
+        self._verify_completion(run_dir, payload)
+        return True
+
     def stage_partition(
         self,
         run_id: str,
@@ -450,9 +514,49 @@ class FileScientificCombinationStreamingArtifacts:
         hashes = payload.get("hashes")
         if not isinstance(hashes, Mapping):
             raise ValueError("combination completion hashes are invalid")
+        removed_hashes: Mapping[str, Any] = {}
+        retention_path = run_dir / "retention.json"
+        if retention_path.exists():
+            if retention_path.is_symlink() or not retention_path.is_file():
+                raise ValueError("combination retention seal is unsafe")
+            retention = json.loads(retention_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(retention, Mapping)
+                or retention.get("schema") != _COMBINATION_RETENTION_SCHEMA
+                or retention.get("completion_hash")
+                != _file_hash(run_dir / "completion.json")
+                or retention.get("artifact_fingerprint")
+                != payload.get("artifact_fingerprint")
+            ):
+                raise ValueError("combination retention seal failed verification")
+            candidate_removed = retention.get("removed_hashes")
+            if not isinstance(candidate_removed, Mapping):
+                raise ValueError("combination retention hashes are invalid")
+            if any(
+                not str(relative).startswith("partitions/")
+                or hashes.get(relative) != expected
+                for relative, expected in candidate_removed.items()
+            ):
+                raise ValueError("combination retention scope is invalid")
+            partition_hashes = {
+                relative: expected
+                for relative, expected in hashes.items()
+                if str(relative).startswith("partitions/")
+            }
+            if dict(candidate_removed) != partition_hashes:
+                raise ValueError("combination retention is incomplete")
+            removed_hashes = candidate_removed
         for relative, expected in hashes.items():
             path = run_dir / str(relative)
-            if not path.is_file() or _file_hash(path) != expected:
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and _file_hash(path) == expected
+            ):
+                continue
+            if relative in removed_hashes and not path.exists():
+                continue
+            else:
                 raise ValueError("combination artifact failed verification")
         if _fingerprint(hashes) != payload.get("artifact_fingerprint"):
             raise ValueError("combination artifact fingerprint drifted")

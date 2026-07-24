@@ -70,6 +70,15 @@ class FakeReplayRunner:
         }
 
 
+class FakeRetention:
+    def __init__(self) -> None:
+        self.calls: list[bool] = []
+
+    def collect(self, *, safe_to_remove_working: bool) -> object:
+        self.calls.append(safe_to_remove_working)
+        return object()
+
+
 def _fake_evidence(hypothesis_id: str) -> Mapping[str, Any]:
     fingerprint = "sha256:" + "b" * 64
     definition = scientific_replay_definition(hypothesis_id)
@@ -128,6 +137,28 @@ def _wait_for_status(client: TestClient, job_id: str, expected: str) -> dict[str
             return payload
         time.sleep(0.01)
     raise AssertionError(f"job {job_id} did not reach {expected}")
+
+
+def test_retention_runs_before_recovery_and_after_job_finalization(
+    tmp_path: Path,
+) -> None:
+    store = LocalReplayJobStore(tmp_path / "jobs")
+    retention = FakeRetention()
+    manager = ReplayJobManager(
+        runner=FakeReplayRunner(),
+        store=store,
+        retention=retention,
+    )
+
+    with TestClient(create_app(manager=manager, close_manager=True)) as client:
+        submitted = client.post(
+            "/internal/v1/hypothesis-replays",
+            headers={"Idempotency-Key": "retention-lifecycle"},
+            json={"hypothesis_ids": ["H1"]},
+        ).json()
+        _wait_for_status(client, submitted["job_id"], "completed")
+
+    assert retention.calls == [True, True]
 
 
 def _wait_for_progress_phase(
