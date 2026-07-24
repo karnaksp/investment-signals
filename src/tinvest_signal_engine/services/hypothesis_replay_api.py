@@ -384,9 +384,9 @@ class ReplayEvidenceResponse(BaseModel):
 
 
 class DerivedReplayEvidenceResponse(ReplayEvidenceResponse):
-    """Aggregate for a derived C1-C4 hypothesis, separate from requested evidence."""
+    """Aggregate for a derived C1-C5 hypothesis, separate from requested evidence."""
 
-    hypothesis_id: str = Field(pattern=r"^C[1-4]$")
+    hypothesis_id: str = Field(pattern=r"^C[1-5]$")
 
 
 class ReplayHorizonEvidenceResponse(BaseModel):

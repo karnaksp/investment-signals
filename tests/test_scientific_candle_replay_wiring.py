@@ -604,7 +604,7 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
     assert captured["combination_cost_model"] == "cost-v4"
     assert result["engines"][1] == {
         "engine": "scientific_combination_evidence",
-        "combination_ids": ("C1", "C2", "C3", "C4"),
+        "combination_ids": ("C1", "C2", "C3", "C4", "C5"),
         "application_run_id": "sha256:" + "d" * 64,
         "artifact_fingerprint": "sha256:" + "e" * 64,
         "artifact_uri": str(tmp_path / "combinations"),
@@ -618,6 +618,7 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
         "C2",
         "C3",
         "C4",
+        "C5",
     )
     assert all(
         DerivedReplayEvidenceResponse.model_validate(item)
