@@ -108,6 +108,24 @@ class FittedPortfolioModel(Protocol):
     ) -> tuple[tuple[str, float], ...]: ...
 
 
+class ScientificPortfolioSelectorExampleSourcePort(Protocol):
+    def load(self) -> tuple[PortfolioSelectorExample, ...]: ...
+
+
+class ScientificPortfolioSelectorArtifactPort(Protocol):
+    def completed_uri(self, run_id: str, input_fingerprint: str) -> str | None: ...
+
+    def persist(self, result: ScientificPortfolioSelectorResult) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ScientificPortfolioSelectorExecution:
+    run_id: str
+    reused: bool
+    artifact_uri: str
+    result: ScientificPortfolioSelectorResult | None
+
+
 @dataclass(frozen=True, slots=True)
 class _Prediction:
     example: PortfolioSelectorExample
@@ -555,6 +573,40 @@ class EvaluateScientificPortfolioSelector:
             selected_model=selected_model,
             holdout_decisions=decisions,
             reason_codes=reason_codes,
+        )
+
+
+class RunScientificPortfolioSelector:
+    """Composition-independent orchestration over sealed examples and reports."""
+
+    def __init__(
+        self,
+        *,
+        source: ScientificPortfolioSelectorExampleSourcePort,
+        artifacts: ScientificPortfolioSelectorArtifactPort,
+        policy: ScientificPortfolioSelectorPolicy = ScientificPortfolioSelectorPolicy(),
+    ) -> None:
+        self._source = source
+        self._artifacts = artifacts
+        self._evaluator = EvaluateScientificPortfolioSelector(policy)
+
+    def execute(self) -> ScientificPortfolioSelectorExecution:
+        result = self._evaluator.execute(self._source.load())
+        completed = self._artifacts.completed_uri(
+            result.run_id, result.input_fingerprint
+        )
+        if completed is not None:
+            return ScientificPortfolioSelectorExecution(
+                run_id=result.run_id,
+                reused=True,
+                artifact_uri=completed,
+                result=None,
+            )
+        return ScientificPortfolioSelectorExecution(
+            run_id=result.run_id,
+            reused=False,
+            artifact_uri=self._artifacts.persist(result),
+            result=result,
         )
 
 
