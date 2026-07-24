@@ -174,7 +174,9 @@ def test_selected_hypotheses_use_bounded_reuse_and_fail_closed_on_one_cluster(
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+        ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2,
     }
     assert BOUNDED_CONTROL_REUSE_HYPOTHESES == expected
     report = _bounded_reuse_h7_report()

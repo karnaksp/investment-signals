@@ -84,7 +84,9 @@ _LIVE_HYPOTHESES = """(
     ('H7V3', '3.0.0'),
     ('H15V2', '2.0.0'),
     ('H16', '1.0.0'),
-    ('H17', '1.0.0')
+    ('H16V2', '2.0.0'),
+    ('H17', '1.0.0'),
+    ('H17V2', '2.0.0')
 )"""
 
 _PENDING_SQL = """
@@ -1210,7 +1212,11 @@ def _clickhouse_string_array_parameter(values: tuple[str, ...]) -> str:
     """
     if not values:
         raise ValueError("ClickHouse string array parameter must not be empty")
-    return "[" + ",".join(
-        "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-        for value in values
-    ) + "]"
+    return (
+        "["
+        + ",".join(
+            "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+            for value in values
+        )
+        + "]"
+    )

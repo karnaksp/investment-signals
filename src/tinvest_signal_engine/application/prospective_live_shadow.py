@@ -16,12 +16,15 @@ from tinvest_signal_engine.domain.prospective_live_shadow import (
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     HarV2Parameters,
+    JumpVarianceContrastHistoryPoint,
     JumpHistoryPoint,
     ProspectiveFeature,
     ProspectiveHypothesis,
     ProspectiveScientificPolicy,
+    SemivarianceContrastHistoryPoint,
     TargetMetric,
     directional_outcome,
+    downside_semivariance_contrast_v2_feature,
     downside_semivariance_feature,
     har_v2_feature,
     har_v2_outcome,
@@ -29,6 +32,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     jump_regime_v3_features,
     relative_volume_volatility_feature,
     variance_uplift_outcome,
+    volatility_jump_contrast_v2_feature,
     volatility_jump_feature,
 )
 from tinvest_signal_engine.domain.prospective_scientific_observations import (
@@ -48,7 +52,9 @@ LIVE_SHADOW_HYPOTHESES = frozenset(
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
         ProspectiveHypothesis.HAR_VOLATILITY_V2,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+        ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2,
     }
 )
 
@@ -121,6 +127,10 @@ class SemivarianceFeatureInput:
     historical_downside_shares: tuple[float, ...]
     baseline_future_variance: float
     history_observed_until: datetime | None
+    downside_variance: float = 0.0
+    upside_variance: float = 0.0
+    contrast_history: tuple[SemivarianceContrastHistoryPoint, ...] = ()
+    contrast_history_observed_until: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +140,9 @@ class VolatilityJumpFeatureInput:
     historical_jump_shares: tuple[float, ...]
     baseline_future_variance: float
     history_observed_until: datetime | None
+    jump_variance: float = 0.0
+    contrast_history: tuple[JumpVarianceContrastHistoryPoint, ...] = ()
+    contrast_history_observed_until: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,9 +311,7 @@ class ProcessProspectiveLiveOutcomes:
         if not outcome_policy_version.strip():
             raise ValueError("outcome_policy_version must not be empty")
         if unavailable_confirmation_interval <= timedelta(0):
-            raise ValueError(
-                "unavailable_confirmation_interval must be positive"
-            )
+            raise ValueError("unavailable_confirmation_interval must be positive")
         if unavailable_retry_timeout < unavailable_confirmation_interval:
             raise ValueError(
                 "unavailable_retry_timeout must not be below confirmation interval"
@@ -309,9 +320,7 @@ class ProcessProspectiveLiveOutcomes:
         self._source = source
         self._policy = policy
         self._outcome_policy_version = outcome_policy_version
-        self._unavailable_confirmation_interval = (
-            unavailable_confirmation_interval
-        )
+        self._unavailable_confirmation_interval = unavailable_confirmation_interval
         self._unavailable_retry_timeout = unavailable_retry_timeout
         self._unavailable_candidates: dict[str, tuple[str, datetime]] = {}
 
@@ -339,9 +348,7 @@ class ProcessProspectiveLiveOutcomes:
                 raise ValueError("outcome evidence target differs from observation")
             if not evidence.available:
                 deadline = observation.target_at + self._unavailable_retry_timeout
-                candidate = self._unavailable_candidates.get(
-                    observation.observation_id
-                )
+                candidate = self._unavailable_candidates.get(observation.observation_id)
                 if now < deadline:
                     if (
                         candidate is None
@@ -353,10 +360,7 @@ class ProcessProspectiveLiveOutcomes:
                         )
                         pending += 1
                         continue
-                    if (
-                        now
-                        < candidate[1] + self._unavailable_confirmation_interval
-                    ):
+                    if now < candidate[1] + self._unavailable_confirmation_interval:
                         pending += 1
                         continue
             self._unavailable_candidates.pop(observation.observation_id, None)
@@ -477,6 +481,19 @@ def _portfolio_features(
                 trading_gap=snapshot.trading_gap,
                 policy=policy,
             ),
+            downside_semivariance_contrast_v2_feature(
+                ticker=snapshot.ticker,
+                trading_day=snapshot.trading_day,
+                observed_at=snapshot.observed_at,
+                downside_variance=snapshot.semivariance.downside_variance,
+                upside_variance=snapshot.semivariance.upside_variance,
+                prior_same_phase=snapshot.semivariance.contrast_history,
+                history_observed_until=(
+                    snapshot.semivariance.contrast_history_observed_until
+                ),
+                trading_gap=snapshot.trading_gap,
+                policy=policy,
+            ),
             volatility_jump_feature(
                 ticker=snapshot.ticker,
                 trading_day=snapshot.trading_day,
@@ -491,6 +508,19 @@ def _portfolio_features(
                 ),
                 history_observed_until=(
                     snapshot.volatility_jump.history_observed_until
+                ),
+                trading_gap=snapshot.trading_gap,
+                policy=policy,
+            ),
+            volatility_jump_contrast_v2_feature(
+                ticker=snapshot.ticker,
+                trading_day=snapshot.trading_day,
+                observed_at=snapshot.observed_at,
+                jump_variance=snapshot.volatility_jump.jump_variance,
+                continuous_variance=snapshot.volatility_jump.continuous_variance,
+                prior_same_phase=snapshot.volatility_jump.contrast_history,
+                history_observed_until=(
+                    snapshot.volatility_jump.contrast_history_observed_until
                 ),
                 trading_gap=snapshot.trading_gap,
                 policy=policy,

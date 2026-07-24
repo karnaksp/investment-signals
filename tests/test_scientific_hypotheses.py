@@ -323,13 +323,13 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
     assert registry.schema_version == "1.2.0"
     assert len(registry.sources) == 14
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 24
+    assert len(registry.hypotheses) == 26
     assert (
         sum(
             item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
             for item in registry.hypotheses
         )
-        == 22
+        == 24
     )
     assert (
         sum(
@@ -355,7 +355,9 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
         "prereg-h12-v2",
         "prereg-h15-v2",
         "prereg-h16-v1",
+        "prereg-h16-v2",
         "prereg-h17-v1",
+        "prereg-h17-v2",
         "prereg-h12-v1",
     }
     assert registry.replication_evidence == ()
@@ -443,7 +445,7 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["sources"] == 14
-    assert payload["hypotheses"] == 24
+    assert payload["hypotheses"] == 26
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

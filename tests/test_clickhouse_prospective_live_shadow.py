@@ -292,7 +292,7 @@ def _live_observation(*, target: TargetMetric = TargetMetric.FORWARD_RETURN):
         store=store,
         policy=PRODUCTION_LIVE_POLICY,
     ).execute(_snapshot())
-    assert len(result.observation_ids) == 8
+    assert len(result.observation_ids) == 10
     return next(item for item in store.observations() if item.feature.target is target)
 
 
@@ -475,7 +475,7 @@ def test_live_clickhouse_store_persists_outcome_with_observation_lineage(
     assert inserted["measurements_json"]
 
 
-def test_snapshot_source_uses_only_causal_completed_candles_and_seals_eight() -> None:
+def test_snapshot_source_uses_only_causal_completed_candles_and_seals_ten() -> None:
     first = OBSERVED_AT - timedelta(minutes=120)
     candles = tuple(
         _candle(first + timedelta(minutes=index), index) for index in range(120)
@@ -527,7 +527,7 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_eight() ->
         store=store,
         policy=PRODUCTION_LIVE_POLICY,
     ).execute(snapshot)
-    assert result.stored == 8
+    assert result.stored == 10
     assert all(
         item.feature.feature_max_observed_at <= OBSERVED_AT
         for item in store.observations()
@@ -709,7 +709,9 @@ def test_policy_seals_sufficient_history_for_every_supported_hypothesis() -> Non
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2: 40,
         ProspectiveHypothesis.HAR_VOLATILITY_V2: 56,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: 40,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2: 40,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: 60,
+        ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2: 60,
     }
     assert policy.required_history_trading_days == 60
     assert _calendar_lookback_days(policy) == 98

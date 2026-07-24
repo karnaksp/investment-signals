@@ -12,7 +12,7 @@ from datetime import date, datetime
 from enum import Enum
 from hashlib import sha256
 from math import ceil, exp, isfinite, log
-from typing import Iterable
+from typing import Callable, Iterable, TypeVar
 
 
 class ProspectiveHypothesis(str, Enum):
@@ -30,7 +30,9 @@ class ProspectiveHypothesis(str, Enum):
     PAIR_RESIDUAL_REVERSION_V2 = "H12V2"
     HAR_VOLATILITY_V2 = "H15V2"
     DOWNSIDE_SEMIVARIANCE_RISK = "H16"
+    DOWNSIDE_SEMIVARIANCE_CONTRAST_V2 = "H16V2"
     VOLATILITY_JUMP_PERSISTENCE = "H17"
+    VOLATILITY_JUMP_CONTRAST_V2 = "H17V2"
 
     @property
     def version(self) -> str:
@@ -49,7 +51,9 @@ class ProspectiveHypothesis(str, Enum):
             ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2: "2.0.0",
             ProspectiveHypothesis.HAR_VOLATILITY_V2: "2.0.0",
             ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: "1.0.0",
+            ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2: "2.0.0",
             ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: "1.0.0",
+            ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2: "2.0.0",
         }[self]
 
 
@@ -101,6 +105,7 @@ class ProspectiveReason(str, Enum):
     REVERSAL_REGIME_SELECTED = "reversal_regime_selected"
     CONTINUATION_REGIME_SELECTED = "continuation_regime_selected"
     ACTIVITY_REGIME_AMBIGUOUS = "activity_regime_ambiguous"
+    INSUFFICIENT_COMPARABLE_HISTORY = "insufficient_comparable_history"
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,10 +157,14 @@ class ProspectiveScientificPolicy:
     semivariance_history_days: int = 40
     semivariance_percentile: float = 0.90
     semivariance_horizon_seconds: int = 1800
+    semivariance_v2_scale_tolerance: float = 0.25
+    semivariance_v2_minimum_comparables: int = 5
     jump_variance_window_minutes: int = 30
     jump_variance_history_days: int = 60
     jump_variance_percentile: float = 0.95
     jump_variance_horizon_seconds: int = 1800
+    jump_variance_v2_scale_tolerance: float = 0.25
+    jump_variance_v2_minimum_comparables: int = 5
     round_trip_cost_bps: float = 10.0
 
     def required_history_trading_days_by_hypothesis(
@@ -211,7 +220,13 @@ class ProspectiveScientificPolicy:
             ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: (
                 self.semivariance_history_days
             ),
+            ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2: (
+                self.semivariance_history_days
+            ),
             ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: (
+                self.jump_variance_history_days
+            ),
+            ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2: (
                 self.jump_variance_history_days
             ),
         }
@@ -251,9 +266,11 @@ class ProspectiveScientificPolicy:
             self.semivariance_window_minutes,
             self.semivariance_history_days,
             self.semivariance_horizon_seconds,
+            self.semivariance_v2_minimum_comparables,
             self.jump_variance_window_minutes,
             self.jump_variance_history_days,
             self.jump_variance_horizon_seconds,
+            self.jump_variance_v2_minimum_comparables,
         )
         if any(value <= 0 for value in positive):
             raise ValueError("policy windows, histories, and horizons must be positive")
@@ -302,6 +319,64 @@ class ProspectiveScientificPolicy:
             raise ValueError("HAR requires three unique windows")
         if self.har_ridge_penalty < 0.0 or self.round_trip_cost_bps < 0.0:
             raise ValueError("ridge penalty and trading costs must be non-negative")
+        if (
+            self.semivariance_v2_scale_tolerance <= 0.0
+            or self.jump_variance_v2_scale_tolerance <= 0.0
+        ):
+            raise ValueError("risk contrast scale tolerances must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class SemivarianceContrastHistoryPoint:
+    """Completed prior-phase observation used by H16V2.
+
+    ``future_variance`` belongs to the prior day and is available only at
+    ``target_at``.  The application layer may therefore include the point only
+    after that boundary precedes the new observation.
+    """
+
+    downside_variance: float
+    upside_variance: float
+    future_variance: float
+    target_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_aware(self.target_at, "target_at")
+        values = (
+            self.downside_variance,
+            self.upside_variance,
+            self.future_variance,
+        )
+        if any(not isfinite(value) or value < 0.0 for value in values):
+            raise ValueError("semivariance contrast history must be non-negative")
+
+    @property
+    def total_variance(self) -> float:
+        return self.downside_variance + self.upside_variance
+
+
+@dataclass(frozen=True, slots=True)
+class JumpVarianceContrastHistoryPoint:
+    """Completed prior-phase observation used by H17V2."""
+
+    jump_variance: float
+    continuous_variance: float
+    future_variance: float
+    target_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_aware(self.target_at, "target_at")
+        values = (
+            self.jump_variance,
+            self.continuous_variance,
+            self.future_variance,
+        )
+        if any(not isfinite(value) or value < 0.0 for value in values):
+            raise ValueError("jump contrast history must be non-negative")
+
+    @property
+    def total_variance(self) -> float:
+        return self.jump_variance + self.continuous_variance
 
 
 @dataclass(frozen=True, slots=True)
@@ -1440,6 +1515,110 @@ def downside_semivariance_feature(
     )
 
 
+def downside_semivariance_contrast_v2_feature(
+    *,
+    ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    downside_variance: float,
+    upside_variance: float,
+    prior_same_phase: Iterable[SemivarianceContrastHistoryPoint],
+    history_observed_until: datetime | None,
+    trading_gap: bool,
+    policy: ProspectiveScientificPolicy,
+) -> ProspectiveFeature:
+    """Compare negative and positive semivariance at the same past scale.
+
+    The treatment is a downside-dominated completed window whose total
+    variance exceeds a threshold estimated from prior same-phase days only.
+    Its causal baseline is the median future variance of prior
+    upside-dominated windows with comparable total variance.
+    """
+
+    history = tuple(prior_same_phase)
+    history_observed_until = _verified_contrast_history_boundary(
+        history,
+        declared=history_observed_until,
+    )
+    current = (downside_variance, upside_variance)
+    if any(not isfinite(value) or value < 0.0 for value in current):
+        raise ValueError("semivariance components must be finite and non-negative")
+    total_variance = downside_variance + upside_variance
+    historical_totals = tuple(item.total_variance for item in history)
+    scale_percentile = _percentile(historical_totals, total_variance)
+    comparable = _same_scale_controls(
+        history,
+        current_scale=total_variance,
+        tolerance=policy.semivariance_v2_scale_tolerance,
+        ordinary=lambda item: item.upside_variance > item.downside_variance,
+    )
+    baseline = _median(tuple(item.future_variance for item in comparable))
+    matched = (
+        downside_variance > upside_variance
+        and total_variance > 0.0
+        and scale_percentile >= policy.semivariance_percentile
+    )
+    decision, reason = _contrast_decision(
+        history_count=len(history),
+        required_history=policy.semivariance_history_days,
+        comparable_count=len(comparable),
+        minimum_comparables=policy.semivariance_v2_minimum_comparables,
+        matched=matched,
+        baseline=baseline,
+        trading_gap=trading_gap,
+    )
+    return _feature(
+        hypothesis=ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
+        ticker=ticker,
+        trading_day=trading_day,
+        observed_at=observed_at,
+        history_observed_until=history_observed_until,
+        horizon_seconds=policy.semivariance_horizon_seconds,
+        target=TargetMetric.FUTURE_VARIANCE_UPLIFT,
+        decision=decision,
+        reason=reason,
+        expected_direction=0,
+        forecast=(
+            MetricValue("minimum_variance_uplift", MetricUnit.RATIO, 0.0)
+            if decision is ProspectiveDecision.MATCHED
+            else None
+        ),
+        feature_values=(
+            MetricValue(
+                "downside_semivariance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                downside_variance,
+            ),
+            MetricValue(
+                "upside_semivariance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                upside_variance,
+            ),
+            MetricValue(
+                "total_realized_variance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                total_variance,
+            ),
+            MetricValue(
+                "past_same_phase_scale_percentile",
+                MetricUnit.RATIO,
+                scale_percentile,
+            ),
+            MetricValue(
+                "comparable_positive_window_count",
+                MetricUnit.COUNT,
+                float(len(comparable)),
+            ),
+            MetricValue(
+                "baseline_future_variance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                max(0.0, baseline),
+            ),
+            MetricValue("prior_day_count", MetricUnit.COUNT, float(len(history))),
+        ),
+    )
+
+
 def volatility_jump_feature(
     *,
     ticker: str,
@@ -1498,6 +1677,104 @@ def volatility_jump_feature(
                 MetricUnit.BASIS_POINTS_SQUARED,
                 max(0.0, baseline_future_variance),
             ),
+        ),
+    )
+
+
+def volatility_jump_contrast_v2_feature(
+    *,
+    ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    jump_variance: float,
+    continuous_variance: float,
+    prior_same_phase: Iterable[JumpVarianceContrastHistoryPoint],
+    history_observed_until: datetime | None,
+    trading_gap: bool,
+    policy: ProspectiveScientificPolicy,
+) -> ProspectiveFeature:
+    """Compare jump-driven and ordinary variance at a causal matched scale."""
+
+    history = tuple(prior_same_phase)
+    history_observed_until = _verified_contrast_history_boundary(
+        history,
+        declared=history_observed_until,
+    )
+    current = (jump_variance, continuous_variance)
+    if any(not isfinite(value) or value < 0.0 for value in current):
+        raise ValueError("jump variance components must be finite and non-negative")
+    total_variance = jump_variance + continuous_variance
+    historical_totals = tuple(item.total_variance for item in history)
+    scale_percentile = _percentile(historical_totals, total_variance)
+    comparable = _same_scale_controls(
+        history,
+        current_scale=total_variance,
+        tolerance=policy.jump_variance_v2_scale_tolerance,
+        ordinary=lambda item: item.continuous_variance >= item.jump_variance,
+    )
+    baseline = _median(tuple(item.future_variance for item in comparable))
+    matched = (
+        jump_variance > continuous_variance
+        and total_variance > 0.0
+        and scale_percentile >= policy.jump_variance_percentile
+    )
+    decision, reason = _contrast_decision(
+        history_count=len(history),
+        required_history=policy.jump_variance_history_days,
+        comparable_count=len(comparable),
+        minimum_comparables=policy.jump_variance_v2_minimum_comparables,
+        matched=matched,
+        baseline=baseline,
+        trading_gap=trading_gap,
+    )
+    return _feature(
+        hypothesis=ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2,
+        ticker=ticker,
+        trading_day=trading_day,
+        observed_at=observed_at,
+        history_observed_until=history_observed_until,
+        horizon_seconds=policy.jump_variance_horizon_seconds,
+        target=TargetMetric.FUTURE_VARIANCE_UPLIFT,
+        decision=decision,
+        reason=reason,
+        expected_direction=0,
+        forecast=(
+            MetricValue("minimum_variance_uplift", MetricUnit.RATIO, 0.0)
+            if decision is ProspectiveDecision.MATCHED
+            else None
+        ),
+        feature_values=(
+            MetricValue(
+                "jump_variance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                jump_variance,
+            ),
+            MetricValue(
+                "continuous_variance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                continuous_variance,
+            ),
+            MetricValue(
+                "total_realized_variance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                total_variance,
+            ),
+            MetricValue(
+                "past_same_phase_scale_percentile",
+                MetricUnit.RATIO,
+                scale_percentile,
+            ),
+            MetricValue(
+                "comparable_continuous_window_count",
+                MetricUnit.COUNT,
+                float(len(comparable)),
+            ),
+            MetricValue(
+                "baseline_future_variance",
+                MetricUnit.BASIS_POINTS_SQUARED,
+                max(0.0, baseline),
+            ),
+            MetricValue("prior_day_count", MetricUnit.COUNT, float(len(history))),
         ),
     )
 
@@ -1802,6 +2079,80 @@ def _non_directional_decision(
     if matched:
         return ProspectiveDecision.MATCHED, ProspectiveReason.CONDITIONS_MATCHED
     return ProspectiveDecision.NOT_MATCHED, ProspectiveReason.CONDITIONS_NOT_MET
+
+
+def _contrast_decision(
+    *,
+    history_count: int,
+    required_history: int,
+    comparable_count: int,
+    minimum_comparables: int,
+    matched: bool,
+    baseline: float,
+    trading_gap: bool,
+) -> tuple[ProspectiveDecision, ProspectiveReason]:
+    if trading_gap:
+        return ProspectiveDecision.ABSTAIN, ProspectiveReason.NON_CONTIGUOUS_WINDOW
+    if history_count != required_history:
+        return ProspectiveDecision.ABSTAIN, ProspectiveReason.INSUFFICIENT_PRIOR_DAYS
+    if comparable_count < minimum_comparables:
+        return (
+            ProspectiveDecision.ABSTAIN,
+            ProspectiveReason.INSUFFICIENT_COMPARABLE_HISTORY,
+        )
+    if baseline <= 0.0:
+        return ProspectiveDecision.ABSTAIN, ProspectiveReason.INVALID_BASELINE
+    if matched:
+        return ProspectiveDecision.MATCHED, ProspectiveReason.CONDITIONS_MATCHED
+    return ProspectiveDecision.NOT_MATCHED, ProspectiveReason.CONDITIONS_NOT_MET
+
+
+_ContrastPoint = TypeVar(
+    "_ContrastPoint",
+    SemivarianceContrastHistoryPoint,
+    JumpVarianceContrastHistoryPoint,
+)
+
+
+def _same_scale_controls(
+    history: tuple[_ContrastPoint, ...],
+    *,
+    current_scale: float,
+    tolerance: float,
+    ordinary: Callable[[_ContrastPoint], bool],
+) -> tuple[_ContrastPoint, ...]:
+    if current_scale <= 0.0:
+        return ()
+    lower = current_scale / (1.0 + tolerance)
+    upper = current_scale * (1.0 + tolerance)
+    return tuple(
+        item
+        for item in history
+        if ordinary(item) and lower <= item.total_variance <= upper
+    )
+
+
+def _median(values: tuple[float, ...]) -> float:
+    if not values:
+        return 0.0
+    ordered = tuple(sorted(values))
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _verified_contrast_history_boundary(
+    history: tuple[
+        SemivarianceContrastHistoryPoint | JumpVarianceContrastHistoryPoint, ...
+    ],
+    *,
+    declared: datetime | None,
+) -> datetime | None:
+    actual = max((item.target_at for item in history), default=None)
+    if actual != declared:
+        raise ValueError("contrast history boundary does not match matured inputs")
+    return actual
 
 
 def _feature(

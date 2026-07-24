@@ -27,8 +27,10 @@ from tinvest_signal_engine.domain.prospective_live_shadow import (
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     HarV2Parameters,
     HarV2TrainingPoint,
+    JumpVarianceContrastHistoryPoint,
     JumpHistoryPoint,
     ProspectiveScientificPolicy,
+    SemivarianceContrastHistoryPoint,
     TargetMetric,
     fit_har_v2_parameters,
 )
@@ -371,9 +373,7 @@ def _calendar_lookback_days(policy: ProspectiveScientificPolicy) -> int:
     """Convert the sealed trading-day requirement into a bounded query span."""
 
     trading_days = policy.required_history_trading_days
-    weekday_span = ceil(
-        trading_days * _CALENDAR_DAYS_PER_WEEK / _TRADING_DAYS_PER_WEEK
-    )
+    weekday_span = ceil(trading_days * _CALENDAR_DAYS_PER_WEEK / _TRADING_DAYS_PER_WEEK)
     return weekday_span + _EXCHANGE_HOLIDAY_BUFFER_DAYS
 
 
@@ -414,14 +414,24 @@ def _snapshot(
     jump_window = _window_ending(candles, index, policy.jump_window_minutes)
     volume_window = _window_ending(candles, index, policy.volume_window_minutes)
     variance_window = _window_ending(candles, index, policy.semivariance_window_minutes)
+    jump_variance_window = _window_ending(
+        candles, index, policy.jump_variance_window_minutes
+    )
     long_window = _window_ending(candles, index, policy.har_windows_minutes[-1])
     trading_gap = any(
         window is None or any(item.has_gap for item in window)
-        for window in (jump_window, volume_window, variance_window, long_window)
+        for window in (
+            jump_window,
+            volume_window,
+            variance_window,
+            jump_variance_window,
+            long_window,
+        )
     )
     jump_window = jump_window or (current,)
     volume_window = volume_window or (current,)
     variance_window = variance_window or (current,)
+    jump_variance_window = jump_variance_window or (current,)
     long_window = long_window or (current,)
     prior_days = _prior_daily_inputs(candles, index, policy=policy)
     jump_history = tuple(item.jump for item in prior_days)[-policy.jump_history_days :]
@@ -432,6 +442,12 @@ def _snapshot(
         -policy.semivariance_history_days :
     ]
     jump_share_history = tuple(item.jump_share for item in prior_days)[
+        -policy.jump_variance_history_days :
+    ]
+    semivariance_contrast_history = tuple(
+        item.semivariance_contrast for item in prior_days
+    )[-policy.semivariance_history_days :]
+    jump_contrast_history = tuple(item.jump_contrast for item in prior_days)[
         -policy.jump_variance_history_days :
     ]
     volume_baseline = _median_tail(
@@ -448,11 +464,20 @@ def _snapshot(
     returns = _log_returns(variance_window)
     variance = sum(value * value for value in returns)
     downside = sum(value * value for value in returns if value < 0.0)
-    bipower = (pi / 2.0) * sum(
+    upside = sum(value * value for value in returns if value > 0.0)
+    legacy_bipower = (pi / 2.0) * sum(
         abs(previous) * abs(current_value)
         for previous, current_value in zip(returns, returns[1:])
     )
-    jump_variance = max(variance - bipower, 0.0)
+    legacy_jump_variance = max(variance - legacy_bipower, 0.0)
+    jump_returns = _log_returns(jump_variance_window)
+    jump_total_variance = sum(value * value for value in jump_returns)
+    bipower = (pi / 2.0) * sum(
+        abs(previous) * abs(current_value)
+        for previous, current_value in zip(jump_returns, jump_returns[1:])
+    )
+    continuous_variance = min(max(bipower, 0.0), jump_total_variance)
+    jump_variance = max(jump_total_variance - continuous_variance, 0.0)
     history_until = max((item.target_at for item in prior_days), default=None)
     parameters = (
         _har_parameters(candles, index, policy=policy) if not trading_gap else None
@@ -505,13 +530,26 @@ def _snapshot(
             historical_downside_shares=semivariance_history,
             baseline_future_variance=semivariance_baseline,
             history_observed_until=history_until,
+            downside_variance=downside,
+            upside_variance=upside,
+            contrast_history=semivariance_contrast_history,
+            contrast_history_observed_until=(
+                semivariance_contrast_history[-1].target_at
+                if semivariance_contrast_history
+                else None
+            ),
         ),
         volatility_jump=VolatilityJumpFeatureInput(
-            jump_share=jump_variance / variance if variance > 0.0 else 0.0,
-            continuous_variance=bipower,
+            jump_share=(legacy_jump_variance / variance if variance > 0.0 else 0.0),
+            continuous_variance=legacy_bipower,
             historical_jump_shares=jump_share_history,
             baseline_future_variance=jump_baseline,
             history_observed_until=history_until,
+            jump_variance=jump_variance,
+            contrast_history=jump_contrast_history,
+            contrast_history_observed_until=(
+                jump_contrast_history[-1].target_at if jump_contrast_history else None
+            ),
         ),
     )
 
@@ -525,6 +563,8 @@ class _DailyInput:
     downside_share: float
     jump_share: float
     future_variance: float
+    semivariance_contrast: SemivarianceContrastHistoryPoint
+    jump_contrast: JumpVarianceContrastHistoryPoint
 
 
 def _prior_daily_inputs(
@@ -544,23 +584,59 @@ def _prior_daily_inputs(
         jump = _window_ending(candles, index, policy.jump_window_minutes)
         volume = _window_ending(candles, index, policy.volume_window_minutes)
         variance = _window_ending(candles, index, policy.semivariance_window_minutes)
+        jump_variance_window = _window_ending(
+            candles, index, policy.jump_variance_window_minutes
+        )
         future = _future_window(candles, index, policy.volume_horizon_seconds // 60)
-        if jump is None or volume is None or variance is None or future is None:
+        semivariance_future = _future_window(
+            candles, index, policy.semivariance_horizon_seconds // 60
+        )
+        jump_future = _future_window(
+            candles, index, policy.jump_variance_horizon_seconds // 60
+        )
+        if (
+            jump is None
+            or volume is None
+            or variance is None
+            or jump_variance_window is None
+            or future is None
+            or semivariance_future is None
+            or jump_future is None
+        ):
             continue
         returns = _log_returns(variance)
         total_variance = sum(value * value for value in returns)
         downside = sum(value * value for value in returns if value < 0.0)
-        bipower = (pi / 2.0) * sum(
+        upside = sum(value * value for value in returns if value > 0.0)
+        legacy_bipower = (pi / 2.0) * sum(
             abs(previous) * abs(current_value)
             for previous, current_value in zip(returns, returns[1:])
         )
-        jump_variance = max(total_variance - bipower, 0.0)
+        legacy_jump_variance = max(total_variance - legacy_bipower, 0.0)
+        jump_returns = _log_returns(jump_variance_window)
+        jump_total_variance = sum(value * value for value in jump_returns)
+        bipower = (pi / 2.0) * sum(
+            abs(previous) * abs(current_value)
+            for previous, current_value in zip(jump_returns, jump_returns[1:])
+        )
+        continuous_variance = min(max(bipower, 0.0), jump_total_variance)
+        jump_variance = max(jump_total_variance - continuous_variance, 0.0)
+        observed_at = _observed_at(candle)
+        semivariance_target_at = observed_at + timedelta(
+            seconds=policy.semivariance_horizon_seconds
+        )
+        jump_target_at = observed_at + timedelta(
+            seconds=policy.jump_variance_horizon_seconds
+        )
         signed_return = float(jump[-1].close_price / jump[0].open_price - 1) * 10_000.0
         result.append(
             _DailyInput(
                 trading_day=candle.trading_day,
-                target_at=_observed_at(candle)
-                + timedelta(seconds=policy.volume_horizon_seconds),
+                target_at=max(
+                    observed_at + timedelta(seconds=policy.volume_horizon_seconds),
+                    semivariance_target_at,
+                    jump_target_at,
+                ),
                 jump=JumpHistoryPoint(
                     absolute_return_bps=abs(signed_return),
                     volume=float(sum(item.volume for item in jump)),
@@ -577,9 +653,23 @@ def _prior_daily_inputs(
                     downside / total_variance if total_variance > 0.0 else 0.0
                 ),
                 jump_share=(
-                    jump_variance / total_variance if total_variance > 0.0 else 0.0
+                    legacy_jump_variance / total_variance
+                    if total_variance > 0.0
+                    else 0.0
                 ),
                 future_variance=_realized_variance(future),
+                semivariance_contrast=SemivarianceContrastHistoryPoint(
+                    downside_variance=downside,
+                    upside_variance=upside,
+                    future_variance=_realized_variance(semivariance_future),
+                    target_at=semivariance_target_at,
+                ),
+                jump_contrast=JumpVarianceContrastHistoryPoint(
+                    jump_variance=jump_variance,
+                    continuous_variance=continuous_variance,
+                    future_variance=_realized_variance(jump_future),
+                    target_at=jump_target_at,
+                ),
             )
         )
     return tuple(sorted(result, key=lambda item: item.trading_day))

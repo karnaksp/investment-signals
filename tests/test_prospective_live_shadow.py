@@ -26,12 +26,15 @@ from tinvest_signal_engine.domain.prospective_live_shadow import (
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     HarV2Parameters,
+    JumpVarianceContrastHistoryPoint,
     JumpHistoryPoint,
     ProspectiveHypothesis,
     ProspectiveReason,
     ProspectiveScientificPolicy,
+    SemivarianceContrastHistoryPoint,
     TargetMetric,
 )
+
 UTC = timezone.utc
 OBSERVED_AT = datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
 HISTORY_AT = OBSERVED_AT - timedelta(days=1)
@@ -51,8 +54,10 @@ POLICY = ProspectiveScientificPolicy(
     har_minimum_training_points=1,
     semivariance_history_days=2,
     semivariance_percentile=0.75,
+    semivariance_v2_minimum_comparables=1,
     jump_variance_history_days=2,
     jump_variance_percentile=0.75,
+    jump_variance_v2_minimum_comparables=1,
 )
 
 
@@ -117,15 +122,42 @@ def _snapshot(*, sufficient: bool = True) -> ProspectivePortfolioSnapshot:
             ),
             baseline_future_variance=2.0 if sufficient else 0.0,
             history_observed_until=history_at,
+            downside_variance=1.8 if sufficient else 0.0,
+            upside_variance=0.2 if sufficient else 0.0,
+            contrast_history=(
+                tuple(
+                    SemivarianceContrastHistoryPoint(
+                        downside_variance=0.2,
+                        upside_variance=1.8,
+                        future_variance=2.0,
+                        target_at=HISTORY_AT - timedelta(days=index),
+                    )
+                    for index in range(history_count)
+                )
+            ),
+            contrast_history_observed_until=history_at,
         ),
         volatility_jump=VolatilityJumpFeatureInput(
             jump_share=0.9,
-            continuous_variance=1.0,
+            continuous_variance=0.2,
             historical_jump_shares=tuple(
                 0.1 * (index + 1) for index in range(history_count)
             ),
             baseline_future_variance=2.0 if sufficient else 0.0,
             history_observed_until=history_at,
+            jump_variance=1.8 if sufficient else 0.0,
+            contrast_history=(
+                tuple(
+                    JumpVarianceContrastHistoryPoint(
+                        jump_variance=0.2,
+                        continuous_variance=1.8,
+                        future_variance=2.0,
+                        target_at=HISTORY_AT - timedelta(days=index),
+                    )
+                    for index in range(history_count)
+                )
+            ),
+            contrast_history_observed_until=history_at,
         ),
     )
 
@@ -181,12 +213,12 @@ def test_full_portfolio_is_built_once_versioned_and_idempotent() -> None:
     first = recorder.execute(_snapshot())
     second = recorder.execute(_snapshot())
 
-    assert first.stored == 12
+    assert first.stored == 14
     assert first.replayed == 0
     assert second.stored == 0
-    assert second.replayed == 12
+    assert second.replayed == 14
     assert first.observation_ids == second.observation_ids
-    assert len(store.observations()) == 12
+    assert len(store.observations()) == 14
     assert {
         item.feature.hypothesis for item in store.observations()
     } == LIVE_SHADOW_HYPOTHESES
@@ -196,7 +228,7 @@ def test_full_portfolio_is_built_once_versioned_and_idempotent() -> None:
         and item.feature.hypothesis_version == item.feature.hypothesis.version
         for item in store.observations()
     )
-    assert len(first.event.statistics.rows) == 12
+    assert len(first.event.statistics.rows) == 14
     assert first.event.statistics.descriptive_only is True
 
 
@@ -234,8 +266,8 @@ def test_mature_worker_never_loads_future_outcomes() -> None:
         limit=20,
     )
 
-    assert result.scanned == 12
-    assert result.pending == 12
+    assert result.scanned == 14
+    assert result.pending == 14
     assert result.stored == 0
     assert source.calls == 0
 
@@ -255,10 +287,10 @@ def test_mature_outcomes_accumulate_descriptive_live_shadow_statistics() -> None
     first = worker.run_once(now=now, limit=20)
     second = worker.run_once(now=now + timedelta(seconds=1), limit=20)
 
-    assert first.stored == 12
+    assert first.stored == 14
     assert first.unavailable == 4
     assert second.scanned == 0
-    assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 12
+    assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 14
     h3 = _row(
         first,
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
@@ -329,10 +361,10 @@ def test_temporarily_unavailable_mature_outcomes_are_retried_during_grace() -> N
     )
 
     assert first.stored == 0
-    assert first.pending == 12
+    assert first.pending == 14
     assert first.unavailable == 0
     assert second.stored == 4
-    assert second.pending == 8
+    assert second.pending == 10
     assert second.unavailable == 2
     assert len(store.outcomes(outcome_policy_version="live-outcome-v1")) == 4
 
@@ -351,16 +383,15 @@ def test_stable_unavailable_outcomes_are_sealed_after_confirmation() -> None:
         limit=20,
     )
     result = worker.run_once(
-        now=OBSERVED_AT
-        + timedelta(seconds=POLICY.volume_horizon_seconds, minutes=1),
+        now=OBSERVED_AT + timedelta(seconds=POLICY.volume_horizon_seconds, minutes=1),
         limit=20,
     )
 
     assert first.stored == 0
-    assert first.pending == 12
-    assert result.stored == 12
+    assert first.pending == 14
+    assert result.stored == 14
     assert result.pending == 0
-    assert result.unavailable == 12
+    assert result.unavailable == 14
     assert all(row.data_coverage == 0.0 for row in result.event.statistics.rows)
     assert all(row.mean_effect is None for row in result.event.statistics.rows)
 
@@ -382,11 +413,11 @@ def test_changed_unavailable_evidence_restarts_confirmation() -> None:
     changed = worker.run_once(now=matured_at + timedelta(minutes=1), limit=20)
     sealed = worker.run_once(now=matured_at + timedelta(minutes=2), limit=20)
 
-    assert first.pending == 12
-    assert changed.pending == 12
+    assert first.pending == 14
+    assert changed.pending == 14
     assert changed.stored == 0
-    assert sealed.stored == 12
-    assert sealed.unavailable == 12
+    assert sealed.stored == 14
+    assert sealed.unavailable == 14
 
 
 def test_unavailable_retry_timeout_prevents_infinite_pending() -> None:
@@ -405,10 +436,10 @@ def test_unavailable_retry_timeout_prevents_infinite_pending() -> None:
     source.evidence_fingerprint = "sha256:" + "e" * 64
     timed_out = worker.run_once(now=matured_at + timedelta(hours=1), limit=20)
 
-    assert first.pending == 12
+    assert first.pending == 14
     assert timed_out.pending == 0
-    assert timed_out.stored == 12
-    assert timed_out.unavailable == 12
+    assert timed_out.stored == 14
+    assert timed_out.unavailable == 14
 
 
 def test_next_ingest_event_retains_accumulated_outcome_statistics() -> None:

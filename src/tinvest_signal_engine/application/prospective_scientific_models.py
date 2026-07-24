@@ -23,12 +23,15 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     FrozenPairParameters,
     HarV2Parameters,
     HarV2TrainingPoint,
+    JumpVarianceContrastHistoryPoint,
     JumpHistoryPoint,
     ProspectiveFeature,
     ProspectiveHypothesis,
     ProspectiveOutcome,
     ProspectiveScientificPolicy,
+    SemivarianceContrastHistoryPoint,
     directional_outcome,
+    downside_semivariance_contrast_v2_feature,
     downside_semivariance_feature,
     fit_har_v2_parameters,
     har_v2_feature,
@@ -43,6 +46,7 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     phase_recurrence_feature,
     relative_volume_volatility_feature,
     variance_uplift_outcome,
+    volatility_jump_contrast_v2_feature,
     volatility_jump_feature,
 )
 from tinvest_signal_engine.domain.trading_phases import (
@@ -100,7 +104,9 @@ INDEPENDENT_PARTITIONED_HYPOTHESES = frozenset(
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
         ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+        ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2,
     }
 )
 
@@ -239,9 +245,15 @@ def iter_independent_prospective_row_partitions(
             derived = tuple(_phase_recurrence_rows(by_ticker, request.policy))
         elif hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK:
             derived = tuple(_semivariance_rows(by_ticker, request.policy))
-        else:
-            assert hypothesis is ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE
+        elif hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2:
+            derived = tuple(_semivariance_contrast_v2_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE:
             derived = tuple(_volatility_jump_rows(by_ticker, request.policy))
+        else:
+            assert hypothesis is ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2
+            derived = tuple(
+                _volatility_jump_contrast_v2_rows(by_ticker, request.policy)
+            )
         if derived:
             emitted = True
             yield derived
@@ -382,8 +394,12 @@ def build_prospective_scientific_research(
         )
     if ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK in selected:
         rows.extend(_semivariance_rows(ordered, request.policy))
+    if ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2 in selected:
+        rows.extend(_semivariance_contrast_v2_rows(ordered, request.policy))
     if ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE in selected:
         rows.extend(_volatility_jump_rows(ordered, request.policy))
+    if ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2 in selected:
+        rows.extend(_volatility_jump_contrast_v2_rows(ordered, request.policy))
     har_parameters: HarV2Parameters | None = None
     if ProspectiveHypothesis.HAR_VOLATILITY_V2 in selected:
         har_rows, har_parameters = _har_v2_rows(ordered, split, request.policy)
@@ -508,8 +524,16 @@ def build_partitioned_prospective_scientific_research(
             feature_outcomes.extend(_phase_recurrence_rows(by_ticker, request.policy))
         elif hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK:
             feature_outcomes.extend(_semivariance_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2:
+            feature_outcomes.extend(
+                _semivariance_contrast_v2_rows(by_ticker, request.policy)
+            )
         elif hypothesis is ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE:
             feature_outcomes.extend(_volatility_jump_rows(by_ticker, request.policy))
+        elif hypothesis is ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2:
+            feature_outcomes.extend(
+                _volatility_jump_contrast_v2_rows(by_ticker, request.policy)
+            )
         elif hypothesis is ProspectiveHypothesis.HAR_VOLATILITY_V2:
             har_candidates.extend(_build_har_candidates(ticker, rows, request.policy))
         elif (
@@ -1833,6 +1857,180 @@ def _volatility_jump_rows(
             if item.future_variance is not None:
                 histories[(item.ticker, item.bucket)].append(
                     (item.trigger_value, item.future_variance, item.target_at)
+                )
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _RiskContrastCandidate:
+    ticker: str
+    trading_day: date
+    bucket: int
+    observed_at: datetime
+    target_at: datetime
+    first_component: float
+    second_component: float
+    future_variance: float | None
+
+
+def _semivariance_contrast_v2_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    policy: ProspectiveScientificPolicy,
+) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+    candidates: list[_RiskContrastCandidate] = []
+    for ticker, rows in by_ticker.items():
+        for index, candle in enumerate(rows):
+            observed_at = _observed_at(candle)
+            if observed_at.minute % policy.semivariance_window_minutes or not _eligible(
+                observed_at
+            ):
+                continue
+            window = _window_ending(rows, index, policy.semivariance_window_minutes)
+            if window is None:
+                continue
+            returns = _log_returns(window)
+            downside = sum(value * value for value in returns if value < 0.0)
+            upside = sum(value * value for value in returns if value > 0.0)
+            candidates.append(
+                _RiskContrastCandidate(
+                    ticker=ticker,
+                    trading_day=_trading_day(candle.at),
+                    bucket=_clock_bucket(candle.at, policy.semivariance_window_minutes),
+                    observed_at=observed_at,
+                    target_at=observed_at
+                    + timedelta(seconds=policy.semivariance_horizon_seconds),
+                    first_component=downside,
+                    second_component=upside,
+                    future_variance=_future_variance(
+                        rows,
+                        index,
+                        policy.semivariance_horizon_seconds // 60,
+                    ),
+                )
+            )
+    histories: defaultdict[tuple[str, int], deque[SemivarianceContrastHistoryPoint]] = (
+        defaultdict(lambda: deque(maxlen=policy.semivariance_history_days))
+    )
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    for trading_day, day_items in _items_by_day(candidates):
+        for item in day_items:
+            history = tuple(histories[(item.ticker, item.bucket)])
+            feature = downside_semivariance_contrast_v2_feature(
+                ticker=item.ticker,
+                trading_day=trading_day,
+                observed_at=item.observed_at,
+                downside_variance=item.first_component,
+                upside_variance=item.second_component,
+                prior_same_phase=history,
+                history_observed_until=history[-1].target_at if history else None,
+                trading_gap=False,
+                policy=policy,
+            )
+            result.append(
+                (
+                    feature,
+                    variance_uplift_outcome(
+                        feature,
+                        target_at=item.target_at,
+                        actual_future_variance=item.future_variance,
+                    ),
+                )
+            )
+        # Same-day outcomes and feature components never enter another anchor's
+        # threshold.  Histories advance only after the whole trading day.
+        for item in day_items:
+            if item.future_variance is not None:
+                histories[(item.ticker, item.bucket)].append(
+                    SemivarianceContrastHistoryPoint(
+                        downside_variance=item.first_component,
+                        upside_variance=item.second_component,
+                        future_variance=item.future_variance,
+                        target_at=item.target_at,
+                    )
+                )
+    return result
+
+
+def _volatility_jump_contrast_v2_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    policy: ProspectiveScientificPolicy,
+) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+    candidates: list[_RiskContrastCandidate] = []
+    for ticker, rows in by_ticker.items():
+        for index, candle in enumerate(rows):
+            observed_at = _observed_at(candle)
+            if (
+                observed_at.minute % policy.jump_variance_window_minutes
+                or not _eligible(observed_at)
+            ):
+                continue
+            window = _window_ending(rows, index, policy.jump_variance_window_minutes)
+            if window is None:
+                continue
+            returns = _log_returns(window)
+            realized = sum(value * value for value in returns)
+            bipower = (pi / 2.0) * sum(
+                abs(previous) * abs(current)
+                for previous, current in zip(returns, returns[1:])
+            )
+            continuous = min(max(bipower, 0.0), realized)
+            jump = max(realized - continuous, 0.0)
+            candidates.append(
+                _RiskContrastCandidate(
+                    ticker=ticker,
+                    trading_day=_trading_day(candle.at),
+                    bucket=_clock_bucket(
+                        candle.at, policy.jump_variance_window_minutes
+                    ),
+                    observed_at=observed_at,
+                    target_at=observed_at
+                    + timedelta(seconds=policy.jump_variance_horizon_seconds),
+                    first_component=jump,
+                    second_component=continuous,
+                    future_variance=_future_variance(
+                        rows,
+                        index,
+                        policy.jump_variance_horizon_seconds // 60,
+                    ),
+                )
+            )
+    histories: defaultdict[tuple[str, int], deque[JumpVarianceContrastHistoryPoint]] = (
+        defaultdict(lambda: deque(maxlen=policy.jump_variance_history_days))
+    )
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    for trading_day, day_items in _items_by_day(candidates):
+        for item in day_items:
+            history = tuple(histories[(item.ticker, item.bucket)])
+            feature = volatility_jump_contrast_v2_feature(
+                ticker=item.ticker,
+                trading_day=trading_day,
+                observed_at=item.observed_at,
+                jump_variance=item.first_component,
+                continuous_variance=item.second_component,
+                prior_same_phase=history,
+                history_observed_until=history[-1].target_at if history else None,
+                trading_gap=False,
+                policy=policy,
+            )
+            result.append(
+                (
+                    feature,
+                    variance_uplift_outcome(
+                        feature,
+                        target_at=item.target_at,
+                        actual_future_variance=item.future_variance,
+                    ),
+                )
+            )
+        for item in day_items:
+            if item.future_variance is not None:
+                histories[(item.ticker, item.bucket)].append(
+                    JumpVarianceContrastHistoryPoint(
+                        jump_variance=item.first_component,
+                        continuous_variance=item.second_component,
+                        future_variance=item.future_variance,
+                        target_at=item.target_at,
+                    )
                 )
     return result
 

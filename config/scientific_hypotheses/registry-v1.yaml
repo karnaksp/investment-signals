@@ -969,6 +969,72 @@ hypotheses:
       data_split_policy: existing 180-day cache is development-only; primary holdout starts strictly after sealed_at with a 1800-second embargo
       multiple_testing_policy: Benjamini-Hochberg within volatility-risk research at q<=0.05; Holm across future primary release tests
 
+  - hypothesis_id: h16-negative-semivariance-future-risk
+    version: "2.0.0"
+    title: Отрицательная полуизменчивость против положительной того же масштаба
+    origin: research_extension
+    source_ids: [patton-sheppard-2015]
+    testable_statement: В завершённом 30-минутном окне отрицательная полуизменчивость, доминирующая над положительной при высокой общей изменчивости, предшествует большей изменчивости следующих 30 минут, чем прошлые положительно-доминирующие окна той же фазы и сопоставимого масштаба.
+    economic_mechanism: Отрицательная и положительная полуизменчивость сравниваются при одинаковом масштабе шока, чтобы отделить асимметрию реакции риска от простой зависимости будущей изменчивости от текущей.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [completed_contiguous_30m_return_window, downside_semivariance > upside_semivariance, total_variance_past_same_phase_percentile >= 0.90, at_least_5_scale_matched_positive_controls]
+    expected_direction: volatility_increase
+    horizon_seconds: [1800]
+    abstention_conditions: [fewer_than_40_prior_phase_windows, fewer_than_5_scale_matched_positive_controls, zero_realized_variance, incomplete_or_non_contiguous_window, outcome_crosses_session_break, future_prices_unavailable]
+    falsification_criterion: Будущая изменчивость после отрицательно-доминирующих окон не превосходит прошлый положительный контроль сопоставимого масштаба на независимой выборке.
+    original_market_result: Исходная работа обнаружила более сильную связь отрицательной полуизменчивости с будущим риском; сравнение с положительной полуизменчивостью того же масштаба является причинно более строгой версией для Московской биржи.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h16-v2
+      hypothesis_id: h16-negative-semivariance-future-risk
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-24T00:00:00+03:00"
+      expected_direction: volatility_increase
+      feature_definitions: [negative and positive realized semivariance use squared signed log returns from a completed prior 30-minute window, the total-variance threshold uses exactly 40 completed prior same-phase trading days, the baseline is the median future variance of prior positive-dominated windows whose total variance is within 25 percent of the current scale]
+      thresholds: {feature_window_minutes: 30, outcome_window_minutes: 30, prior_phase_days: 40, total_variance_percentile_min: 0.90, scale_tolerance: 0.25, minimum_scale_matched_controls: 5}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [1800]
+      success_criterion: Future normalized realized-variance lift over the scale-matched positive-semivariance baseline has a positive daily-bootstrap 95% lower bound on an independent holdout.
+      abstention_conditions: [fewer_than_40_prior_phase_windows, fewer_than_5_scale_matched_positive_controls, zero_realized_variance, incomplete_or_non_contiguous_window, outcome_crosses_session_break, future_prices_unavailable]
+      cost_model_version: "not-applicable-nondirectional-v1"
+      data_split_policy: expanding chronological trading days; every threshold and control outcome must mature strictly before the new observation
+      multiple_testing_policy: Benjamini-Hochberg within volatility-risk research at q<=0.05; Holm across future primary release tests
+
+  - hypothesis_id: h17-volatility-jump-persistence
+    version: "2.0.0"
+    title: Скачковая составляющая против обычной изменчивости того же масштаба
+    origin: research_extension
+    source_ids: [corsi-pirino-reno-2010]
+    testable_statement: Скачково-доминирующее завершённое 30-минутное окно при высокой общей изменчивости предшествует большей изменчивости следующих 30 минут, чем прошлые непрерывно-доминирующие окна той же фазы и сопоставимого масштаба.
+    economic_mechanism: Сопоставление по общей изменчивости отделяет устойчивость информационного скачка от обычной кластеризации изменчивости.
+    market_phase: any_liquid_session_phase
+    trigger_conditions: [completed_contiguous_30m_return_window, jump_variance > continuous_bipower_variance, total_variance_past_same_phase_percentile >= 0.95, at_least_5_scale_matched_continuous_controls]
+    expected_direction: volatility_increase
+    horizon_seconds: [1800]
+    abstention_conditions: [fewer_than_60_prior_phase_windows, fewer_than_5_scale_matched_continuous_controls, zero_realized_variance, incomplete_or_non_contiguous_window, bipower_variation_unavailable, outcome_crosses_session_break, future_prices_unavailable]
+    falsification_criterion: Будущая изменчивость после скачково-доминирующих окон не превосходит прошлый непрерывный контроль сопоставимого масштаба на независимой выборке.
+    original_market_result: Исходная работа показала пользу разделения скачковой и непрерывной составляющих; фазовый контроль сопоставимого масштаба является новой причинной версией для Московской биржи.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h17-v2
+      hypothesis_id: h17-volatility-jump-persistence
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-24T00:00:00+03:00"
+      expected_direction: volatility_increase
+      feature_definitions: [realized variance and bipower variation use only the completed prior 30-minute window, jump variance is the non-negative difference after capping continuous variance at realized variance, the total-variance threshold uses exactly 60 completed prior same-phase trading days, the baseline is the median future variance of prior continuous-dominated windows within 25 percent of the current scale]
+      thresholds: {feature_window_minutes: 30, outcome_window_minutes: 30, prior_phase_days: 60, total_variance_percentile_min: 0.95, scale_tolerance: 0.25, minimum_scale_matched_controls: 5}
+      market_phase: any_liquid_session_phase
+      horizon_seconds: [1800]
+      success_criterion: Future normalized realized-variance lift over the scale-matched continuous-variance baseline has a positive daily-bootstrap 95% lower bound on an independent holdout.
+      abstention_conditions: [fewer_than_60_prior_phase_windows, fewer_than_5_scale_matched_continuous_controls, zero_realized_variance, incomplete_or_non_contiguous_window, bipower_variation_unavailable, outcome_crosses_session_break, future_prices_unavailable]
+      cost_model_version: "not-applicable-nondirectional-v1"
+      data_split_policy: expanding chronological trading days; every threshold and control outcome must mature strictly before the new observation
+      multiple_testing_policy: Benjamini-Hochberg within volatility-risk research at q<=0.05; Holm across future primary release tests
+
   - hypothesis_id: h8-best-queue-imbalance
     version: "1.0.0"
     title: Дисбаланс лучших очередей стакана

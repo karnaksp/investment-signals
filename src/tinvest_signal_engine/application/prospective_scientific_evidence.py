@@ -221,6 +221,17 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
             "volatility_increase",
         )
     ),
+    ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
+            "h16-negative-semivariance-future-risk",
+            ProspectiveClaimFamily.ACTIVITY,
+            ProspectiveEffectUnit.VARIANCE_UPLIFT_RATIO_X_10000,
+            "prior_phase_negative_vs_scale_matched_positive_semivariance",
+            TargetMetric.FUTURE_VARIANCE_UPLIFT,
+            "volatility_increase_without_price_direction",
+        )
+    ),
     ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: (
         ProspectiveEvidenceDefinition(
             ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
@@ -230,6 +241,17 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
             "independent_holdout_matched_controls",
             TargetMetric.FUTURE_VARIANCE_UPLIFT,
             "volatility_increase",
+        )
+    ),
+    ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2,
+            "h17-volatility-jump-persistence",
+            ProspectiveClaimFamily.ACTIVITY,
+            ProspectiveEffectUnit.VARIANCE_UPLIFT_RATIO_X_10000,
+            "prior_phase_jump_vs_scale_matched_continuous_variance",
+            TargetMetric.FUTURE_VARIANCE_UPLIFT,
+            "volatility_increase_without_price_direction",
         )
     ),
 }
@@ -244,7 +266,9 @@ BOUNDED_CONTROL_REUSE_HYPOTHESES = frozenset(
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+        ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2,
     }
 )
 BOUNDED_CONTROL_REUSE_LIMIT = 5
@@ -839,7 +863,9 @@ def _volatility_proxy(feature: ProspectiveFeature) -> float:
     if feature.hypothesis in {
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+        ProspectiveHypothesis.VOLATILITY_JUMP_CONTRAST_V2,
     }:
         return feature.value("baseline_future_variance")
     return 0.0

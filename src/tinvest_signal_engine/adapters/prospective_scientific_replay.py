@@ -602,7 +602,10 @@ def _horizons(
         return report.policy.pair_horizons_seconds
     if hypothesis is ProspectiveHypothesis.HAR_VOLATILITY_V2:
         return (report.policy.har_horizon_seconds,)
-    if hypothesis is ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK:
+    if hypothesis in {
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
+        ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_CONTRAST_V2,
+    }:
         return (report.policy.semivariance_horizon_seconds,)
     return (report.policy.jump_variance_horizon_seconds,)
 
