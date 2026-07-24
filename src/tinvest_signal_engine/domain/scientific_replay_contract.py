@@ -171,7 +171,19 @@ SCIENTIFIC_REPLAY_CONTRACT_V1 = (
         "activity", "variance_uplift_ratio_x_10000", "volatility_only",
     ),
     ScientificReplayDefinition(
+        "H16V2", "h16-negative-semivariance-future-risk", "2.0.0",
+        "volatility_increase", "any_liquid_session_phase", (1800,),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "variance_uplift_ratio_x_10000", "volatility_only",
+    ),
+    ScientificReplayDefinition(
         "H17", "h17-volatility-jump-persistence", "1.0.0",
+        "volatility_increase", "any_liquid_session_phase", (1800,),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+        "activity", "variance_uplift_ratio_x_10000", "volatility_only",
+    ),
+    ScientificReplayDefinition(
+        "H17V2", "h17-volatility-jump-persistence", "2.0.0",
         "volatility_increase", "any_liquid_session_phase", (1800,),
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
         "activity", "variance_uplift_ratio_x_10000", "volatility_only",

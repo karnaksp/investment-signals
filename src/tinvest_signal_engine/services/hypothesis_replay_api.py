@@ -137,7 +137,9 @@ PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
         "H12V2",
         "H15V2",
         "H16",
+        "H16V2",
         "H17",
+        "H17V2",
     }
 )
 COMBINATION_SOURCE_HYPOTHESES = (
