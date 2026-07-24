@@ -126,7 +126,19 @@ ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
 R2_EXTENSION_HYPOTHESES = frozenset({"H10", "H11"})
 SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H15", "H7V2"})
 PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
-    {"H3V2", "H4V2", "H3V3", "H4V3", "H7V3", "H12", "H15V2", "H16", "H17"}
+    {
+        "H3V2",
+        "H4V2",
+        "H3V3",
+        "H4V3",
+        "H7V3",
+        "H11V2",
+        "H12",
+        "H12V2",
+        "H15V2",
+        "H16",
+        "H17",
+    }
 )
 COMBINATION_SOURCE_HYPOTHESES = (
     ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,

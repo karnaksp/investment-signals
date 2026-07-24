@@ -168,6 +168,17 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
             "same_as_opening_basket",
         )
     ),
+    ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
+            "h11-residual-move-reversion",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls_multi_horizon",
+            TargetMetric.FORWARD_RETURN,
+            "idiosyncratic_residual_reversion",
+        )
+    ),
     ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: (
         ProspectiveEvidenceDefinition(
             ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
@@ -177,6 +188,17 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
             "independent_holdout_matched_controls_multi_horizon",
             TargetMetric.FORWARD_RETURN,
             "pair_residual_reversion",
+        )
+    ),
+    ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2: (
+        ProspectiveEvidenceDefinition(
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
+            "h12-pair-residual-reversion",
+            ProspectiveClaimFamily.DIRECTIONAL,
+            ProspectiveEffectUnit.BASIS_POINTS,
+            "independent_holdout_matched_controls_multi_horizon",
+            TargetMetric.FORWARD_RETURN,
+            "rolling_pair_residual_reversion",
         )
     ),
     ProspectiveHypothesis.HAR_VOLATILITY_V2: ProspectiveEvidenceDefinition(
@@ -218,7 +240,9 @@ BOUNDED_CONTROL_REUSE_HYPOTHESES = frozenset(
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
     }
@@ -704,7 +728,9 @@ def _effect_value(
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
         ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
+        ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
     }:
         forward = outcome.metric("forward_return").value
         return feature.expected_direction * forward - round_trip_cost_bps

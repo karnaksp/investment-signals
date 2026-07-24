@@ -425,9 +425,7 @@ def test_live_clickhouse_store_finds_existing_ids_in_one_bounded_query(
     assert "LIMIT 64" in query
     assert "max_rows_to_read = 500000" in query
     parameters = parse_qs(urlparse(captured[0][0].full_url).query)
-    assert parameters["param_observation_ids"] == [
-        f"['{observation.observation_id}']"
-    ]
+    assert parameters["param_observation_ids"] == [f"['{observation.observation_id}']"]
 
 
 def test_live_clickhouse_store_rejects_conflicting_physical_payloads(
@@ -450,9 +448,7 @@ def test_live_clickhouse_store_rejects_conflicting_physical_payloads(
     )
 
     with pytest.raises(ProspectiveEvidenceConflict, match="conflicting physical"):
-        _clickhouse_store().existing_observation_ids(
-            (observation.observation_id,)
-        )
+        _clickhouse_store().existing_observation_ids((observation.observation_id,))
 
 
 def test_live_clickhouse_store_persists_outcome_with_observation_lineage(
@@ -521,9 +517,9 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_eight() ->
     assert "max_execution_time = 30" in sql
     assert "timeout_before_checking_execution_speed = 0" in sql
     assert "FORMAT JSONCompactEachRow" in sql
-    assert parameters["lookback_start"] == (
-        RECORDED_AT - timedelta(days=98)
-    ).strftime("%Y-%m-%d %H:%M:%S.%f")
+    assert parameters["lookback_start"] == (RECORDED_AT - timedelta(days=98)).strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
     assert parameters["lookback_start"] < parameters["as_of"]
     assert parameters["instrument_id"] == "SBER_TQBR"
     store = InMemoryProspectiveLiveShadowStore()
@@ -708,7 +704,9 @@ def test_policy_seals_sufficient_history_for_every_supported_hypothesis() -> Non
         ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: 20,
         ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: 1,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: 40,
+        ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2: 20,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: 2,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2: 40,
         ProspectiveHypothesis.HAR_VOLATILITY_V2: 56,
         ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: 40,
         ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: 60,
@@ -727,15 +725,18 @@ def test_history_query_span_follows_policy_instead_of_fixed_snapshot_age() -> No
 def test_compact_candle_decoder_enforces_byte_row_and_shape_bounds() -> None:
     valid = json.dumps([None] * len(_CANDLE_COLUMNS)).encode() + b"\n"
 
-    assert len(
-        tuple(
-            _compact_json_each_row(
-                valid,
-                max_payload_bytes=len(valid),
-                max_rows=1,
+    assert (
+        len(
+            tuple(
+                _compact_json_each_row(
+                    valid,
+                    max_payload_bytes=len(valid),
+                    max_rows=1,
+                )
             )
         )
-    ) == 1
+        == 1
+    )
     with pytest.raises(ValueError, match="byte limit"):
         tuple(
             _compact_json_each_row(

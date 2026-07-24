@@ -441,7 +441,9 @@ def _evidence_row(
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
             ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
             ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
+            ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
             ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
         },
         "sample_count": bundle.matched_events,
         "trading_days": bundle.trading_days,
@@ -591,7 +593,12 @@ def _horizons(
         return (report.policy.phase_recurrence_horizon_seconds,)
     if hypothesis is ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION:
         return (report.policy.open_close_horizon_seconds,)
-    if hypothesis is ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION:
+    if hypothesis is ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2:
+        return report.policy.market_residual_horizons_seconds
+    if hypothesis in {
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
+    }:
         return report.policy.pair_horizons_seconds
     if hypothesis is ProspectiveHypothesis.HAR_VOLATILITY_V2:
         return (report.policy.har_horizon_seconds,)

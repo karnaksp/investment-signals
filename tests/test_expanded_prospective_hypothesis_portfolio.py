@@ -60,12 +60,10 @@ def _candle(
     )
 
 
-def test_portfolio_has_thirteen_exactly_versioned_hypotheses() -> None:
-    assert len(tuple(ProspectiveHypothesis)) == 13
+def test_portfolio_has_fifteen_exactly_versioned_hypotheses() -> None:
+    assert len(tuple(ProspectiveHypothesis)) == 15
     versions = {item.value: item.version for item in ProspectiveHypothesis}
-    assert {
-        key: versions[key] for key in ("H1", "H2", "H5", "H6", "H12")
-    } == {
+    assert {key: versions[key] for key in ("H1", "H2", "H5", "H6", "H12")} == {
         "H1": "1.0.0",
         "H2": "1.0.0",
         "H5": "1.0.0",
@@ -74,6 +72,8 @@ def test_portfolio_has_thirteen_exactly_versioned_hypotheses() -> None:
     }
     assert versions["H3V3"] == "3.0.0"
     assert versions["H4V3"] == "3.0.0"
+    assert versions["H11V2"] == "2.0.0"
+    assert versions["H12V2"] == "2.0.0"
 
 
 def test_morning_reversion_and_continuation_are_mutually_exclusive() -> None:
@@ -167,7 +167,9 @@ def test_pair_model_must_be_frozen_strictly_before_observation() -> None:
         )
 
 
-def test_same_phase_replay_is_deterministic_and_future_labels_do_not_change_features() -> None:
+def test_same_phase_replay_is_deterministic_and_future_labels_do_not_change_features() -> (
+    None
+):
     days = tuple(date(2026, 7, 1) + timedelta(days=index) for index in range(10))
     candles: list[HistoricalCandle] = []
     for day_index, trading_day in enumerate(days):
@@ -210,14 +212,22 @@ def test_same_phase_replay_is_deterministic_and_future_labels_do_not_change_feat
     second = build_prospective_scientific_research(
         changed, dataset_fingerprint="sha256:" + "b" * 64, request=request
     )
-    first_feature = next(item for item in first.features if item.trading_day == days[-1])
-    second_feature = next(item for item in second.features if item.trading_day == days[-1])
+    first_feature = next(
+        item for item in first.features if item.trading_day == days[-1]
+    )
+    second_feature = next(
+        item for item in second.features if item.trading_day == days[-1]
+    )
     assert first_feature == second_feature
     first_outcome = next(
-        item for item in first.outcomes if item.observation_id == first_feature.observation_id
+        item
+        for item in first.outcomes
+        if item.observation_id == first_feature.observation_id
     )
     second_outcome = next(
-        item for item in second.outcomes if item.observation_id == second_feature.observation_id
+        item
+        for item in second.outcomes
+        if item.observation_id == second_feature.observation_id
     )
     assert first_outcome != second_outcome
 
@@ -356,9 +366,7 @@ def test_open_close_basket_uses_opening_data_only_at_preclose_decision() -> None
         candles,
         dataset_fingerprint="sha256:" + "e" * 64,
         request=ProspectiveScientificRequest(
-            selected_hypotheses=(
-                ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,
-            ),
+            selected_hypotheses=(ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION,),
             market_universe=("SBER", "GAZP"),
         ),
     )
@@ -468,8 +476,7 @@ def test_dense_instrument_local_replay_spools_with_exact_evidence_equivalence(
     tmp_path: Path,
 ) -> None:
     partitions = tuple(
-        _full_session_partition(ticker)
-        for ticker in ("SBER", "GAZP", "LKOH")
+        _full_session_partition(ticker) for ticker in ("SBER", "GAZP", "LKOH")
     )
     request = ProspectiveScientificRequest(selected_hypotheses=(hypothesis,))
     dataset_fingerprint = "sha256:" + "8" * 64

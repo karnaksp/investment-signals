@@ -738,6 +738,39 @@ hypotheses:
       data_split_policy: 60/20/20 chronological trading days with an embargo of at least 1800 seconds
       multiple_testing_policy: Benjamini-Hochberg within residual-reversion family at q<=0.05 for research; Holm on future primary release tests
 
+  - hypothesis_id: h11-residual-move-reversion
+    version: "2.0.0"
+    title: Причинный возврат остаточного движения относительно фиксированной корзины
+    origin: research_extension
+    source_ids: [da-liu-schaumburg-2014, jegadeesh-titman-1995]
+    testable_statement: Пятиминутный остаток доходности акции после вычитания движения фиксированной рыночной корзины с бетой, обученной только на двадцати завершённых прошлых торговых днях, разворачивается на горизонтах 15 и 30 минут после превышения замороженного 99-го процентиля.
+    economic_mechanism: Необъяснённое рынком краткосрочное давление ликвидности может поглощаться поставщиками ликвидности, тогда как общий рыночный поток не должен ошибочно считаться индивидуальным сигналом.
+    market_phase: main_session
+    trigger_conditions: [fixed_leave_one_out_market_basket, completed_contiguous_return_5m, absolute_residual_percentile >= 0.99, beta_fitted_on_previous_20_complete_days]
+    expected_direction: idiosyncratic_residual_reversion
+    horizon_seconds: [900, 1800]
+    abstention_conditions: [market_model_unavailable, basket_coverage_below_80_percent, trading_gap, direction_unavailable, market_wide_move_same_direction]
+    falsification_criterion: Нижняя 95-процентная граница прироста результата после издержек к сопоставимому контролю не выше нуля на независимой выборке либо эффект неустойчив по инструментам и временным блокам.
+    original_market_result: На других рынках остаточные краткосрочные движения демонстрировали разворот; фиксированная корзина Московской биржи и ежедневное причинное переобучение являются новой локальной версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h11-v2
+      hypothesis_id: h11-residual-move-reversion
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-24T00:00:00+03:00"
+      expected_direction: idiosyncratic_residual_reversion
+      feature_definitions: [fixed market basket excludes the target ticker, five-minute returns use completed contiguous candles only, beta and the absolute residual threshold use only the preceding 20 complete trading days, intraday parameters are frozen before the first observation of the day]
+      thresholds: {absolute_residual_return_5m_percentile_min: 0.99, beta_lookback_trading_days: 20, basket_coverage_min: 0.80, primary_horizon_seconds: 900}
+      market_phase: main_session
+      horizon_seconds: [900, 1800]
+      success_criterion: At least 300 eligible observations over 30 trading days and 5 instruments; cost-adjusted lift to five same-phase controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, and stable sign in 4 of 5 chronological blocks.
+      abstention_conditions: [market_model_unavailable, basket_coverage_below_80_percent, trading_gap, direction_unavailable, market_wide_move_same_direction]
+      cost_model_version: "1.0.0"
+      data_split_policy: expanding daily walk-forward; every parameter boundary strictly precedes the evaluation day; outcome embargo equals 1800 seconds
+      multiple_testing_policy: Benjamini-Hochberg within residual-reversion research variants at q<=0.05; Holm across future primary release claims
+
   - hypothesis_id: h12-pair-residual-reversion
     version: "1.0.0"
     title: Возврат остаточного отклонения устойчивой пары
@@ -769,6 +802,39 @@ hypotheses:
       abstention_conditions: [pair_model_unavailable, pair_relationship_unstable, corporate_action_suspected, insufficient_liquidity, trading_gap]
       cost_model_version: "1.0.0"
       data_split_policy: 60/20/20 chronological trading days; pair candidates and model coefficients are frozen on the first 60 percent; outcome embargo equals the longest 3600-second horizon
+      multiple_testing_policy: Benjamini-Hochberg within pair and horizon research variants at q<=0.05; Holm across future primary release claims
+
+  - hypothesis_id: h12-pair-residual-reversion
+    version: "2.0.0"
+    title: Причинный возврат остатка устойчивой пары с ежедневным переобучением
+    origin: research_extension
+    source_ids: [gatev-goetzmann-rouwenhorst-2006]
+    testable_statement: Для заранее заданной пары ликвидных акций остаток логарифмической цены, рассчитанный по коэффициентам последних сорока завершённых торговых дней, возвращается к прошлой норме после отклонения не менее двух стандартных отклонений.
+    economic_mechanism: Общие факторы стоимости близких ценных бумаг создают устойчивую связь, а временный локальный дисбаланс ликвидности одной бумаги способен вызвать обратимое относительное отклонение.
+    market_phase: main_liquid_session
+    trigger_conditions: [pair_is_in_sealed_candidate_list, rolling_training_correlation >= 0.70, absolute_pair_residual_z >= 2.0, coefficients_fitted_on_previous_40_complete_days]
+    expected_direction: rolling_pair_residual_reversion
+    horizon_seconds: [900, 1800, 3600]
+    abstention_conditions: [pair_model_unavailable, pair_relationship_unstable, corporate_action_suspected, insufficient_liquidity, trading_gap]
+    falsification_criterion: Прирост результата после издержек к сопоставимому контролю не имеет положительной нижней 95-процентной границы либо связь пары нестабильна на независимых днях.
+    original_market_result: Классическая торговля парами показала возврат расхождений на рынке США; ежедневное причинное внутридневное переобучение на Московской бирже является новой проверяемой версией.
+    evidence_level: not_tested
+    lifecycle: pre_registered
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h12-v2
+      hypothesis_id: h12-pair-residual-reversion
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-24T00:00:00+03:00"
+      expected_direction: rolling_pair_residual_reversion
+      feature_definitions: [candidate pairs are fixed before replay, logarithmic regression coefficients residual mean and residual standard deviation use only the preceding 40 complete trading days, one frozen model is reused throughout the evaluation day, outcomes start strictly after the observation]
+      thresholds: {absolute_residual_z_min: 2.0, training_correlation_min: 0.70, minimum_training_points: 500, rolling_training_days: 40, primary_horizon_seconds: 1800}
+      market_phase: main_liquid_session
+      horizon_seconds: [900, 1800, 3600]
+      success_criterion: At least 300 eligible observations over 30 trading days; cost-adjusted lift to five same-pair same-phase controls has a positive daily-bootstrap 95% lower bound, Holm-adjusted p<=0.05, and stable sign in 4 of 5 chronological blocks.
+      abstention_conditions: [pair_model_unavailable, pair_relationship_unstable, corporate_action_suspected, insufficient_liquidity, trading_gap]
+      cost_model_version: "1.0.0"
+      data_split_policy: rolling daily walk-forward over 40 completed prior trading days; outcome embargo equals the longest 3600-second horizon
       multiple_testing_policy: Benjamini-Hochberg within pair and horizon research variants at q<=0.05; Holm across future primary release claims
 
   - hypothesis_id: h15-multi-window-volatility-forecast

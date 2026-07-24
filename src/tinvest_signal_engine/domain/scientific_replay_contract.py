@@ -117,8 +117,19 @@ SCIENTIFIC_REPLAY_CONTRACT_V1 = (
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
     ),
     ScientificReplayDefinition(
+        "H11V2", "h11-residual-move-reversion", "2.0.0",
+        "idiosyncratic_residual_reversion", "main_session", (900, 1800),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
         "H12", "h12-pair-residual-reversion", "1.0.0",
         "pair_residual_reversion", "main_liquid_session", (900, 1800, 3600),
+        ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
+    ),
+    ScientificReplayDefinition(
+        "H12V2", "h12-pair-residual-reversion", "2.0.0",
+        "rolling_pair_residual_reversion", "main_liquid_session",
+        (900, 1800, 3600),
         ReplayDataRequirement.HISTORICAL_CANDLES, _CANDLE_STATES,
     ),
     ScientificReplayDefinition(

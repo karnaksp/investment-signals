@@ -19,6 +19,7 @@ from tinvest_signal_engine.domain.hypothesis_evidence import (
     chronological_split_60_20_20,
 )
 from tinvest_signal_engine.domain.prospective_scientific_models import (
+    FrozenMarketResidualParameters,
     FrozenPairParameters,
     HarV2Parameters,
     HarV2TrainingPoint,
@@ -34,9 +35,11 @@ from tinvest_signal_engine.domain.prospective_scientific_models import (
     har_v2_outcome,
     jump_regime_features,
     jump_regime_v3_features,
+    market_residual_reversion_v2_feature,
     morning_regime_features,
     open_close_basket_feature,
     pair_residual_reversion_feature,
+    pair_residual_reversion_v2_feature,
     phase_recurrence_feature,
     relative_volume_volatility_feature,
     variance_uplift_outcome,
@@ -104,9 +107,9 @@ INDEPENDENT_PARTITIONED_HYPOTHESES = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveScientificRequest:
-    selected_hypotheses: tuple[
-        ProspectiveHypothesis, ...
-    ] = SEALED_PROSPECTIVE_HYPOTHESES_V1
+    selected_hypotheses: tuple[ProspectiveHypothesis, ...] = (
+        SEALED_PROSPECTIVE_HYPOTHESES_V1
+    )
     policy: ProspectiveScientificPolicy = ProspectiveScientificPolicy()
     market_universe: tuple[str, ...] = DEFAULT_FIXED_MARKET_UNIVERSE
     pair_candidates: tuple[tuple[str, str], ...] = DEFAULT_PAIR_CANDIDATES
@@ -122,7 +125,9 @@ class ProspectiveScientificRequest:
             raise ValueError("market universe tickers must not be empty")
         normalized_pairs = tuple(tuple(pair) for pair in self.pair_candidates)
         if any(
-            len(pair) != 2 or not pair[0].strip() or not pair[1].strip()
+            len(pair) != 2
+            or not pair[0].strip()
+            or not pair[1].strip()
             or pair[0] == pair[1]
             for pair in normalized_pairs
         ):
@@ -259,9 +264,7 @@ def prospective_report_fingerprint_from_rows(
     digest = sha256()
 
     def emit(value: object) -> None:
-        digest.update(
-            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-        )
+        digest.update(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
     digest.update(b'{"dataset_fingerprint":')
     emit(dataset_fingerprint)
@@ -368,8 +371,14 @@ def build_prospective_scientific_research(
     if ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE in selected:
         rows.extend(_phase_recurrence_rows(ordered, request.policy))
     if ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION in selected:
+        rows.extend(_open_close_rows(ordered, request.policy, request.market_universe))
+    if ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2 in selected:
         rows.extend(
-            _open_close_rows(ordered, request.policy, request.market_universe)
+            _market_residual_v2_rows(
+                ordered,
+                request.policy,
+                request.market_universe,
+            )
         )
     if ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK in selected:
         rows.extend(_semivariance_rows(ordered, request.policy))
@@ -387,6 +396,14 @@ def build_prospective_scientific_research(
             request.policy,
             request.pair_candidates,
         )
+        rows.extend(pair_rows)
+    if ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2 in selected:
+        pair_rows, rolling_parameters = _pair_reversion_v2_rows(
+            ordered,
+            request.policy,
+            request.pair_candidates,
+        )
+        pair_parameters += rolling_parameters
         rows.extend(pair_rows)
 
     rows.sort(
@@ -473,9 +490,7 @@ def build_partitioned_prospective_scientific_research(
                     tuple(
                         sorted(
                             set(request.policy.morning_reversion_horizons_seconds)
-                            | set(
-                                request.policy.morning_continuation_horizons_seconds
-                            )
+                            | set(request.policy.morning_continuation_horizons_seconds)
                         )
                     ),
                 )
@@ -486,9 +501,7 @@ def build_partitioned_prospective_scientific_research(
             ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
             ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         }:
-            feature_outcomes.extend(
-                _jump_rows(by_ticker, selected, request.policy)
-            )
+            feature_outcomes.extend(_jump_rows(by_ticker, selected, request.policy))
         elif hypothesis is ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3:
             feature_outcomes.extend(_relative_volume_rows(by_ticker, request.policy))
         elif hypothesis is ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE:
@@ -505,7 +518,16 @@ def build_partitioned_prospective_scientific_research(
         ):
             retained[ticker] = rows
         elif (
-            hypothesis is ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION
+            hypothesis is ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2
+            and ticker in universe
+        ):
+            retained[ticker] = rows
+        elif (
+            hypothesis
+            in {
+                ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+                ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
+            }
             and ticker in pair_tickers
         ):
             retained[ticker] = rows
@@ -528,10 +550,25 @@ def build_partitioned_prospective_scientific_research(
         feature_outcomes.extend(
             _open_close_rows(retained, request.policy, request.market_universe)
         )
+    if hypothesis is ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2:
+        feature_outcomes.extend(
+            _market_residual_v2_rows(
+                retained,
+                request.policy,
+                request.market_universe,
+            )
+        )
     if hypothesis is ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION:
         pair_rows, pair_parameters = _pair_reversion_rows(
             retained,
             split,
+            request.policy,
+            request.pair_candidates,
+        )
+        feature_outcomes.extend(pair_rows)
+    if hypothesis is ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2:
+        pair_rows, pair_parameters = _pair_reversion_v2_rows(
+            retained,
             request.policy,
             request.pair_candidates,
         )
@@ -636,8 +673,7 @@ def _build_morning_candidates(
                     trading_day=trading_day,
                     observed_at=opening_candle.at,
                     feature_max_observed_at=_observed_at(morning[-1]),
-                    deviation_bps=(morning[-1].close / previous_close - 1.0)
-                    * 10_000.0,
+                    deviation_bps=(morning[-1].close / previous_close - 1.0) * 10_000.0,
                     cumulative_volume=sum(item.volume for item in morning),
                     range_bps=(high / low - 1.0) * 10_000.0,
                     trading_gap=len(morning) != 170 or not _continuous(morning),
@@ -679,9 +715,9 @@ def _evaluate_morning_candidates(
             len(member_returns) / len(universe) if universe else 0.0,
         )
 
-    histories: defaultdict[
-        str, deque[tuple[float, float, float, datetime]]
-    ] = defaultdict(lambda: deque(maxlen=policy.morning_history_days))
+    histories: defaultdict[str, deque[tuple[float, float, float, datetime]]] = (
+        defaultdict(lambda: deque(maxlen=policy.morning_history_days))
+    )
     result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
     all_horizons = tuple(
         sorted(
@@ -742,8 +778,7 @@ def _evaluate_morning_candidates(
                             feature,
                             directional_outcome(
                                 feature,
-                                target_at=item.observed_at
-                                + timedelta(seconds=horizon),
+                                target_at=item.observed_at + timedelta(seconds=horizon),
                                 forward_return_bps=forward,
                                 round_trip_cost_bps=policy.round_trip_cost_bps,
                             ),
@@ -796,9 +831,9 @@ def _phase_recurrence_rows(
                     raw_return_bps=_forward_return_from_open(rows, index, minutes),
                 )
             )
-    histories: defaultdict[
-        tuple[str, int], deque[tuple[float, datetime]]
-    ] = defaultdict(lambda: deque(maxlen=policy.phase_recurrence_history_days))
+    histories: defaultdict[tuple[str, int], deque[tuple[float, datetime]]] = (
+        defaultdict(lambda: deque(maxlen=policy.phase_recurrence_history_days))
+    )
     result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
     for trading_day, day_items in _items_by_day(candidates):
         for item in day_items:
@@ -873,9 +908,7 @@ def _open_close_rows(
             )
             opening_cutoffs.append(_observed_at(opening[-1]))
             closing_starts.append(closing[0].at)
-        coverage = (
-            complete_members / len(market_universe) if market_universe else 0.0
-        )
+        coverage = complete_members / len(market_universe) if market_universe else 0.0
         if not opening_cutoffs or not closing_starts:
             continue
         observed_at = max(closing_starts)
@@ -901,6 +934,277 @@ def _open_close_rows(
             )
         )
     return result
+
+
+def _market_residual_v2_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    policy: ProspectiveScientificPolicy,
+    market_universe: tuple[str, ...],
+) -> list[tuple[ProspectiveFeature, ProspectiveOutcome]]:
+    """Evaluate stock residuals against a fixed leave-one-out market basket.
+
+    Coefficients and residual thresholds are refitted once per trading day
+    using only the sealed preceding trading days.  The same frozen parameters
+    are then reused by every intraday observation for that stock and day.
+    """
+
+    universe = market_universe
+    target_tickers = tuple(ticker for ticker in market_universe if ticker in by_ticker)
+    indexed = {
+        ticker: {item.at: item for item in by_ticker.get(ticker, ())}
+        for ticker in universe
+    }
+    all_days = tuple(
+        sorted(
+            {
+                _trading_day(item.at)
+                for ticker in target_tickers
+                for item in by_ticker[ticker]
+            }
+        )
+    )
+    anchors = tuple(
+        sorted(
+            {
+                item.at
+                for ticker in target_tickers
+                for item in by_ticker[ticker]
+                if item.at.astimezone(MOSCOW).minute % 30 == 29
+                and _eligible(_observed_at(item))
+            }
+        )
+    )
+    anchors_by_day: defaultdict[date, list[datetime]] = defaultdict(list)
+    for at in anchors:
+        anchors_by_day[_trading_day(at)].append(at)
+
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    model_cache: dict[tuple[str, date], FrozenMarketResidualParameters | None] = {}
+    for ticker in target_tickers:
+        members = tuple(item for item in universe if item != ticker)
+        if not members:
+            continue
+        for trading_day in all_days:
+            prior_days = tuple(day for day in all_days if day < trading_day)[
+                -policy.market_residual_history_days :
+            ]
+            cache_key = (ticker, trading_day)
+            if cache_key not in model_cache:
+                model_cache[cache_key] = _fit_market_residual_parameters(
+                    ticker=ticker,
+                    members=members,
+                    indexed=indexed,
+                    training_anchors=tuple(
+                        at for day in prior_days for at in anchors_by_day.get(day, ())
+                    ),
+                    complete_prior_days=(
+                        len(prior_days) == policy.market_residual_history_days
+                    ),
+                    policy=policy,
+                )
+            parameters = model_cache[cache_key]
+            for at in anchors_by_day.get(trading_day, ()):
+                current = indexed[ticker].get(at)
+                if current is None:
+                    continue
+                stock_return = _window_return_ending(
+                    indexed[ticker],
+                    at,
+                    policy.market_residual_window_minutes,
+                )
+                basket_return, basket_coverage = _basket_window_return(
+                    indexed=indexed,
+                    members=members,
+                    at=at,
+                    minutes=policy.market_residual_window_minutes,
+                )
+                trading_gap = stock_return is None
+                safe_stock_return = stock_return if stock_return is not None else 0.0
+                safe_basket_return = basket_return if basket_return is not None else 0.0
+                for horizon in policy.market_residual_horizons_seconds:
+                    feature = market_residual_reversion_v2_feature(
+                        ticker=ticker,
+                        trading_day=trading_day,
+                        observed_at=_observed_at(current),
+                        stock_return_bps=safe_stock_return,
+                        basket_return_bps=safe_basket_return,
+                        basket_coverage=basket_coverage,
+                        parameters=parameters,
+                        trading_gap=trading_gap,
+                        policy=policy,
+                        horizon_seconds=horizon,
+                    )
+                    target_at = feature.observed_at + timedelta(seconds=horizon)
+                    forward: float | None = None
+                    stock_forward = _forward_return_after(
+                        indexed[ticker], at, horizon // 60
+                    )
+                    basket_forward, future_coverage = _basket_forward_return(
+                        indexed=indexed,
+                        members=members,
+                        at=at,
+                        minutes=horizon // 60,
+                    )
+                    if (
+                        parameters is not None
+                        and stock_forward is not None
+                        and basket_forward is not None
+                        and future_coverage
+                        >= policy.market_residual_basket_coverage_min
+                    ):
+                        forward = stock_forward - parameters.beta * basket_forward
+                    result.append(
+                        (
+                            feature,
+                            directional_outcome(
+                                feature,
+                                target_at=target_at,
+                                forward_return_bps=forward,
+                                round_trip_cost_bps=policy.round_trip_cost_bps,
+                            ),
+                        )
+                    )
+    return result
+
+
+def _fit_market_residual_parameters(
+    *,
+    ticker: str,
+    members: tuple[str, ...],
+    indexed: dict[str, dict[datetime, HistoricalCandle]],
+    training_anchors: tuple[datetime, ...],
+    complete_prior_days: bool,
+    policy: ProspectiveScientificPolicy,
+) -> FrozenMarketResidualParameters | None:
+    if not complete_prior_days:
+        return None
+    samples: list[tuple[float, float, datetime]] = []
+    for at in training_anchors:
+        stock_return = _window_return_ending(
+            indexed[ticker],
+            at,
+            policy.market_residual_window_minutes,
+        )
+        basket_return, coverage = _basket_window_return(
+            indexed=indexed,
+            members=members,
+            at=at,
+            minutes=policy.market_residual_window_minutes,
+        )
+        if (
+            stock_return is None
+            or basket_return is None
+            or coverage < policy.market_residual_basket_coverage_min
+        ):
+            continue
+        samples.append((stock_return, basket_return, _observed_at(indexed[ticker][at])))
+    if len(samples) < policy.market_residual_history_days:
+        return None
+    stock_values = tuple(item[0] for item in samples)
+    basket_values = tuple(item[1] for item in samples)
+    stock_mean = fmean(stock_values)
+    basket_mean = fmean(basket_values)
+    basket_variance = sum((value - basket_mean) ** 2 for value in basket_values)
+    if basket_variance <= 0.0:
+        return None
+    beta = (
+        sum(
+            (stock - stock_mean) * (basket - basket_mean)
+            for stock, basket in zip(stock_values, basket_values, strict=True)
+        )
+        / basket_variance
+    )
+    absolute_residuals = tuple(
+        abs(stock - beta * basket)
+        for stock, basket in zip(stock_values, basket_values, strict=True)
+    )
+    threshold = _quantile(absolute_residuals, policy.market_residual_percentile)
+    if threshold <= 0.0:
+        return None
+    return FrozenMarketResidualParameters(
+        ticker=ticker,
+        beta=beta,
+        absolute_residual_threshold_bps=threshold,
+        training_points=len(samples),
+        trained_until=max(item[2] for item in samples),
+        basket_members=members,
+    )
+
+
+def _window_return_ending(
+    indexed: dict[datetime, HistoricalCandle],
+    at: datetime,
+    minutes: int,
+) -> float | None:
+    expected = tuple(
+        at - timedelta(minutes=offset) for offset in range(minutes - 1, -1, -1)
+    )
+    rows = tuple(indexed.get(item) for item in expected)
+    if any(item is None for item in rows):
+        return None
+    candles = tuple(item for item in rows if item is not None)
+    if (
+        len(candles) != minutes
+        or not _continuous(candles)
+        or any(not _eligible(_observed_at(item)) for item in candles)
+    ):
+        return None
+    return (candles[-1].close / candles[0].open - 1.0) * 10_000.0
+
+
+def _forward_return_after(
+    indexed: dict[datetime, HistoricalCandle],
+    at: datetime,
+    minutes: int,
+) -> float | None:
+    current = indexed.get(at)
+    expected = tuple(at + timedelta(minutes=offset) for offset in range(1, minutes + 1))
+    rows = tuple(indexed.get(item) for item in expected)
+    if current is None or any(item is None for item in rows):
+        return None
+    candles = tuple(item for item in rows if item is not None)
+    if (
+        len(candles) != minutes
+        or not _continuous((current, *candles))
+        or _trading_day(current.at) != _trading_day(candles[-1].at)
+        or any(not _eligible(_observed_at(item)) for item in candles)
+    ):
+        return None
+    return (candles[-1].close / current.close - 1.0) * 10_000.0
+
+
+def _basket_window_return(
+    *,
+    indexed: dict[str, dict[datetime, HistoricalCandle]],
+    members: tuple[str, ...],
+    at: datetime,
+    minutes: int,
+) -> tuple[float | None, float]:
+    returns = tuple(
+        value
+        for member in members
+        if (value := _window_return_ending(indexed.get(member, {}), at, minutes))
+        is not None
+    )
+    coverage = len(returns) / len(members) if members else 0.0
+    return (fmean(returns) if returns else None, coverage)
+
+
+def _basket_forward_return(
+    *,
+    indexed: dict[str, dict[datetime, HistoricalCandle]],
+    members: tuple[str, ...],
+    at: datetime,
+    minutes: int,
+) -> tuple[float | None, float]:
+    returns = tuple(
+        value
+        for member in members
+        if (value := _forward_return_after(indexed.get(member, {}), at, minutes))
+        is not None
+    )
+    coverage = len(returns) / len(members) if members else 0.0
+    return (fmean(returns) if returns else None, coverage)
 
 
 def _pair_reversion_rows(
@@ -1004,6 +1308,118 @@ def _pair_reversion_rows(
                         ),
                     )
                 )
+    return result, tuple(fitted)
+
+
+def _pair_reversion_v2_rows(
+    by_ticker: dict[str, tuple[HistoricalCandle, ...]],
+    policy: ProspectiveScientificPolicy,
+    pair_candidates: tuple[tuple[str, str], ...],
+) -> tuple[
+    list[tuple[ProspectiveFeature, ProspectiveOutcome]],
+    tuple[FrozenPairParameters, ...],
+]:
+    """Refit each pair daily from a rolling window of completed prior days."""
+
+    result: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
+    fitted: list[FrozenPairParameters] = []
+    for left_ticker, right_ticker in pair_candidates:
+        left = {item.at: item for item in by_ticker.get(left_ticker, ())}
+        right = {item.at: item for item in by_ticker.get(right_ticker, ())}
+        shared = tuple(sorted(set(left) & set(right)))
+        anchors_by_day: defaultdict[date, list[datetime]] = defaultdict(list)
+        for at in shared:
+            if at.astimezone(MOSCOW).minute % 30 == 29 and _eligible(
+                _observed_at(left[at])
+            ):
+                anchors_by_day[_trading_day(at)].append(at)
+        trading_days = tuple(sorted(anchors_by_day))
+        positions = {at: index for index, at in enumerate(shared)}
+        for trading_day in trading_days:
+            prior_days = tuple(day for day in trading_days if day < trading_day)[
+                -policy.pair_history_days :
+            ]
+            training_at = tuple(
+                at for day in prior_days for at in anchors_by_day.get(day, ())
+            )
+            parameters = (
+                _fit_pair_parameters(
+                    left_ticker,
+                    right_ticker,
+                    left,
+                    right,
+                    training_at,
+                    policy,
+                )
+                if len(prior_days) == policy.pair_history_days
+                else None
+            )
+            if parameters is not None:
+                fitted.append(parameters)
+            for at in anchors_by_day[trading_day]:
+                index = positions[at]
+                previous_at = shared[index - 1] if index else None
+                current_left, current_right = left[at], right[at]
+                corporate_action = False
+                if previous_at is not None:
+                    corporate_action = (
+                        abs(current_left.close / left[previous_at].close - 1.0) >= 0.20
+                        or abs(current_right.close / right[previous_at].close - 1.0)
+                        >= 0.20
+                    )
+                observed_at = _observed_at(current_left)
+                for horizon in policy.pair_horizons_seconds:
+                    feature = pair_residual_reversion_v2_feature(
+                        left_ticker=left_ticker,
+                        right_ticker=right_ticker,
+                        trading_day=trading_day,
+                        observed_at=observed_at,
+                        left_price=current_left.close,
+                        right_price=current_right.close,
+                        parameters=parameters,
+                        corporate_action_suspected=corporate_action,
+                        liquid=(
+                            current_left.volume > 0.0 and current_right.volume > 0.0
+                        ),
+                        policy=policy,
+                        horizon_seconds=horizon,
+                    )
+                    target_at = observed_at + timedelta(seconds=horizon)
+                    future_left = left.get(target_at - timedelta(minutes=1))
+                    future_right = right.get(target_at - timedelta(minutes=1))
+                    forward: float | None = None
+                    expected_times = tuple(
+                        at + timedelta(minutes=minute)
+                        for minute in range(1, horizon // 60 + 1)
+                    )
+                    if (
+                        parameters is not None
+                        and future_left is not None
+                        and future_right is not None
+                        and _trading_day(future_left.at) == trading_day
+                        and all(
+                            expected_at in left and expected_at in right
+                            for expected_at in expected_times
+                        )
+                    ):
+                        current_spread = parameters.spread(
+                            current_left.close, current_right.close
+                        )
+                        future_spread = parameters.spread(
+                            future_left.close, future_right.close
+                        )
+                        forward = (future_spread - current_spread) * 10_000.0
+                    result.append(
+                        (
+                            feature,
+                            directional_outcome(
+                                feature,
+                                target_at=target_at,
+                                forward_return_bps=forward,
+                                round_trip_cost_bps=policy.round_trip_cost_bps,
+                            ),
+                        )
+                    )
     return result, tuple(fitted)
 
 
@@ -1465,8 +1881,7 @@ def _build_har_candidates(
                 trading_day=_trading_day(candle.at),
                 bucket=_clock_bucket(candle.at, 30),
                 observed_at=observed_at,
-                target_at=observed_at
-                + timedelta(seconds=policy.har_horizon_seconds),
+                target_at=observed_at + timedelta(seconds=policy.har_horizon_seconds),
                 short_variance=_realized_variance(window[-short:]),
                 medium_variance=_realized_variance(window[-medium:]),
                 long_variance=_realized_variance(window),
@@ -1711,6 +2126,19 @@ def _percentile_rank(values: Sequence[float], current: float) -> float:
     if not values:
         return 0.0
     return sum(value <= current for value in values) / len(values)
+
+
+def _quantile(values: Sequence[float], probability: float) -> float:
+    if not values:
+        raise ValueError("quantile requires observations")
+    if not 0.0 < probability < 1.0:
+        raise ValueError("quantile probability must be in (0, 1)")
+    ordered = tuple(sorted(values))
+    position = probability * (len(ordered) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
 
 
 def _log_returns(rows: Sequence[HistoricalCandle]) -> tuple[float, ...]:

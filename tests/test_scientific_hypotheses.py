@@ -165,7 +165,9 @@ def _evidence(
     )
 
 
-def _gate(previous: ScientificHypothesis | None = None) -> AssessScientificHypothesisAdmission:
+def _gate(
+    previous: ScientificHypothesis | None = None,
+) -> AssessScientificHypothesisAdmission:
     return AssessScientificHypothesisAdmission(
         sources=_Sources(_source()),
         applied_catalog=_Catalog(previous),
@@ -321,16 +323,24 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
     assert registry.schema_version == "1.2.0"
     assert len(registry.sources) == 14
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 22
-    assert sum(
-        item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
+    assert len(registry.hypotheses) == 24
+    assert (
+        sum(
+            item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
+            for item in registry.hypotheses
+        )
+        == 22
+    )
+    assert (
+        sum(
+            item.lifecycle is HypothesisLifecycle.SHADOW for item in registry.hypotheses
+        )
+        == 2
+    )
+    assert all(
+        item.preregistration and item.preregistration.sealed
         for item in registry.hypotheses
-    ) == 20
-    assert sum(
-        item.lifecycle is HypothesisLifecycle.SHADOW
-        for item in registry.hypotheses
-    ) == 2
-    assert all(item.preregistration and item.preregistration.sealed for item in registry.hypotheses)
+    )
     assert {
         item.preregistration.registration_id
         for item in registry.hypotheses
@@ -341,6 +351,8 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
         "prereg-h3-v3",
         "prereg-h4-v3",
         "prereg-h7-v3",
+        "prereg-h11-v2",
+        "prereg-h12-v2",
         "prereg-h15-v2",
         "prereg-h16-v1",
         "prereg-h17-v1",
@@ -431,7 +443,7 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["sources"] == 14
-    assert payload["hypotheses"] == 22
+    assert payload["hypotheses"] == 24
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

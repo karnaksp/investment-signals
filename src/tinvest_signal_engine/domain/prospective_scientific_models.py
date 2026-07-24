@@ -25,7 +25,9 @@ class ProspectiveHypothesis(str, Enum):
     SAME_PHASE_RETURN_RECURRENCE = "H5"
     OPEN_CLOSE_MARKET_CONTINUATION = "H6"
     RELATIVE_VOLUME_VOLATILITY_V3 = "H7V3"
+    MARKET_RESIDUAL_REVERSION_V2 = "H11V2"
     PAIR_RESIDUAL_REVERSION = "H12"
+    PAIR_RESIDUAL_REVERSION_V2 = "H12V2"
     HAR_VOLATILITY_V2 = "H15V2"
     DOWNSIDE_SEMIVARIANCE_RISK = "H16"
     VOLATILITY_JUMP_PERSISTENCE = "H17"
@@ -42,7 +44,9 @@ class ProspectiveHypothesis(str, Enum):
             ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE: "1.0.0",
             ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION: "1.0.0",
             ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: "3.0.0",
+            ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2: "2.0.0",
             ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: "1.0.0",
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2: "2.0.0",
             ProspectiveHypothesis.HAR_VOLATILITY_V2: "2.0.0",
             ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: "1.0.0",
             ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE: "1.0.0",
@@ -129,9 +133,15 @@ class ProspectiveScientificPolicy:
     open_close_basket_return_bps_min: float = 5.0
     open_close_basket_coverage_min: float = 0.80
     open_close_horizon_seconds: int = 1800
+    market_residual_window_minutes: int = 5
+    market_residual_history_days: int = 20
+    market_residual_percentile: float = 0.99
+    market_residual_basket_coverage_min: float = 0.80
+    market_residual_horizons_seconds: tuple[int, ...] = (900, 1800)
     pair_entry_z: float = 2.0
     pair_min_correlation: float = 0.70
     pair_min_training_points: int = 500
+    pair_history_days: int = 40
     pair_horizons_seconds: tuple[int, ...] = (900, 1800, 3600)
     har_windows_minutes: tuple[int, int, int] = (5, 30, 120)
     har_horizon_seconds: int = 1800
@@ -162,6 +172,10 @@ class ProspectiveScientificPolicy:
 
         har_days = ceil(self.har_minimum_training_points / 18)
         pair_days = ceil(self.pair_min_training_points / 360)
+        rolling_pair_days = max(
+            self.pair_history_days,
+            ceil(self.pair_min_training_points / 18),
+        )
         requirements = {
             ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION: (
                 self.morning_history_days
@@ -188,7 +202,11 @@ class ProspectiveScientificPolicy:
             ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3: (
                 self.volume_history_days
             ),
+            ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2: (
+                self.market_residual_history_days
+            ),
             ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION: pair_days,
+            ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2: rolling_pair_days,
             ProspectiveHypothesis.HAR_VOLATILITY_V2: har_days,
             ProspectiveHypothesis.DOWNSIDE_SEMIVARIANCE_RISK: (
                 self.semivariance_history_days
@@ -221,7 +239,11 @@ class ProspectiveScientificPolicy:
             self.phase_recurrence_history_days,
             self.phase_recurrence_horizon_seconds,
             self.open_close_horizon_seconds,
+            self.market_residual_window_minutes,
+            self.market_residual_history_days,
+            *self.market_residual_horizons_seconds,
             self.pair_min_training_points,
+            self.pair_history_days,
             *self.pair_horizons_seconds,
             *self.har_windows_minutes,
             self.har_horizon_seconds,
@@ -239,6 +261,8 @@ class ProspectiveScientificPolicy:
             self.morning_low_relative_volume_max,
             self.morning_range_percentile_min,
             self.open_close_basket_coverage_min,
+            self.market_residual_percentile,
+            self.market_residual_basket_coverage_min,
             self.pair_min_correlation,
             self.jump_percentile,
             self.jump_low_volume_percentile,
@@ -254,9 +278,21 @@ class ProspectiveScientificPolicy:
             raise ValueError("policy percentiles and EWMA alpha must be in (0, 1)")
         if self.jump_low_volume_percentile >= self.jump_high_volume_percentile:
             raise ValueError("jump activity regimes must not overlap")
-        if self.morning_low_relative_volume_max >= self.morning_high_relative_volume_min:
+        if tuple(sorted(set(self.market_residual_horizons_seconds))) != (
+            self.market_residual_horizons_seconds
+        ):
+            raise ValueError("market residual horizons must be sorted and unique")
+        if tuple(sorted(set(self.pair_horizons_seconds))) != self.pair_horizons_seconds:
+            raise ValueError("pair horizons must be sorted and unique")
+        if (
+            self.morning_low_relative_volume_max
+            >= self.morning_high_relative_volume_min
+        ):
             raise ValueError("morning activity regimes must not overlap")
-        if self.morning_deviation_z_min <= 0.0 or self.morning_market_move_bps_min < 0.0:
+        if (
+            self.morning_deviation_z_min <= 0.0
+            or self.morning_market_move_bps_min < 0.0
+        ):
             raise ValueError("morning thresholds must be non-negative")
         if self.open_close_basket_return_bps_min <= 0.0 or self.pair_entry_z <= 0.0:
             raise ValueError("basket and pair thresholds must be positive")
@@ -448,6 +484,32 @@ class HarV2Parameters:
             + self.long_weight * log(1.0 + long)
         )
         return max(exp(log_forecast) - 1.0, 1e-12)
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenMarketResidualParameters:
+    """Stock-to-basket relation sealed strictly before an observation day."""
+
+    ticker: str
+    beta: float
+    absolute_residual_threshold_bps: float
+    training_points: int
+    trained_until: datetime
+    basket_members: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.ticker.strip() or not self.basket_members:
+            raise ValueError("market residual model requires ticker and basket")
+        if any(not item.strip() or item == self.ticker for item in self.basket_members):
+            raise ValueError("market basket members must be named and exclude ticker")
+        if len(set(self.basket_members)) != len(self.basket_members):
+            raise ValueError("market basket members must be unique")
+        _require_aware(self.trained_until, "trained_until")
+        values = (self.beta, self.absolute_residual_threshold_bps)
+        if any(not isfinite(value) for value in values):
+            raise ValueError("market residual parameters must be finite")
+        if self.absolute_residual_threshold_bps < 0.0 or self.training_points <= 0:
+            raise ValueError("market residual training evidence must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,10 +847,16 @@ def morning_regime_features(
     if reversion and continuation:
         raise AssertionError("H1 and H2 morning regimes must be mutually exclusive")
     common = (
-        MetricValue("morning_deviation_bps", MetricUnit.BASIS_POINTS, morning_deviation_bps),
+        MetricValue(
+            "morning_deviation_bps", MetricUnit.BASIS_POINTS, morning_deviation_bps
+        ),
         MetricValue("morning_deviation_z", MetricUnit.RATIO, morning_deviation_z),
-        MetricValue("cumulative_relative_volume", MetricUnit.RATIO, cumulative_relative_volume),
-        MetricValue("morning_range_percentile", MetricUnit.RATIO, morning_range_percentile),
+        MetricValue(
+            "cumulative_relative_volume", MetricUnit.RATIO, cumulative_relative_volume
+        ),
+        MetricValue(
+            "morning_range_percentile", MetricUnit.RATIO, morning_range_percentile
+        ),
         MetricValue("market_return_bps", MetricUnit.BASIS_POINTS, market_return_bps),
         MetricValue("market_coverage", MetricUnit.RATIO, market_coverage),
         MetricValue("prior_day_count", MetricUnit.COUNT, float(history_count)),
@@ -812,7 +880,8 @@ def morning_regime_features(
             sufficient=sufficient,
             common=common,
             feature_max_observed_at=feature_max_observed_at,
-            valid_baseline=valid_baseline and market_coverage >= policy.open_close_basket_coverage_min,
+            valid_baseline=valid_baseline
+            and market_coverage >= policy.open_close_basket_coverage_min,
             reason_override=reason_override,
         ),
         _classified_directional_feature(
@@ -861,7 +930,9 @@ def phase_recurrence_feature(
         trading_gap=trading_gap,
         sufficient=sufficient,
         common=(
-            MetricValue("same_phase_mean_return_bps", MetricUnit.BASIS_POINTS, mean_return),
+            MetricValue(
+                "same_phase_mean_return_bps", MetricUnit.BASIS_POINTS, mean_return
+            ),
             MetricValue("prior_day_count", MetricUnit.COUNT, float(len(history))),
         ),
     )
@@ -920,8 +991,120 @@ def open_close_basket_feature(
         expected_direction=direction,
         forecast=None,
         feature_values=(
-            MetricValue("opening_basket_return_bps", MetricUnit.BASIS_POINTS, opening_basket_return_bps),
+            MetricValue(
+                "opening_basket_return_bps",
+                MetricUnit.BASIS_POINTS,
+                opening_basket_return_bps,
+            ),
             MetricValue("basket_coverage", MetricUnit.RATIO, basket_coverage),
+        ),
+    )
+
+
+def market_residual_reversion_v2_feature(
+    *,
+    ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    stock_return_bps: float,
+    basket_return_bps: float,
+    basket_coverage: float,
+    parameters: FrozenMarketResidualParameters | None,
+    trading_gap: bool,
+    policy: ProspectiveScientificPolicy,
+    horizon_seconds: int,
+) -> ProspectiveFeature:
+    """Build H11V2 using a model frozen on completed prior trading days."""
+
+    if not ticker.strip():
+        raise ValueError("market residual ticker is required")
+    if not 0.0 <= basket_coverage <= 1.0:
+        raise ValueError("basket_coverage must be in [0, 1]")
+    values = (stock_return_bps, basket_return_bps)
+    if any(not isfinite(value) for value in values):
+        raise ValueError("market residual returns must be finite")
+    if parameters is None:
+        residual = threshold = beta = 0.0
+        trained_until = None
+        training_points = 0
+        decision, reason, direction = (
+            ProspectiveDecision.ABSTAIN,
+            ProspectiveReason.MODEL_NOT_TRAINED,
+            0,
+        )
+    else:
+        if parameters.ticker != ticker:
+            raise ValueError("market residual parameters belong to another ticker")
+        if parameters.trained_until >= observed_at:
+            raise ValueError("market residual model must precede observation")
+        beta = parameters.beta
+        threshold = parameters.absolute_residual_threshold_bps
+        training_points = parameters.training_points
+        trained_until = parameters.trained_until
+        residual = stock_return_bps - beta * basket_return_bps
+        direction = -_direction(residual)
+        if trading_gap:
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.NON_CONTIGUOUS_WINDOW,
+            )
+        elif basket_coverage < policy.market_residual_basket_coverage_min:
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.BASKET_COVERAGE_BELOW_MINIMUM,
+            )
+        elif direction == 0:
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.DIRECTION_UNAVAILABLE,
+            )
+        elif residual * basket_return_bps > 0.0 and abs(basket_return_bps) >= abs(
+            residual
+        ):
+            decision, reason = (
+                ProspectiveDecision.ABSTAIN,
+                ProspectiveReason.MARKET_WIDE_MOVE_SAME_DIRECTION,
+            )
+        elif abs(residual) >= threshold:
+            decision, reason = (
+                ProspectiveDecision.MATCHED,
+                ProspectiveReason.CONDITIONS_MATCHED,
+            )
+        else:
+            decision, reason = (
+                ProspectiveDecision.NOT_MATCHED,
+                ProspectiveReason.CONDITIONS_NOT_MET,
+            )
+    return _feature(
+        hypothesis=ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
+        ticker=ticker,
+        trading_day=trading_day,
+        observed_at=observed_at,
+        model_trained_until=trained_until,
+        horizon_seconds=horizon_seconds,
+        target=TargetMetric.FORWARD_RETURN,
+        decision=decision,
+        reason=reason,
+        expected_direction=direction,
+        forecast=None,
+        feature_values=(
+            MetricValue("stock_return_bps", MetricUnit.BASIS_POINTS, stock_return_bps),
+            MetricValue(
+                "basket_return_bps", MetricUnit.BASIS_POINTS, basket_return_bps
+            ),
+            MetricValue("market_beta", MetricUnit.RATIO, beta),
+            MetricValue("market_residual_bps", MetricUnit.BASIS_POINTS, residual),
+            MetricValue(
+                "absolute_residual_threshold_bps",
+                MetricUnit.BASIS_POINTS,
+                threshold,
+            ),
+            MetricValue("basket_coverage", MetricUnit.RATIO, basket_coverage),
+            MetricValue(
+                "market_training_points",
+                MetricUnit.COUNT,
+                float(training_points),
+            ),
         ),
     )
 
@@ -940,7 +1123,74 @@ def pair_residual_reversion_feature(
     policy: ProspectiveScientificPolicy,
     horizon_seconds: int,
 ) -> ProspectiveFeature:
-    if not left_ticker.strip() or not right_ticker.strip() or left_ticker == right_ticker:
+    return _pair_residual_reversion_feature(
+        hypothesis=ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        left_ticker=left_ticker,
+        right_ticker=right_ticker,
+        trading_day=trading_day,
+        observed_at=observed_at,
+        left_price=left_price,
+        right_price=right_price,
+        parameters=parameters,
+        corporate_action_suspected=corporate_action_suspected,
+        liquid=liquid,
+        policy=policy,
+        horizon_seconds=horizon_seconds,
+    )
+
+
+def pair_residual_reversion_v2_feature(
+    *,
+    left_ticker: str,
+    right_ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    left_price: float,
+    right_price: float,
+    parameters: FrozenPairParameters | None,
+    corporate_action_suspected: bool,
+    liquid: bool,
+    policy: ProspectiveScientificPolicy,
+    horizon_seconds: int,
+) -> ProspectiveFeature:
+    """Build rolling H12V2 from pair coefficients frozen before this day."""
+
+    return _pair_residual_reversion_feature(
+        hypothesis=ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
+        left_ticker=left_ticker,
+        right_ticker=right_ticker,
+        trading_day=trading_day,
+        observed_at=observed_at,
+        left_price=left_price,
+        right_price=right_price,
+        parameters=parameters,
+        corporate_action_suspected=corporate_action_suspected,
+        liquid=liquid,
+        policy=policy,
+        horizon_seconds=horizon_seconds,
+    )
+
+
+def _pair_residual_reversion_feature(
+    *,
+    hypothesis: ProspectiveHypothesis,
+    left_ticker: str,
+    right_ticker: str,
+    trading_day: date,
+    observed_at: datetime,
+    left_price: float,
+    right_price: float,
+    parameters: FrozenPairParameters | None,
+    corporate_action_suspected: bool,
+    liquid: bool,
+    policy: ProspectiveScientificPolicy,
+    horizon_seconds: int,
+) -> ProspectiveFeature:
+    if (
+        not left_ticker.strip()
+        or not right_ticker.strip()
+        or left_ticker == right_ticker
+    ):
         raise ValueError("a pair requires two distinct tickers")
     pair_id = f"{left_ticker}/{right_ticker}"
     if parameters is None:
@@ -998,7 +1248,7 @@ def pair_residual_reversion_feature(
                 ProspectiveReason.CONDITIONS_NOT_MET,
             )
     return _feature(
-        hypothesis=ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+        hypothesis=hypothesis,
         ticker=pair_id,
         trading_day=trading_day,
         observed_at=observed_at,
