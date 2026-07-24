@@ -8,7 +8,7 @@ import sys
 from threading import Event
 import time
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from fastapi.testclient import TestClient
 
@@ -45,8 +45,16 @@ class FakeReplayRunner:
         *,
         run_fingerprint: str,
         dataset_as_of: datetime | None = None,
+        progress: Callable[[str, int, int, str | None], None] | None = None,
     ) -> Mapping[str, Any]:
         self.calls.append((request, run_fingerprint))
+        if progress is not None:
+            progress(
+                "prospective_hypotheses",
+                0,
+                len(request.hypothesis_ids),
+                request.hypothesis_ids[0],
+            )
         if self.blocker is not None:
             self.blocker.wait(timeout=2)
         if self.failure is not None:
@@ -122,6 +130,20 @@ def _wait_for_status(client: TestClient, job_id: str, expected: str) -> dict[str
     raise AssertionError(f"job {job_id} did not reach {expected}")
 
 
+def _wait_for_progress_phase(
+    client: TestClient,
+    job_id: str,
+    expected: str,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        payload = client.get(f"/internal/v1/hypothesis-replays/{job_id}").json()
+        if payload["progress"]["phase"] == expected:
+            return payload
+        time.sleep(0.01)
+    raise AssertionError(f"job {job_id} did not report progress phase {expected}")
+
+
 def test_health_readiness_and_completed_result(tmp_path: Path) -> None:
     runner = FakeReplayRunner()
     client, _ = _client(tmp_path, runner)
@@ -143,6 +165,13 @@ def test_health_readiness_and_completed_result(tmp_path: Path) -> None:
 
         final = _wait_for_status(client, submission["job_id"], "completed")
         assert final["hypothesis_ids"] == ["H1", "H3", "H4", "H7"]
+        assert final["progress"] == {
+            "phase": "completed",
+            "completed_units": 4,
+            "total_units": 4,
+            "current_hypothesis_id": None,
+            "updated_at": final["progress"]["updated_at"],
+        }
         result = client.get(submission["result_url"])
         assert result.status_code == 200
         assert result.json()["network_download_performed"] is False
@@ -257,6 +286,18 @@ def test_pending_result_returns_202_and_same_key_reuses_job(tmp_path: Path) -> N
         pending = client.get(first["result_url"])
         assert pending.status_code == 202
         assert pending.json()["status"] in {"queued", "running"}
+        progress = _wait_for_progress_phase(
+            client,
+            first["job_id"],
+            "prospective_hypotheses",
+        )["progress"]
+        assert progress == {
+            "phase": "prospective_hypotheses",
+            "completed_units": 0,
+            "total_units": 1,
+            "current_hypothesis_id": "H1",
+            "updated_at": progress["updated_at"],
+        }
 
         second_response = client.post(
             "/internal/v1/hypothesis-replays",

@@ -18,7 +18,7 @@ import json
 import os
 from pathlib import Path
 from threading import Lock, RLock
-from typing import Any, Literal, Mapping, Protocol, Sequence
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
@@ -219,6 +219,31 @@ class ReplayAcceptedResponse(BaseModel):
     reused: bool
 
 
+class ReplayProgressResponse(BaseModel):
+    """Bounded operator-facing progress for a long local replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal[
+        "queued",
+        "preparing_data",
+        "general_hypotheses",
+        "jump_hypotheses",
+        "relative_value_hypotheses",
+        "scientific_hypotheses",
+        "prospective_hypotheses",
+        "combination_hypotheses",
+        "orderbook_hypotheses",
+        "finalizing",
+        "completed",
+        "failed",
+    ]
+    completed_units: int = Field(ge=0)
+    total_units: int = Field(ge=1)
+    current_hypothesis_id: str | None = None
+    updated_at: str
+
+
 class ReplayStatusResponse(BaseModel):
     job_id: str
     status: JobState
@@ -231,6 +256,7 @@ class ReplayStatusResponse(BaseModel):
     attempt: int
     recovered_after_restart: bool = False
     error: Mapping[str, str] | None = None
+    progress: ReplayProgressResponse
 
 
 class ReplayResultResponse(BaseModel):
@@ -375,6 +401,7 @@ class ReplayRunner(Protocol):
         *,
         run_fingerprint: str,
         dataset_as_of: datetime | None = None,
+        progress: "ReplayProgressReporter | None" = None,
     ) -> Mapping[str, Any]: ...
 
     def readiness(self) -> tuple[bool, str | None]: ...
@@ -396,6 +423,12 @@ class ReplayEvidenceReader(Protocol):
         *,
         generated_at: str,
     ) -> tuple[Mapping[str, Any], ...]: ...
+
+
+ReplayProgressReporter = Callable[
+    [str, int, int, str | None],
+    None,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,6 +519,9 @@ class ReplayJobManager:
                 record["status"] = "queued"
                 record["recovered_after_restart"] = True
                 record["updated_at"] = _now()
+                record["progress"] = _initial_progress(
+                    StartReplayRequest.model_validate(record["request"])
+                )
                 self._store.save(record)
                 self._schedule(str(record["job_id"]))
                 recovered += 1
@@ -508,6 +544,7 @@ class ReplayJobManager:
                     existing["updated_at"] = _now()
                     existing["finished_at"] = None
                     existing["error"] = None
+                    existing["progress"] = _initial_progress(request)
                     self._store.save(existing)
                     self._schedule(str(existing["job_id"]))
                 return _Submission(existing, reused=True)
@@ -542,6 +579,7 @@ class ReplayJobManager:
                 "attempt": 0,
                 "recovered_after_restart": False,
                 "error": None,
+                "progress": _initial_progress(request),
             }
             self._store.save(record)
             self._schedule(job_id)
@@ -572,6 +610,13 @@ class ReplayJobManager:
             record["updated_at"] = record["started_at"]
             record["attempt"] = int(record.get("attempt", 0)) + 1
             record["error"] = None
+            record["progress"] = _progress_payload(
+                "preparing_data",
+                completed_units=0,
+                total_units=_progress_total(
+                    StartReplayRequest.model_validate(record["request"])
+                ),
+            )
             self._store.save(record)
         try:
             request = StartReplayRequest.model_validate(record["request"])
@@ -580,6 +625,13 @@ class ReplayJobManager:
                 run_fingerprint=str(record["run_fingerprint"]),
                 dataset_as_of=datetime.fromisoformat(
                     str(record.get("dataset_as_of", record["created_at"]))
+                ),
+                progress=lambda phase, completed, total, current: self._record_progress(
+                    job_id,
+                    phase=phase,
+                    completed_units=completed,
+                    total_units=total,
+                    current_hypothesis_id=current,
                 ),
             )
             completed = {
@@ -599,6 +651,11 @@ class ReplayJobManager:
                 record["status"] = "completed"
                 record["finished_at"] = _now()
                 record["updated_at"] = record["finished_at"]
+                record["progress"] = _progress_payload(
+                    "completed",
+                    completed_units=_progress_total(request),
+                    total_units=_progress_total(request),
+                )
                 self._store.save(record)
         except Exception as exc:  # background boundary must seal failures for polling
             with self._lock:
@@ -610,7 +667,38 @@ class ReplayJobManager:
                     "code": "replay_execution_failed",
                     "message": str(exc)[:1000],
                 }
+                previous_progress = _record_progress_payload(record)
+                record["progress"] = _progress_payload(
+                    "failed",
+                    completed_units=int(previous_progress["completed_units"]),
+                    total_units=int(previous_progress["total_units"]),
+                    current_hypothesis_id=_optional_string(
+                        previous_progress.get("current_hypothesis_id")
+                    ),
+                )
                 self._store.save(record)
+
+    def _record_progress(
+        self,
+        job_id: str,
+        *,
+        phase: str,
+        completed_units: int,
+        total_units: int,
+        current_hypothesis_id: str | None,
+    ) -> None:
+        with self._lock:
+            record = self._store.load(job_id)
+            if record is None or record.get("status") != "running":
+                return
+            record["progress"] = _progress_payload(
+                phase,
+                completed_units=completed_units,
+                total_units=total_units,
+                current_hypothesis_id=current_hypothesis_id,
+            )
+            record["updated_at"] = record["progress"]["updated_at"]
+            self._store.save(record)
 
 
 class IdempotencyConflict(RuntimeError):
@@ -715,7 +803,10 @@ class LocalHypothesisPortfolioRunner:
         *,
         run_fingerprint: str,
         dataset_as_of: datetime | None = None,
+        progress: ReplayProgressReporter | None = None,
     ) -> Mapping[str, Any]:
+        total_units = _progress_total(request)
+        _report_progress(progress, "preparing_data", 0, total_units)
         candle_cache = self._execution_candle_cache(dataset_as_of)
         materialize = getattr(
             candle_cache,
@@ -729,6 +820,7 @@ class LocalHypothesisPortfolioRunner:
                 request,
                 run_fingerprint=run_fingerprint,
                 candle_cache=candle_cache,
+                progress=progress,
             )
         finally:
             close_materialized = getattr(
@@ -745,17 +837,27 @@ class LocalHypothesisPortfolioRunner:
         *,
         run_fingerprint: str,
         candle_cache: HistoricalCandleCachePort,
+        progress: ReplayProgressReporter | None = None,
     ) -> Mapping[str, Any]:
         engines: list[Mapping[str, Any]] = []
         evidence: list[Mapping[str, Any]] = []
         derived_evidence: list[Mapping[str, Any]] = []
         generated_at = _now()
+        total_units = _progress_total(request)
+        completed_units = 0
         requested_general = tuple(
             HypothesisId(value)
             for value in request.hypothesis_ids
             if value in GENERAL_HYPOTHESES
         )
         if requested_general:
+            _report_progress(
+                progress,
+                "general_hypotheses",
+                completed_units,
+                total_units,
+                requested_general[0].value,
+            )
             executed_general = tuple(
                 HypothesisId(value) for value in sorted(GENERAL_HYPOTHESES)
             )
@@ -808,7 +910,18 @@ class LocalHypothesisPortfolioRunner:
                 )
             )
             del execution
+            completed_units += len(requested_general)
         if set(request.hypothesis_ids) & JUMP_HYPOTHESES:
+            requested_jump = tuple(
+                sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)
+            )
+            _report_progress(
+                progress,
+                "jump_hypotheses",
+                completed_units,
+                total_units,
+                requested_jump[0],
+            )
             jump = RunJumpActivityReplay(
                 candle_cache=ParquetCandleCacheAdapter(self._cache_dir),
                 artifacts=JsonJumpReplayArtifactAdapter(self._artifact_root / "h3-h4"),
@@ -839,12 +952,20 @@ class LocalHypothesisPortfolioRunner:
                     generated_at=generated_at,
                 )
             )
+            completed_units += len(requested_jump)
         requested_r2 = tuple(
             R2ExtensionHypothesis(item)
             for item in request.hypothesis_ids
             if item in R2_EXTENSION_HYPOTHESES
         )
         if requested_r2:
+            _report_progress(
+                progress,
+                "relative_value_hypotheses",
+                completed_units,
+                total_units,
+                requested_r2[0].value,
+            )
             r2_report = BuildR2ExtensionReplay(candle_cache).execute(
                 R2ExtensionRequest(
                     selected_hypotheses=requested_r2,
@@ -877,12 +998,20 @@ class LocalHypothesisPortfolioRunner:
             )
             evidence.extend(r2_artifact.evidence)
             del r2_report
+            completed_units += len(requested_r2)
         requested_scientific = tuple(
             ScientificCandleHypothesis(item)
             for item in request.hypothesis_ids
             if item in SCIENTIFIC_CANDLE_HYPOTHESES
         )
         if requested_scientific:
+            _report_progress(
+                progress,
+                "scientific_hypotheses",
+                completed_units,
+                total_units,
+                requested_scientific[0].value,
+            )
             report = BuildScientificCandleModelResearch(candle_cache).execute(
                 ScientificCandleResearchRequest(
                     selected_hypotheses=requested_scientific,
@@ -911,6 +1040,7 @@ class LocalHypothesisPortfolioRunner:
             )
             evidence.extend(artifact.evidence)
             del report
+            completed_units += len(requested_scientific)
         requested_prospective = tuple(
             ProspectiveHypothesis(item)
             for item in request.hypothesis_ids
@@ -967,6 +1097,13 @@ class LocalHypothesisPortfolioRunner:
             )
             prepared_replays = []
             for hypothesis in requested_prospective:
+                _report_progress(
+                    progress,
+                    "prospective_hypotheses",
+                    completed_units,
+                    total_units,
+                    hypothesis.value,
+                )
                 if partitioned and hypothesis in bounded_hypotheses:
                     scientific_request = ProspectiveScientificRequest(
                         selected_hypotheses=(hypothesis,),
@@ -1044,6 +1181,7 @@ class LocalHypothesisPortfolioRunner:
                                 cost_model_version=request.cost_model.version,
                             )
                         )
+                    completed_units += 1
                     continue
 
                 report = build_one(hypothesis)
@@ -1069,6 +1207,7 @@ class LocalHypothesisPortfolioRunner:
                 )
                 if callable(prepare_report):
                     del report
+                completed_units += 1
 
             save_prepared = getattr(
                 self._prospective_artifacts, "save_prepared_portfolio", None
@@ -1100,6 +1239,12 @@ class LocalHypothesisPortfolioRunner:
             )
             evidence.extend(artifact.evidence)
             if combination_source is not None:
+                _report_progress(
+                    progress,
+                    "combination_hypotheses",
+                    completed_units,
+                    total_units,
+                )
                 # H1/H2 have a legacy product evidence path, but C3 requires
                 # their causal prospective observations.  Build and release
                 # them one at a time after the main evidence adapter has
@@ -1153,6 +1298,13 @@ class LocalHypothesisPortfolioRunner:
             item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
         )
         if requested_orderbook:
+            _report_progress(
+                progress,
+                "orderbook_hypotheses",
+                completed_units,
+                total_units,
+                requested_orderbook[0],
+            )
             engines.append(
                 {
                     "engine": "live_orderbook_replay",
@@ -1170,11 +1322,18 @@ class LocalHypothesisPortfolioRunner:
                 )
                 for hypothesis_id in requested_orderbook
             )
+            completed_units += len(requested_orderbook)
         ordered = tuple(sorted(evidence, key=lambda item: str(item["hypothesis_id"])))
         if tuple(item["hypothesis_id"] for item in ordered) != request.hypothesis_ids:
             raise ValueError(
                 "replay must produce exactly one evidence row per hypothesis"
             )
+        _report_progress(
+            progress,
+            "finalizing",
+            total_units,
+            total_units,
+        )
         return {
             "run_fingerprint": run_fingerprint,
             "engines": tuple(engines),
@@ -1441,11 +1600,74 @@ def _status_response(record: Mapping[str, Any]) -> ReplayStatusResponse:
         attempt=int(record["attempt"]),
         recovered_after_restart=bool(record.get("recovered_after_restart", False)),
         error=record.get("error"),
+        progress=ReplayProgressResponse.model_validate(
+            _record_progress_payload(record)
+        ),
     )
 
 
 def _optional_string(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _progress_total(request: StartReplayRequest) -> int:
+    return max(1, len(request.hypothesis_ids))
+
+
+def _initial_progress(request: StartReplayRequest) -> dict[str, Any]:
+    return _progress_payload(
+        "queued",
+        completed_units=0,
+        total_units=_progress_total(request),
+    )
+
+
+def _record_progress_payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    progress = record.get("progress")
+    if isinstance(progress, Mapping):
+        return progress
+    request = StartReplayRequest.model_validate(record["request"])
+    phase = "completed" if record.get("status") == "completed" else "queued"
+    completed = _progress_total(request) if phase == "completed" else 0
+    return _progress_payload(
+        phase,
+        completed_units=completed,
+        total_units=_progress_total(request),
+        updated_at=str(record.get("updated_at", _now())),
+    )
+
+
+def _progress_payload(
+    phase: str,
+    *,
+    completed_units: int,
+    total_units: int,
+    current_hypothesis_id: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "completed_units": max(0, min(completed_units, total_units)),
+        "total_units": max(1, total_units),
+        "current_hypothesis_id": current_hypothesis_id,
+        "updated_at": updated_at or _now(),
+    }
+
+
+def _report_progress(
+    reporter: ReplayProgressReporter | None,
+    phase: str,
+    completed_units: int,
+    total_units: int,
+    current_hypothesis_id: str | None = None,
+) -> None:
+    if reporter is not None:
+        reporter(
+            phase,
+            completed_units,
+            total_units,
+            current_hypothesis_id,
+        )
 
 
 def _now() -> str:
