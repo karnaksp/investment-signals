@@ -317,13 +317,13 @@ def test_top_level_analytical_change_is_also_versioned() -> None:
     assert AdmissionFailure.SEALED_PARAMETERS_CHANGED_IN_PLACE in _codes(decision)
 
 
-def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> None:
+def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None:
     registry = VersionedScientificRegistry.from_file(REGISTRY)
 
     assert registry.schema_version == "1.2.0"
-    assert len(registry.sources) == 14
+    assert len(registry.sources) == 16
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 27
+    assert len(registry.hypotheses) == 29
     assert (
         sum(
             item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
@@ -346,6 +346,8 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
         for item in registry.hypotheses
         if item.preregistration is not None
     } >= {
+        "prereg-h1-v2",
+        "prereg-h1-v2-1",
         "prereg-h3-v2",
         "prereg-h4-v2",
         "prereg-h3-v3",
@@ -360,7 +362,15 @@ def test_registry_loads_preregistered_portfolio_and_no_fabricated_evidence() -> 
         "prereg-h17-v2",
         "prereg-h12-v1",
     }
-    assert registry.replication_evidence == ()
+    assert len(registry.replication_evidence) == 2
+    rejected = registry.replication_evidence[0]
+    assert rejected.hypothesis_version == "2.0.0"
+    assert rejected.result is ReplicationResult.REJECTED
+    assert rejected.mean_net_bps is not None and rejected.mean_net_bps < 0.0
+    inconclusive = registry.replication_evidence[1]
+    assert inconclusive.hypothesis_version == "2.1.0"
+    assert inconclusive.result is ReplicationResult.INCONCLUSIVE
+    assert inconclusive.independent_validation is False
     assert registry.applied_catalog == ()
     h3v3 = registry.get_hypothesis(
         "h3-jump-low-activity-reversal",
@@ -444,8 +454,8 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
-    assert payload["sources"] == 14
-    assert payload["hypotheses"] == 27
+    assert payload["sources"] == 16
+    assert payload["hypotheses"] == 29
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

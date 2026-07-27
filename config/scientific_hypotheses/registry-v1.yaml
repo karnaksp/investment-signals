@@ -242,6 +242,40 @@ sources:
       - Pair selection, hedge ratios, corporate actions, liquidity, shorting constraints, and trading costs must be frozen and tested on later data.
     original_result: A rule that formed historically close price pairs and traded later divergences produced positive reported excess returns before a complete modern implementation-cost analysis.
 
+  - source_id: kitapbayev-leung-2017
+    title: Mean Reversion Trading with Sequential Deadlines and Transaction Costs
+    authors: [Yerkin Kitapbayev, Tim Leung]
+    publication_year: 2017
+    identifier: arxiv:1707.03498
+    url: https://arxiv.org/abs/1707.03498
+    primary_publication: true
+    market: Theoretical mean-reverting asset model
+    sample_period: Analytical finite-horizon model
+    sample_description: Optimal stopping problems for entering and liquidating a mean-reverting position under sequential deadlines
+    data_frequency: Continuous-time stochastic process
+    economic_mechanism: A temporary displacement can create a finite-horizon reversion opportunity, but transaction costs create distinct entry and liquidation boundaries.
+    limitations:
+      - The source is an analytical model rather than evidence for a specific MOEX morning effect.
+      - Model parameters, executable prices, gaps, liquidity, and intraday phase must be estimated and independently tested on local data.
+    original_result: The paper derives time-dependent entry and exit boundaries for mean-reversion trades with transaction costs and finite deadlines.
+
+  - source_id: lipton-lopez-de-prado-2020
+    title: A closed-form solution for optimal mean-reverting trading strategies
+    authors: [Alexander Lipton, Marcos López de Prado]
+    publication_year: 2020
+    identifier: arxiv:2003.10502
+    url: https://arxiv.org/abs/2003.10502
+    primary_publication: true
+    market: Theoretical mean-reverting price process
+    sample_period: Analytical model with finite trading horizon
+    sample_description: Joint evaluation of profit target, maximum loss, and maximum holding period for a mean-reverting process
+    data_frequency: Continuous-time stochastic process
+    economic_mechanism: Entry, profit target, loss boundary, and time limit interact; optimizing only one boundary can misstate the risk and value of a reversion trade.
+    limitations:
+      - Closed-form assumptions do not represent MOEX minute-candle execution or morning-session microstructure.
+      - Any practical boundary must include local costs and survive a chronological holdout.
+    original_result: The paper gives an analytical framework for choosing profit, loss, and horizon levels for mean-reverting strategies.
+
 hypotheses:
   - hypothesis_id: h1-morning-low-volume-reversion
     version: "1.0.0"
@@ -275,6 +309,72 @@ hypotheses:
       cost_model_version: "1.0.0"
       data_split_policy: 60/20/20 chronological trading days
       multiple_testing_policy: Benjamini-Hochberg within morning-regime family at q<=0.05
+
+  - hypothesis_id: h1-morning-low-volume-reversion
+    version: "2.0.0"
+    title: Избирательный возврат утреннего экстремума
+    origin: research_extension
+    source_ids: [heston-korajczyk-sadka-2010, jegadeesh-titman-1995, kitapbayev-leung-2017, lipton-lopez-de-prado-2020]
+    testable_statement: Если с 07:00 до 10:00 акция существенно отклонилась от предыдущего закрытия, причинная комбинация текущих и предшествующих условий позволяет до входа выделить события, в которых цена до 11:00 касается заранее выбранного уровня возврата 25%, 50%, 75% или 100%.
+    economic_mechanism: Временное утреннее давление ликвидности может создать отклонение, которое поглощается по мере прихода основной ликвидности; события предыдущей сессии могут отличать временный дисбаланс от информационного продолжения.
+    market_phase: morning_0700_1000
+    trigger_conditions: [running excursion is measured every five minutes without future extrema, analytical excursion >= max(10 bps, 2 ticks), selected probability and trade boundaries are frozen on validation before holdout]
+    expected_direction: path_reversion_from_running_extreme
+    horizon_seconds: [1800, 3600, 7200, 13500]
+    abstention_conditions: [missing_previous_close, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, estimated_half_retracement_does_not_cover_twice_round_trip_cost]
+    falsification_criterion: На независимых 20% торговых дней вероятность заявленной цели ниже 90%, нижняя граница вероятности результата без чистого убытка ниже 90% либо медианный результат после издержек неположителен.
+    original_market_result: Исходные работы поддерживают механизм краткосрочного возврата и совместный выбор границ входа, выхода и срока; конкретная формула для утренней сессии Московской биржи является локальным развитием и требует независимой проверки.
+    evidence_level: rejected
+    lifecycle: rejected
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h1-v2
+      hypothesis_id: h1-morning-low-volume-reversion
+      hypothesis_version: "2.0.0"
+      sealed_at: "2026-07-28T00:00:00+03:00"
+      expected_direction: path_reversion_from_running_extreme
+      feature_definitions: [all morning features end at the five-minute snapshot, previous-session events end before the snapshot, immature previous outcomes are excluded, final morning extreme is label-only, one earliest threshold crossing is allowed per ticker-day]
+      thresholds: {analytical_floor_bps: 10.0, tradable_excursion_multiple_of_round_trip_cost: 4.0, retracement_grid: "0.25|0.50|0.75|1.00", stop_extension_grid: "0.15|0.25|0.40", break_even_trigger_grid: "0.15|0.25|0.33", deadline_grid_moscow: "09:30|10:00|10:30|11:00", train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: morning_0700_1000
+      horizon_seconds: [1800, 3600, 7200, 13500]
+      success_criterion: Holdout has at least 300 independent ticker-days and 30 trading days; target rate >=0.90 with Wilson lower >=0.80; non-loss rate >=0.95 with Wilson lower >=0.90; median net bps remains positive after doubled slippage.
+      abstention_conditions: [missing_previous_close, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, insufficient_cost_adjusted_excursion]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days; all snapshots of a ticker-day stay together
+      multiple_testing_policy: Fixed grids; validation-only selection; one locked candidate opened on holdout; all failed candidates retained
+
+  - hypothesis_id: h1-morning-low-volume-reversion
+    version: "2.1.0"
+    title: Избирательный возврат утреннего экстремума с запасом до цели
+    origin: research_extension
+    source_ids: [heston-korajczyk-sadka-2010, jegadeesh-titman-1995, kitapbayev-leung-2017, lipton-lopez-de-prado-2020]
+    testable_statement: Если с 07:00 до 10:00 акция существенно отклонилась от предыдущего закрытия, причинная комбинация текущих и предшествующих условий позволяет до входа выделить события, в которых оставшийся до цели возврат покрывает издержки с запасом и цена до 11:00 касается заранее выбранного уровня возврата.
+    economic_mechanism: Временное утреннее давление ликвидности может создать отклонение, которое поглощается по мере прихода основной ликвидности; запас от фактического входа до цели отделяет предсказуемое касание от уже практически завершившегося и экономически бесполезного движения.
+    market_phase: morning_0700_1000
+    trigger_conditions: [running excursion is measured every five minutes without future extrema, analytical excursion >= max(10 bps, 2 ticks), remaining gross move from snapshot price to target >= 2 x round trip cost, selected probability and trade boundaries are frozen on validation before holdout]
+    expected_direction: path_reversion_from_running_extreme
+    horizon_seconds: [1800, 3600, 7200, 13500]
+    abstention_conditions: [missing_previous_close, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, remaining_target_move_below_twice_round_trip_cost]
+    falsification_criterion: На независимых 20% торговых дней вероятность заявленной цели ниже 90%, нижняя граница вероятности результата без чистого убытка ниже 90% либо медианный результат после издержек неположителен.
+    original_market_result: Исходные работы поддерживают механизм краткосрочного возврата и совместный выбор границ входа, выхода и срока; конкретная формула с запасом до цели для Московской биржи является новой версией после отклонения экономически непригодной версии 2.0.0.
+    evidence_level: researching
+    lifecycle: evaluated
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h1-v2-1
+      hypothesis_id: h1-morning-low-volume-reversion
+      hypothesis_version: "2.1.0"
+      sealed_at: "2026-07-28T12:00:00+03:00"
+      expected_direction: path_reversion_from_running_extreme
+      feature_definitions: [all morning features end at the five-minute snapshot, previous-session events end before the snapshot, immature previous outcomes are excluded, final morning extreme is label-only, one earliest threshold crossing is allowed per ticker-day, remaining move is measured from snapshot price without future execution data]
+      thresholds: {analytical_floor_bps: 10.0, tradable_excursion_multiple_of_round_trip_cost: 4.0, remaining_target_move_multiple_of_round_trip_cost: 2.0, retracement_grid: "0.25|0.50|0.75|1.00", stop_extension_grid: "0.15|0.25|0.40", break_even_trigger_grid: "0.15|0.25|0.33", deadline_grid_moscow: "09:30|10:00|10:30|11:00", train_days_share: 0.60, tune_days_share: 0.20, holdout_days_share: 0.20}
+      market_phase: morning_0700_1000
+      horizon_seconds: [1800, 3600, 7200, 13500]
+      success_criterion: Holdout has at least 300 independent ticker-days and 30 trading days; target rate >=0.90 with Wilson lower >=0.80; non-loss rate >=0.95 with Wilson lower >=0.90; median net bps remains positive after doubled slippage.
+      abstention_conditions: [missing_previous_close, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, remaining_target_move_below_twice_round_trip_cost]
+      cost_model_version: "1.0.0"
+      data_split_policy: 60/20/20 chronological trading days; all snapshots of a ticker-day stay together
+      multiple_testing_policy: Fixed grids; validation-only selection; one locked candidate opened on holdout; all failed candidates retained
 
   - hypothesis_id: h2-morning-high-volume-continuation
     version: "1.0.0"
@@ -1133,5 +1233,67 @@ hypotheses:
       cost_model_version: "1.0.0"
       data_split_policy: 60/20/20 chronological trading days after enough live data exist
       multiple_testing_policy: Benjamini-Hochberg within orderbook family at q<=0.05
-replication_evidence: []
+replication_evidence:
+  - evidence_id: evidence-h1-v2-economic-rejection-20260728
+    hypothesis_id: h1-morning-low-volume-reversion
+    hypothesis_version: "2.0.0"
+    market: Moscow Exchange TQBR
+    observed_at: "2026-07-28T12:00:00+03:00"
+    result: rejected
+    independent_validation: true
+    trading_days: 37
+    eligible_events: 234
+    cost_adjusted: true
+    matched_controls_applied: true
+    multiple_testing_applied: true
+    stability_checked: false
+    mean_net_bps: -9.398499246661563
+    result_summary: Версия точно предсказывала близкое касание уровня, но выбирала уже почти завершившийся возврат; после издержек медиана составила -3.88 б. п., а вероятность результата без чистого убытка — 33.3%.
+    artifact_uri: var/research/morning_retracement_runs/ce3f10a49fa490f8/selected-policy.json
+    primary_metric: non_loss_rate_after_costs
+    controls_per_event: 0
+    lift_ci_lower: null
+    lift_ci_upper: null
+    adjusted_p_value: null
+    stable_blocks: 0
+    total_blocks: 0
+    max_ticker_share: 0.07264957264957266
+    max_period_share: null
+    dataset_fingerprint: sha256:9d90c3aa32925eab20ea341ff97a04aab3e6728c8eff4fc0ae907d328a526523
+    formula_fingerprint: sha256:0ecb1d51e92d9ddf10075491ea9e15057dd83f651e2637e77db2c6eabc982638
+    cost_model_version: "1.0.0"
+    abstention_rate: 0.74
+    success_rate: 0.3333333333333333
+    success_wilson_lower: 0.2760549522743454
+  - evidence_id: evidence-h1-v2-1-reused-holdout-20260728
+    hypothesis_id: h1-morning-low-volume-reversion
+    hypothesis_version: "2.1.0"
+    market: Moscow Exchange TQBR
+    observed_at: "2026-07-28T13:00:00+03:00"
+    result: inconclusive
+    independent_validation: false
+    trading_days: 17
+    eligible_events: 79
+    cost_adjusted: true
+    matched_controls_applied: false
+    multiple_testing_applied: true
+    stability_checked: false
+    mean_net_bps: 0.47024346002210987
+    result_summary: После обязательного запаса до цели медиана стала положительной, но вероятность отсутствия чистого убытка составила только 81.0%, исполнимая цель достигалась в 60.8% сделок, а средний результат сопоставленной части был отрицательным. Преимущество касания цели над 170 контрольными отклонениями составило 9.8 процентного пункта с доверительным промежутком от -3.3 до 23.9 пункта. Признаки предыдущей сессии не подтвердили дополнительную ценность, а итоговый период уже использовался при пересмотре версии.
+    artifact_uri: var/research/morning_retracement_runs/abbbe2d2f6cc8722/selected-policy.json
+    primary_metric: non_loss_rate_after_costs
+    controls_per_event: 2
+    lift_ci_lower: -0.03292137012655888
+    lift_ci_upper: 0.23920519339175242
+    adjusted_p_value: null
+    stable_blocks: 0
+    total_blocks: 0
+    max_ticker_share: 0.08860759493670886
+    max_period_share: null
+    dataset_fingerprint: sha256:3b4d385a7abc92641142c98bee9823539ce1e61a0eff079676767bc8646b6501
+    formula_fingerprint: sha256:4b7eb5f50f75186de73f086870ecae4414590123d4a818c6a91831b9538d4e47
+    cost_model_version: "1.0.0"
+    abstention_rate: 0.9122222222222223
+    success_rate: 0.810126582278481
+    success_wilson_lower: 0.7100735815818733
 applied_catalog: []
