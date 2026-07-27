@@ -284,6 +284,7 @@ class CompositeScientificCandleCache:
         self._partition_store: TemporaryDirectory[str] | None = None
         self._partition_paths: tuple[Path, ...] = ()
         self._partition_checksums: tuple[str, ...] = ()
+        self._materialized_trading_days: tuple[date, ...] = ()
 
     def describe(self) -> CandleCacheDescriptor:
         if self._descriptor is None:
@@ -320,6 +321,7 @@ class CompositeScientificCandleCache:
         store = TemporaryDirectory(prefix="candle-partitions-", dir=root)
         paths: list[Path] = []
         checksums: list[str] = []
+        trading_days: set[date] = set()
         previous_ticker: str | None = None
         try:
             for index, partition in enumerate(self._iter_merged_partitions()):
@@ -345,6 +347,7 @@ class CompositeScientificCandleCache:
                 _write_materialized_partition(path, partition)
                 paths.append(path)
                 checksums.append(_file_sha256(path))
+                trading_days.update(item.at.date() for item in partition)
                 previous_ticker = ticker
             if not paths:
                 raise ValueError("composite candle cache contains no causal candles")
@@ -354,6 +357,7 @@ class CompositeScientificCandleCache:
         self._partition_store = store
         self._partition_paths = tuple(paths)
         self._partition_checksums = tuple(checksums)
+        self._materialized_trading_days = tuple(sorted(trading_days))
         # Fallback sources may have needed a full live tuple during sealing.
         # It is now represented by the private disk store and can be released.
         self._fallback_live_snapshot = None
@@ -364,11 +368,27 @@ class CompositeScientificCandleCache:
 
         self._partition_paths = ()
         self._partition_checksums = ()
+        self._materialized_trading_days = ()
         self._snapshot = None
         self._fallback_live_snapshot = None
         if self._partition_store is not None:
             self._partition_store.cleanup()
             self._partition_store = None
+
+    def trading_days(self) -> tuple[date, ...]:
+        """Expose the sealed calendar without rereading materialized candles."""
+
+        if self._materialized_trading_days:
+            return self._materialized_trading_days
+        return tuple(
+            sorted(
+                {
+                    candle.at.date()
+                    for partition in self.iter_ticker_partitions()
+                    for candle in partition
+                }
+            )
+        )
 
     def _seal(self) -> tuple[HistoricalCandle, ...]:
         if self._snapshot is not None:

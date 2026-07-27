@@ -76,6 +76,18 @@ class LocalCandleCache:
             for candle in partition
         )
 
+    def trading_days(self) -> tuple[date, ...]:
+        """Return the sealed partition calendar without decoding candle rows."""
+
+        descriptor = self.describe()
+        files = self._partition_files()
+        if len(files) != descriptor.partition_count:
+            raise ValueError(
+                "cache partition count differs from immutable manifest: "
+                f"expected {descriptor.partition_count}, found {len(files)}"
+            )
+        return tuple(sorted({_partition_day(path) for path in files}))
+
     def iter_ticker_partitions(self) -> Iterator[tuple[HistoricalCandle, ...]]:
         """Yield one ordered ticker at a time instead of sealing the full cache."""
 

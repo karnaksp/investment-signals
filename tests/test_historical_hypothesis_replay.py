@@ -66,6 +66,9 @@ class _PartitionedCache(_Cache):
         self.load_calls += 1
         raise AssertionError("partitioned replay must not load the full candle cache")
 
+    def trading_days(self) -> tuple[date, ...]:
+        return tuple(sorted({item.at.date() for item in self.candles}))
+
     def iter_ticker_partitions(self):
         self.partition_passes += 1
         for ticker in self.descriptor.tickers:
@@ -236,7 +239,7 @@ def test_partitioned_full_portfolio_is_bitwise_equivalent_and_never_loads_all(
         == monolithic.completion.artifact_fingerprint
     )
     assert partitioned_cache.load_calls == 0
-    assert partitioned_cache.partition_passes == 2
+    assert partitioned_cache.partition_passes == 1
     assert partitioned_cache.maximum_partition_size < len(candles)
 
 

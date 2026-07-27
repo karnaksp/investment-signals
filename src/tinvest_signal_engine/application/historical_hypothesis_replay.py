@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -140,6 +141,114 @@ class _DaySeries:
 
 
 @dataclass(frozen=True, slots=True)
+class _SeriesIndex:
+    """Precomputed causal navigation for ticker/day series.
+
+    Replays ask for the same prior sessions and previous main close thousands
+    of times.  Keeping those lookups indexed preserves the exact formula while
+    avoiding a repeated full scan of every trading day.
+    """
+
+    series: dict[tuple[str, date], _DaySeries]
+    days_by_ticker: dict[str, tuple[date, ...]]
+    position_by_key: dict[tuple[str, date], int]
+    morning_days_by_ticker: dict[str, tuple[date, ...]]
+    main_close_by_key: dict[tuple[str, date], HistoricalCandle | None]
+    morning_candle_by_checkpoint: dict[
+        tuple[str, date, int], HistoricalCandle | None
+    ]
+    morning_cumulative_by_checkpoint: dict[tuple[str, date, int], float | None]
+
+    @classmethod
+    def build(cls, series: dict[tuple[str, date], _DaySeries]) -> _SeriesIndex:
+        days: defaultdict[str, list[date]] = defaultdict(list)
+        morning_days: defaultdict[str, list[date]] = defaultdict(list)
+        main_closes: dict[tuple[str, date], HistoricalCandle | None] = {}
+        morning_candles: dict[
+            tuple[str, date, int], HistoricalCandle | None
+        ] = {}
+        morning_cumulative: dict[tuple[str, date, int], float | None] = {}
+        for key, item in sorted(series.items()):
+            days[item.ticker].append(item.trading_day)
+            if _has_morning_session(item):
+                morning_days[item.ticker].append(item.trading_day)
+            eligible = tuple(
+                row for minute, row in item.by_minute.items() if minute >= 10 * 60
+            )
+            main_closes[key] = (
+                max(eligible, key=lambda row: row.at) if eligible else None
+            )
+            for checkpoint in _morning_checkpoints():
+                checkpoint_key = (item.ticker, item.trading_day, checkpoint)
+                morning_candles[checkpoint_key] = _morning_candle_at_or_before(
+                    item, checkpoint
+                )
+                morning_cumulative[checkpoint_key] = (
+                    _morning_cumulative_at_or_before(item, checkpoint)
+                )
+        ordered_days = {
+            ticker: tuple(values) for ticker, values in sorted(days.items())
+        }
+        return cls(
+            series=series,
+            days_by_ticker=ordered_days,
+            position_by_key={
+                (ticker, trading_day): position
+                for ticker, values in ordered_days.items()
+                for position, trading_day in enumerate(values)
+            },
+            morning_days_by_ticker={
+                ticker: tuple(values)
+                for ticker, values in sorted(morning_days.items())
+            },
+            main_close_by_key=main_closes,
+            morning_candle_by_checkpoint=morning_candles,
+            morning_cumulative_by_checkpoint=morning_cumulative,
+        )
+
+    def prior(self, current: _DaySeries, count: int) -> tuple[_DaySeries, ...]:
+        position = self.position_by_key[(current.ticker, current.trading_day)]
+        days = self.days_by_ticker[current.ticker]
+        return tuple(
+            self.series[(current.ticker, trading_day)]
+            for trading_day in days[max(0, position - count) : position]
+        )
+
+    def prior_morning(
+        self, current: _DaySeries, count: int
+    ) -> tuple[_DaySeries, ...]:
+        days = self.morning_days_by_ticker.get(current.ticker, ())
+        position = bisect_left(days, current.trading_day)
+        return tuple(
+            self.series[(current.ticker, trading_day)]
+            for trading_day in days[max(0, position - count) : position]
+        )
+
+    def previous_main_close(
+        self, current: _DaySeries
+    ) -> HistoricalCandle | None:
+        position = self.position_by_key[(current.ticker, current.trading_day)]
+        if position == 0:
+            return None
+        previous_day = self.days_by_ticker[current.ticker][position - 1]
+        return self.main_close_by_key[(current.ticker, previous_day)]
+
+    def morning_candle(
+        self, current: _DaySeries, checkpoint: int
+    ) -> HistoricalCandle | None:
+        return self.morning_candle_by_checkpoint[
+            (current.ticker, current.trading_day, checkpoint)
+        ]
+
+    def morning_cumulative(
+        self, current: _DaySeries, checkpoint: int
+    ) -> float | None:
+        return self.morning_cumulative_by_checkpoint[
+            (current.ticker, current.trading_day, checkpoint)
+        ]
+
+
+@dataclass(frozen=True, slots=True)
 class _CandidateValue:
     ticker: str
     event_at: datetime
@@ -224,16 +333,20 @@ class RunHistoricalHypothesisReplay:
         liquid universe is retained until that formula is evaluated.
         """
 
-        trading_days: set[date] = set()
-        moscow = ZoneInfo("Europe/Moscow")
-        for partition in cache.iter_ticker_partitions():
-            trading_days.update(
-                candle.at.astimezone(moscow).date()
-                for candle in partition
-                if candle.complete
-                and MOEX_EQUITY_PHASE_SCHEDULE_V1.is_signal_eligible(candle.at)
-            )
-        ordered_days = tuple(sorted(trading_days))
+        trading_day_reader = getattr(cache, "trading_days", None)
+        if callable(trading_day_reader):
+            ordered_days = tuple(sorted(set(trading_day_reader())))
+        else:
+            trading_days: set[date] = set()
+            moscow = ZoneInfo("Europe/Moscow")
+            for partition in cache.iter_ticker_partitions():
+                trading_days.update(
+                    candle.at.astimezone(moscow).date()
+                    for candle in partition
+                    if candle.complete
+                    and MOEX_EQUITY_PHASE_SCHEDULE_V1.is_signal_eligible(candle.at)
+                )
+            ordered_days = tuple(sorted(trading_days))
         split = (
             chronological_split_60_20_20(ordered_days)
             if len(ordered_days) >= 5
@@ -251,6 +364,7 @@ class RunHistoricalHypothesisReplay:
             series, _ = _build_series(partition)
             if not series:
                 continue
+            index = _SeriesIndex.build(series)
             tickers = {ticker for ticker, _ in series}
             if len(tickers) != 1:
                 raise ValueError(
@@ -266,6 +380,7 @@ class RunHistoricalHypothesisReplay:
                 self._replay_one(
                     hypothesis_id,
                     series,
+                    index,
                     split,
                     request,
                     outcomes,
@@ -276,9 +391,11 @@ class RunHistoricalHypothesisReplay:
                 retained_h6.update(series)
 
         if HypothesisId.H6 in selected:
+            index = _SeriesIndex.build(retained_h6)
             self._replay_one(
                 HypothesisId.H6,
                 retained_h6,
+                index,
                 split,
                 request,
                 outcomes,
@@ -306,6 +423,7 @@ class RunHistoricalHypothesisReplay:
         candles: Sequence[HistoricalCandle],
     ) -> HistoricalReplayReport:
         series, trading_days = _build_series(candles)
+        index = _SeriesIndex.build(series)
         split = (
             chronological_split_60_20_20(trading_days)
             if len(trading_days) >= 5
@@ -319,6 +437,7 @@ class RunHistoricalHypothesisReplay:
             self._replay_one(
                 hypothesis_id,
                 series,
+                index,
                 split,
                 request,
                 outcomes,
@@ -340,6 +459,7 @@ class RunHistoricalHypothesisReplay:
         self,
         hypothesis_id: HypothesisId,
         series: dict[tuple[str, date], _DaySeries],
+        index: _SeriesIndex,
         split: ChronologicalSplit | None,
         request: HistoricalReplayRequest,
         outcomes: list[ReplayOutcome],
@@ -350,6 +470,7 @@ class RunHistoricalHypothesisReplay:
             self._replay_morning(
                 hypothesis_id,
                 series,
+                index,
                 split,
                 request.cost_model,
                 outcomes,
@@ -359,6 +480,7 @@ class RunHistoricalHypothesisReplay:
         elif hypothesis_id is HypothesisId.H5:
             self._replay_phase_recurrence(
                 series,
+                index,
                 split,
                 request.cost_model,
                 outcomes,
@@ -378,6 +500,7 @@ class RunHistoricalHypothesisReplay:
         else:
             self._replay_activity(
                 series,
+                index,
                 split,
                 request.cost_model,
                 outcomes,
@@ -486,6 +609,7 @@ class RunHistoricalHypothesisReplay:
         self,
         hypothesis_id: HypothesisId,
         series: dict[tuple[str, date], _DaySeries],
+        index: _SeriesIndex,
         split: ChronologicalSplit | None,
         costs: ReplayCostModel,
         outcomes: list[ReplayOutcome],
@@ -493,26 +617,26 @@ class RunHistoricalHypothesisReplay:
         candidates: list[_CandidateValue],
     ) -> None:
         for current in _ordered_series(series):
-            history = _prior_morning_series(series, current, 20)
+            history = index.prior_morning(current, 20)
             if len(history) < 20:
                 continue
             for local_minute in _morning_checkpoints():
-                row = _morning_candle_at_or_before(current, local_minute)
-                current_cumulative = _morning_cumulative_at_or_before(
+                row = index.morning_candle(current, local_minute)
+                current_cumulative = index.morning_cumulative(
                     current, local_minute
                 )
                 if row is None or current_cumulative is None:
                     continue
-                previous_close = _previous_main_close(series, current)
+                previous_close = index.previous_main_close(current)
                 if previous_close is None:
                     continue
                 historical_deviations: list[float] = []
                 historical_cumulative: list[float] = []
                 historical_ranges: list[float] = []
                 for prior in history:
-                    prior_close = _previous_main_close(series, prior)
-                    prior_row = _morning_candle_at_or_before(prior, local_minute)
-                    prior_cumulative = _morning_cumulative_at_or_before(
+                    prior_close = index.previous_main_close(prior)
+                    prior_row = index.morning_candle(prior, local_minute)
+                    prior_cumulative = index.morning_cumulative(
                         prior, local_minute
                     )
                     if (
@@ -602,6 +726,7 @@ class RunHistoricalHypothesisReplay:
     def _replay_phase_recurrence(
         self,
         series: dict[tuple[str, date], _DaySeries],
+        index: _SeriesIndex,
         split: ChronologicalSplit | None,
         costs: ReplayCostModel,
         outcomes: list[ReplayOutcome],
@@ -609,7 +734,7 @@ class RunHistoricalHypothesisReplay:
         candidates: list[_CandidateValue],
     ) -> None:
         for current in _ordered_series(series):
-            history = _prior_series(series, current, 20)
+            history = index.prior(current, 20)
             if len(history) < 20:
                 continue
             for local_minute in sorted(current.by_minute):
@@ -817,6 +942,7 @@ class RunHistoricalHypothesisReplay:
     def _replay_activity(
         self,
         series: dict[tuple[str, date], _DaySeries],
+        index: _SeriesIndex,
         split: ChronologicalSplit | None,
         costs: ReplayCostModel,
         outcomes: list[ReplayOutcome],
@@ -824,7 +950,7 @@ class RunHistoricalHypothesisReplay:
         candidates: list[_CandidateValue],
     ) -> None:
         for current in _ordered_series(series):
-            history = _prior_series(series, current, 20)
+            history = index.prior(current, 20)
             if len(history) < 20:
                 continue
             for local_minute in sorted(current.by_minute):
