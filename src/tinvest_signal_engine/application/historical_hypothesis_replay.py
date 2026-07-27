@@ -50,7 +50,11 @@ from tinvest_signal_engine.domain.trading_phases import (
 )
 
 
-REPLAY_ENGINE_VERSION = "scientific-candle-replay-v1.0.0"
+REPLAY_ENGINE_VERSION = "scientific-candle-replay-v1.1.1"
+BOUNDED_CONTROL_REUSE_LIMIT = 5
+BOUNDED_CONTROL_SELECTION_POLICY_VERSION = (
+    "bounded-control-reuse-5-rarity-first-exact-strata-exclusion-5m-v1"
+)
 SUPPORTED_HYPOTHESES = (
     HypothesisId.H1,
     HypothesisId.H2,
@@ -404,9 +408,23 @@ class RunHistoricalHypothesisReplay:
                 split,
                 request.cost_model,
             )
+            bounded_reuse = hypothesis_id in (
+                HypothesisId.H1,
+                HypothesisId.H2,
+                HypothesisId.H5,
+            )
             controls = BuildMatchedControls(
                 controls_per_event=self._gate_policy.controls_per_event,
+                maximum_control_reuse=(
+                    BOUNDED_CONTROL_REUSE_LIMIT if bounded_reuse else 1
+                ),
+                selection_policy_version=(
+                    BOUNDED_CONTROL_SELECTION_POLICY_VERSION
+                    if bounded_reuse
+                    else "unique-control-rarity-first-exact-strata-exclusion-5m-v2"
+                ),
             ).execute(events, candidates)
+            reuse = controls.reuse_statistics
             holdout_eligible[hypothesis_id] = len(events)
             evidence_requests.append(
                 EvidenceRequest(
@@ -416,6 +434,24 @@ class RunHistoricalHypothesisReplay:
                     groups=controls.groups,
                     expected_eligible_events=len(events),
                     unmatched_event_ids=controls.unmatched_event_ids,
+                    control_reuse_statistics=(reuse if bounded_reuse else None),
+                    control_selection_policy_version=(
+                        controls.selection_policy_version if bounded_reuse else None
+                    ),
+                    maximum_control_reuse=controls.maximum_control_reuse,
+                    minimum_independent_control_clusters=(
+                        self._gate_policy.minimum_trading_days
+                        if bounded_reuse
+                        else 1
+                    ),
+                    minimum_eligible_events_override=(
+                        self._gate_policy.minimum_trading_days
+                        if hypothesis_id is HypothesisId.H6
+                        else None
+                    ),
+                    maximum_instrument_share_override=(
+                        1.0 if hypothesis_id is HypothesisId.H6 else None
+                    ),
                 )
             )
         evidence = AssessEvidencePortfolio(self._gate_policy).execute(evidence_requests)
@@ -457,35 +493,46 @@ class RunHistoricalHypothesisReplay:
         candidates: list[_CandidateValue],
     ) -> None:
         for current in _ordered_series(series):
-            if _series_position(series, current) < 20:
+            history = _prior_morning_series(series, current, 20)
+            if len(history) < 20:
                 continue
-            for local_minute in _morning_checkpoints(current):
-                row = current.by_minute[local_minute]
+            for local_minute in _morning_checkpoints():
+                row = _morning_candle_at_or_before(current, local_minute)
+                current_cumulative = _morning_cumulative_at_or_before(
+                    current, local_minute
+                )
+                if row is None or current_cumulative is None:
+                    continue
                 previous_close = _previous_main_close(series, current)
-                history = _prior_series(series, current, 20)
-                same_minute = [item.by_minute.get(local_minute) for item in history]
-                if previous_close is None or any(item is None for item in same_minute):
+                if previous_close is None:
                     continue
                 historical_deviations: list[float] = []
                 historical_cumulative: list[float] = []
                 historical_ranges: list[float] = []
                 for prior in history:
                     prior_close = _previous_main_close(series, prior)
-                    prior_row = prior.by_minute.get(local_minute)
-                    if prior_close is None or prior_row is None:
-                        continue
+                    prior_row = _morning_candle_at_or_before(prior, local_minute)
+                    prior_cumulative = _morning_cumulative_at_or_before(
+                        prior, local_minute
+                    )
+                    if (
+                        prior_close is None
+                        or prior_row is None
+                        or prior_cumulative is None
+                    ):
+                        break
                     historical_deviations.append(
                         _return_bps(prior_close.close, prior_row.close)
                     )
-                    historical_cumulative.append(prior.cumulative_volume[local_minute])
+                    historical_cumulative.append(prior_cumulative)
                     historical_ranges.append(_range_bps(prior_row))
                 if len(historical_deviations) < 20 or not all(historical_cumulative):
                     continue
                 deviation = _return_bps(previous_close.close, row.close)
                 deviation_z = _z_score(historical_deviations, deviation)
-                cumulative_relative_volume = current.cumulative_volume[
-                    local_minute
-                ] / fmean(historical_cumulative)
+                cumulative_relative_volume = (
+                    current_cumulative / fmean(historical_cumulative)
+                )
                 range_rank = _percentile_rank(historical_ranges, _range_bps(row))
                 features = _feature_set(
                     row.at,
@@ -502,7 +549,7 @@ class RunHistoricalHypothesisReplay:
                     ticker=current.ticker,
                     event_at=row.at,
                     features=features,
-                    has_trading_gap=_has_gap(current, 7 * 60, local_minute),
+                    has_trading_gap=False,
                 )
                 raw_by_horizon = {
                     horizon: _directional_return_from_minutes(
@@ -935,6 +982,26 @@ def _prior_series(
     )
 
 
+def _prior_morning_series(
+    series: dict[tuple[str, date], _DaySeries],
+    current: _DaySeries,
+    count: int,
+) -> tuple[_DaySeries, ...]:
+    """Return prior sessions that actually expose the preregistered morning."""
+
+    candidates = tuple(
+        series[(current.ticker, day)]
+        for day in _ticker_days(series, current.ticker)
+        if day < current.trading_day
+        and _has_morning_session(series[(current.ticker, day)])
+    )
+    return candidates[-count:]
+
+
+def _has_morning_session(series: _DaySeries) -> bool:
+    return any(7 * 60 <= minute <= 9 * 60 + 49 for minute in series.by_minute)
+
+
 def _previous_main_close(
     series: dict[tuple[str, date], _DaySeries],
     current: _DaySeries,
@@ -946,13 +1013,53 @@ def _previous_main_close(
     return max(eligible, key=lambda item: item.at) if eligible else None
 
 
-def _morning_checkpoints(series: _DaySeries) -> tuple[int, ...]:
-    return tuple(
-        minute
-        for minute in sorted(series.by_minute)
-        if 7 * 60 <= minute <= 9 * 60 + 49
-        and (minute % 15 == 14 or minute == 9 * 60 + 49)
+def _morning_checkpoints() -> tuple[int, ...]:
+    """Return preregistered checkpoints, including the last pre-open minute."""
+
+    regular = tuple(range(7 * 60 + 14, 9 * 60 + 45, 15))
+    return regular + (9 * 60 + 49,)
+
+
+def _morning_candle_at_or_before(
+    series: _DaySeries,
+    checkpoint_minute: int,
+    *,
+    maximum_staleness_minutes: int = 14,
+) -> HistoricalCandle | None:
+    """Use the last observed trade without mistaking a no-trade minute for a halt.
+
+    T-Invest omits one-minute candles when an instrument has no trades.  Low
+    morning activity is part of H1's definition, so requiring an exact candle
+    at every checkpoint would systematically remove the regime being tested.
+    The bounded backward lookup is causal and never reads beyond the sealed
+    checkpoint.
+    """
+
+    candidates = tuple(
+        (minute, candle)
+        for minute, candle in series.by_minute.items()
+        if 7 * 60 <= minute <= checkpoint_minute
     )
+    if not candidates:
+        return None
+    observed_minute, candle = max(candidates, key=lambda item: item[0])
+    if checkpoint_minute - observed_minute > maximum_staleness_minutes:
+        return None
+    return candle
+
+
+def _morning_cumulative_at_or_before(
+    series: _DaySeries,
+    checkpoint_minute: int,
+) -> float | None:
+    eligible = tuple(
+        minute
+        for minute in series.cumulative_volume
+        if minute <= checkpoint_minute
+    )
+    if not eligible:
+        return None
+    return series.cumulative_volume[max(eligible)]
 
 
 def _feature_set(

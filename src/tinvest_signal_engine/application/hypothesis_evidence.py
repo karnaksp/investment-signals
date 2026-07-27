@@ -159,6 +159,8 @@ class EvidenceRequest:
     control_selection_policy_version: str | None = None
     maximum_control_reuse: int = 1
     minimum_independent_control_clusters: int = 1
+    minimum_eligible_events_override: int | None = None
+    maximum_instrument_share_override: float | None = None
 
     def __post_init__(self) -> None:
         if not self.hypothesis_id.strip() or not self.hypothesis_version.strip():
@@ -197,6 +199,16 @@ class EvidenceRequest:
             raise ValueError("minimum_independent_control_clusters must be positive")
         if self.maximum_control_reuse <= 0:
             raise ValueError("maximum_control_reuse must be positive")
+        if (
+            self.minimum_eligible_events_override is not None
+            and self.minimum_eligible_events_override <= 0
+        ):
+            raise ValueError("minimum eligible events override must be positive")
+        if (
+            self.maximum_instrument_share_override is not None
+            and not 0.0 < self.maximum_instrument_share_override <= 1.0
+        ):
+            raise ValueError("maximum instrument share override must be in (0, 1]")
         if (
             self.control_selection_policy_version is not None
             and not self.control_selection_policy_version.strip()
@@ -329,7 +341,11 @@ class AssessEvidencePortfolio:
             len(group.controls) != self._policy.controls_per_event for group in groups
         )
         reasons: list[str] = []
-        if matched_event_count < self._policy.minimum_eligible_events:
+        minimum_eligible_events = (
+            request.minimum_eligible_events_override
+            or self._policy.minimum_eligible_events
+        )
+        if matched_event_count < minimum_eligible_events:
             reasons.append("minimum_eligible_events_not_met")
         if (
             request.expected_eligible_events
@@ -368,9 +384,13 @@ class AssessEvidencePortfolio:
         )
         concentrations = _instrument_concentrations(groups)
         maximum_share = max((item.share for item in concentrations), default=None)
+        maximum_instrument_share = (
+            request.maximum_instrument_share_override
+            or self._policy.maximum_instrument_share
+        )
         if (
             maximum_share is not None
-            and maximum_share > self._policy.maximum_instrument_share
+            and maximum_share > maximum_instrument_share
         ):
             reasons.append("single_instrument_concentration_exceeded")
 
@@ -685,6 +705,12 @@ def _evidence_id(request: EvidenceRequest) -> str:
         ),
         "control_selection_policy_version": (request.control_selection_policy_version),
         "maximum_control_reuse": request.maximum_control_reuse,
+        "minimum_eligible_events_override": (
+            request.minimum_eligible_events_override
+        ),
+        "maximum_instrument_share_override": (
+            request.maximum_instrument_share_override
+        ),
         "control_reuse_statistics": (
             {
                 "distinct_controls": (

@@ -688,6 +688,30 @@ def test_single_ticker_concentration_blocks_otherwise_positive_evidence() -> Non
     assert bundle.maximum_instrument_share == 1.0
 
 
+def test_preregistered_day_level_basket_uses_independent_day_sample_gate() -> None:
+    request = _request(
+        "h-day-level-basket",
+        [8.0] * 30,
+        events_per_day=1,
+        instruments=("MOEX_FIXED_BASKET",),
+    )
+
+    (bundle,) = AssessEvidencePortfolio(_fast_policy()).execute(
+        (
+            replace(
+                request,
+                minimum_eligible_events_override=30,
+                maximum_instrument_share_override=1.0,
+            ),
+        )
+    )
+
+    assert bundle.decision is EvidenceDecision.PASSED
+    assert bundle.trading_days == 30
+    assert bundle.matched_events == 30
+    assert bundle.maximum_instrument_share == 1.0
+
+
 def test_multiple_hypotheses_share_one_fdr_family_and_keep_all_results() -> None:
     positive = _request("h-positive", [9.0] * 30)
     mixed = _request("h-mixed", [1.0] * 15 + [-1.0] * 15)

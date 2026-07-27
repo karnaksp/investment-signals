@@ -46,6 +46,12 @@ same local market data instead of repeatedly calling T-Invest. Persisted
 artifacts intentionally exclude broker tokens, account identifiers, instrument
 UIDs, and FIGIs.
 
+The default Moscow session window is `07:00–19:00`. Caches created by older
+versions started at `10:00`; the current command detects those legacy trading
+partitions, downloads only the missing `07:00–09:59` interval, and merges it
+with the existing main-session rows. A completed cache records its session
+window in `manifest.json`, so subsequent runs do not repeat the repair.
+
 The cache also preserves T-Invest's historical `volume_buy` and `volume_sell`
 fields. The dataset derives buyer/seller imbalance at the event and over every
 pre-signal window. This is available immediately for historical research and

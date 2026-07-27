@@ -258,10 +258,13 @@ PROSPECTIVE_EVIDENCE_DEFINITIONS = {
 
 BOUNDED_CONTROL_REUSE_HYPOTHESES = frozenset(
     {
+        ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+        ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
         ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V3,
         ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V3,
         ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+        ProspectiveHypothesis.SAME_PHASE_RETURN_RECURRENCE,
         ProspectiveHypothesis.MARKET_RESIDUAL_REVERSION_V2,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
         ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION_V2,
@@ -662,6 +665,18 @@ class AssessProspectiveScientificEvidence:
                 control_selection_policy_version=(matched.selection_policy_version),
                 maximum_control_reuse=matched.maximum_control_reuse,
                 minimum_independent_control_clusters=(minimum_independent_clusters),
+                minimum_eligible_events_override=(
+                    self.policy.minimum_trading_days
+                    if hypothesis
+                    is ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION
+                    else None
+                ),
+                maximum_instrument_share_override=(
+                    1.0
+                    if hypothesis
+                    is ProspectiveHypothesis.OPEN_CLOSE_MARKET_CONTINUATION
+                    else None
+                ),
             ),
             coverage,
         )

@@ -6,7 +6,7 @@ import importlib.util
 import json
 import plistlib
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -952,6 +952,58 @@ def test_candle_cache_cli_accepts_refresh_days() -> None:
 
     assert args.refresh_days == "2026-07-16"
     assert args.insecure_skip_tls_verify is True
+
+
+def test_candle_cache_defaults_to_full_moscow_session() -> None:
+    pytest.importorskip("httpx")
+    cache = _load_script("research_cache_tinvest_candles", "research_cache_tinvest_candles.py")
+
+    args = cache.parse_args(
+        [
+            "--env-file",
+            ".env",
+            "--start-day",
+            "2026-07-15",
+            "--end-day",
+            "2026-07-16",
+        ]
+    )
+
+    assert args.session_start == time(7, 0)
+    assert args.session_end == time(19, 0)
+
+
+def test_candle_cache_detects_legacy_main_session_partition() -> None:
+    pytest.importorskip("httpx")
+    cache = _load_script("research_cache_tinvest_candles", "research_cache_tinvest_candles.py")
+    legacy = [{"at": "2026-07-15T07:00:00+00:00"}]  # 10:00 Moscow
+    complete = [{"at": "2026-07-15T04:17:00+00:00"}]  # 07:17 Moscow
+
+    assert cache._requires_morning_backfill(legacy, requested_start=time(7, 0))
+    assert not cache._requires_morning_backfill(complete, requested_start=time(7, 0))
+    assert not cache._requires_morning_backfill([], requested_start=time(7, 0))
+
+
+def test_candle_cache_merges_morning_repair_without_duplicate_boundary() -> None:
+    pytest.importorskip("httpx")
+    cache = _load_script("research_cache_tinvest_candles", "research_cache_tinvest_candles.py")
+    morning = [
+        {"ticker": "SBER", "at": "2026-07-15T04:00:00+00:00", "close": 100.0},
+        {"ticker": "SBER", "at": "2026-07-15T07:00:00+00:00", "close": 100.5},
+    ]
+    existing = [
+        {"ticker": "SBER", "at": "2026-07-15T07:00:00+00:00", "close": 101.0},
+        {"ticker": "SBER", "at": "2026-07-15T07:01:00+00:00", "close": 101.5},
+    ]
+
+    merged = cache._merge_partition_records(morning, existing)
+
+    assert [row["at"] for row in merged] == [
+        "2026-07-15T04:00:00+00:00",
+        "2026-07-15T07:00:00+00:00",
+        "2026-07-15T07:01:00+00:00",
+    ]
+    assert merged[1]["close"] == 101.0
 
 
 def test_liquidity_holdout_update_reads_orderbook_dates(tmp_path: Path) -> None:

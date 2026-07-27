@@ -460,3 +460,28 @@ def test_h1_threshold_matches_canonical_half_volume_rule(tmp_path: Path) -> None
     )
     assert report is not None
     assert any(item.verdict is ObservationVerdict.MATCHED for item in report.outcomes)
+
+
+def test_morning_replay_uses_bounded_last_trade_for_no_trade_minute(
+    tmp_path: Path,
+) -> None:
+    moscow = timezone(timedelta(hours=3))
+    candles = tuple(
+        candle
+        for candle in _fixture_candles()
+        if candle.at.astimezone(moscow).time() != time(7, 14)
+    )
+
+    report = (
+        RunHistoricalHypothesisReplay(
+            cache=_Cache(candles),
+            artifacts=ImmutableReplayArtifactStore(tmp_path),
+            gate_policy=_gate(),
+        )
+        .execute(_request(HypothesisId.H1))
+        .report
+    )
+
+    assert report is not None
+    assert any(item.verdict is ObservationVerdict.MATCHED for item in report.outcomes)
+    assert all(item.feature_cutoff_at <= item.event_at for item in report.outcomes)
