@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -624,6 +625,7 @@ def test_internal_runner_stages_full_combination_sources_and_wires_bounded_evide
         DerivedReplayEvidenceResponse.model_validate(item)
         for item in result["derived_evidence"]
     )
+    json.dumps(result)
     assert tuple(item["hypothesis_id"] for item in result["evidence"]) == tuple(
         sorted(source_ids)
     )

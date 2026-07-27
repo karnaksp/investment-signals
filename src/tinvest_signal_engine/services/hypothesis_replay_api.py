@@ -1346,7 +1346,9 @@ class LocalHypothesisPortfolioRunner:
                     }
                 )
                 derived_evidence.extend(
-                    asdict(item)
+                    DerivedReplayEvidenceResponse.model_validate(
+                        asdict(item)
+                    ).model_dump(mode="json")
                     for item in self._derived_combination_evidence.execute(
                         combination_completion.artifact.artifact_uri,
                         expected_artifact_fingerprint=(
