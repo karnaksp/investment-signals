@@ -14,6 +14,8 @@ from pathlib import Path
 import shutil
 from typing import Any, Iterable, Mapping
 
+import orjson
+
 from tinvest_signal_engine.application.prospective_scientific_models import (
     ProspectiveScientificReport,
 )
@@ -299,15 +301,13 @@ class FileProspectiveScientificRowSpool:
                     raise ValueError("spooled ticker rows must be ordered")
                 previous_key = key
                 handle.write(
-                    json.dumps(
+                    orjson.dumps(
                         {
                             "feature": _json_value(feature),
                             "outcome": _json_value(outcome),
                         },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
+                        option=orjson.OPT_SORT_KEYS,
+                    )
                     + b"\n"
                 )
                 count += 1
@@ -341,9 +341,9 @@ class FileProspectiveScientificRowSpool:
     def _iter_file(
         path: Path,
     ) -> Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]]:
-        with path.open("r", encoding="utf-8") as handle:
+        with path.open("rb") as handle:
             for line in handle:
-                payload = json.loads(line)
+                payload = orjson.loads(line)
                 yield (
                     _feature_from_json(payload["feature"]),
                     _outcome_from_json(payload["outcome"]),
