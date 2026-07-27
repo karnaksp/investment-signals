@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 
 from tinvest_signal_engine.config import RuntimeSettings, load_secret
-from tinvest_signal_engine.adapters.delivery_senders import ConfiguredDeliverySender
+from tinvest_signal_engine.adapters.delivery_senders import (
+    ConfiguredDeliverySender,
+    telegram_http_client,
+)
 from tinvest_signal_engine.adapters.telegram_http import (
     TelegramMultiAddressHttpClient,
 )
@@ -140,6 +144,8 @@ def test_empty_live_secret_files_disable_started_telegram_delivery(
     chat_file.write_text("-100200\n", encoding="utf-8")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN_FILE", str(token_file))
     monkeypatch.setenv("TELEGRAM_CHAT_ID_FILE", str(chat_file))
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
     settings = replace(
         RuntimeSettings.from_env(service_name="delivery_worker"),
         telegram_bot_token="startup-token",
@@ -172,3 +178,16 @@ def test_empty_live_secret_files_disable_started_telegram_delivery(
         assert detector._delivery_targets() == ()
     finally:
         sender.close()
+
+
+def test_telegram_delivery_uses_operator_https_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:17897")
+
+    client = telegram_http_client()
+
+    try:
+        assert isinstance(client, httpx.Client)
+    finally:
+        client.close()

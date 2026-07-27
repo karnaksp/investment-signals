@@ -490,7 +490,7 @@ class PostgresDeliveryQueue:
                 WHERE target.outbox_id = candidate.outbox_id
                 RETURNING target.outbox_id, target.signal_id,
                           target.destination_type, target.payload_json,
-                          target.attempt_count
+                          target.attempt_count, target.last_error_code
                 """,
                 (available_at, lease_until),
             )
@@ -504,6 +504,11 @@ class PostgresDeliveryQueue:
             destination_type=str(row["destination_type"]),
             payload=dict(payload) if isinstance(payload, dict) else {},
             attempt_count=int(row["attempt_count"]),
+            previous_error_code=(
+                str(row["last_error_code"])
+                if row["last_error_code"] is not None
+                else None
+            ),
         )
 
     def mark_delivered(

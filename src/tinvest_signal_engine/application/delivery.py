@@ -12,6 +12,7 @@ from tinvest_signal_engine.domain.delivery_recovery import (
 )
 from tinvest_signal_engine.domain.reliable_processing import (
     DeliveryTask,
+    is_transient_delivery_failure,
     retry_decision,
 )
 
@@ -88,7 +89,8 @@ class DurableDeliveryWorker:
         )
         if task is None:
             return DeliveryRunResult("idle", None)
-        if self._recovery_guard is not None:
+        admitted_retry = is_transient_delivery_failure(task.previous_error_code)
+        if self._recovery_guard is not None and not admitted_retry:
             freshness = self._recovery_guard.evaluate(task)
             if not freshness.allow_external_delivery:
                 self._queue.mark_failed(
@@ -106,12 +108,20 @@ class DurableDeliveryWorker:
         try:
             self._sender.send(task)
         except DeliveryFailure as failure:
-            decision = retry_decision(
-                attempt_count=task.attempt_count,
-                maximum_attempts=self._maximum_attempts,
-                base_delay_seconds=self._retry_base_seconds,
-                maximum_delay_seconds=self._retry_maximum_seconds,
-            )
+            if is_transient_delivery_failure(failure.reason_code):
+                decision = retry_decision(
+                    attempt_count=task.attempt_count,
+                    maximum_attempts=self._maximum_attempts,
+                    base_delay_seconds=self._retry_base_seconds,
+                    maximum_delay_seconds=self._retry_maximum_seconds,
+                )
+            else:
+                decision = retry_decision(
+                    attempt_count=self._maximum_attempts,
+                    maximum_attempts=self._maximum_attempts,
+                    base_delay_seconds=self._retry_base_seconds,
+                    maximum_delay_seconds=self._retry_maximum_seconds,
+                )
             failed_at = self._clock()
             self._queue.mark_failed(
                 task,

@@ -316,13 +316,18 @@ class FakeSender:
             raise DeliveryFailure(self.failure)
 
 
-def _delivery_task(attempt_count: int) -> DeliveryTask:
+def _delivery_task(
+    attempt_count: int,
+    *,
+    previous_error_code: str | None = None,
+) -> DeliveryTask:
     return DeliveryTask(
         outbox_id="00000000-0000-0000-0000-000000000002",
         signal_id=_signal().signal_id,
         destination_type="webhook",
         payload={},
         attempt_count=attempt_count,
+        previous_error_code=previous_error_code,
     )
 
 
@@ -351,7 +356,7 @@ def test_delivery_failure_is_retried_before_limit() -> None:
     queue = FakeQueue(_delivery_task(2))
     metrics = FakeMetrics()
 
-    result = _worker(queue, FakeSender("timeout"), metrics).run_once()
+    result = _worker(queue, FakeSender("delivery_timeout"), metrics).run_once()
 
     assert result.outcome == "retry"
     assert queue.failures == [(False, 2)]
@@ -362,7 +367,7 @@ def test_delivery_failure_moves_to_dead_letter_at_limit() -> None:
     queue = FakeQueue(_delivery_task(3))
     metrics = FakeMetrics()
 
-    result = _worker(queue, FakeSender("http_500"), metrics).run_once()
+    result = _worker(queue, FakeSender("delivery_http_500"), metrics).run_once()
 
     assert result.outcome == "dead_letter"
     assert queue.failures == [(True, 3)]
@@ -397,6 +402,47 @@ def test_stale_queued_delivery_is_terminally_suppressed_before_sender() -> None:
     assert queue.failures == [(True, 1)]
     assert queue.failure_reasons == ["delivery_event_age_exceeded"]
     assert metrics.deliveries == ["suppressed_stale"]
+
+
+def test_admitted_transient_retry_is_not_rejected_as_stale() -> None:
+    class StaleGuard:
+        def evaluate(self, task: DeliveryTask) -> DeliveryFreshnessDecision:
+            raise AssertionError("admitted retry must not repeat the freshness gate")
+
+    queue = FakeQueue(
+        _delivery_task(
+            2,
+            previous_error_code="delivery_network_error",
+        )
+    )
+    sender = FakeSender()
+    metrics = FakeMetrics()
+
+    result = _worker(
+        queue,
+        sender,
+        metrics,
+        recovery_guard=StaleGuard(),
+    ).run_once()
+
+    assert result.outcome == "delivered"
+    assert sender.sent == 1
+    assert queue.delivered == 1
+
+
+def test_permanent_delivery_failure_is_dead_lettered_immediately() -> None:
+    queue = FakeQueue(_delivery_task(1))
+    metrics = FakeMetrics()
+
+    result = _worker(
+        queue,
+        FakeSender("telegram_not_configured"),
+        metrics,
+    ).run_once()
+
+    assert result.outcome == "dead_letter"
+    assert queue.failures == [(True, 1)]
+    assert queue.failure_reasons == ["telegram_not_configured"]
 
 
 def test_redis_runtime_uses_aof_and_noeviction() -> None:

@@ -97,6 +97,7 @@ class DeliveryTask:
     destination_type: str
     payload: dict[str, object]
     attempt_count: int
+    previous_error_code: str | None = None
 
     def __post_init__(self) -> None:
         if self.destination_type not in DELIVERY_DESTINATIONS:
@@ -143,16 +144,26 @@ def manual_delivery_retry_decision(
 
     if delivery.status != "dead_letter":
         return ManualDeliveryRetryDecision(False, "delivery_not_dead_letter")
-    reason = (delivery.last_error_code or "").strip().lower()
-    if reason in _MANUALLY_RETRYABLE_DELIVERY_FAILURES:
+    if is_transient_delivery_failure(delivery.last_error_code):
         return ManualDeliveryRetryDecision(True, "transient_failure_retry_allowed")
+    return ManualDeliveryRetryDecision(False, "delivery_failure_not_retryable")
+
+
+def is_transient_delivery_failure(reason_code: str | None) -> bool:
+    """Return whether an external send failed after a retryable attempt.
+
+    These failures also prove that the signal passed the realtime freshness
+    gate before the first external attempt. A bounded retry may therefore
+    continue without converting the original failure into a stale-event error.
+    """
+
+    reason = (reason_code or "").strip().lower()
+    if reason in _MANUALLY_RETRYABLE_DELIVERY_FAILURES:
+        return True
     if reason.startswith("delivery_http_"):
         status_code = reason.removeprefix("delivery_http_")
-        if status_code.isdigit() and 500 <= int(status_code) <= 599:
-            return ManualDeliveryRetryDecision(
-                True, "transient_failure_retry_allowed"
-            )
-    return ManualDeliveryRetryDecision(False, "delivery_failure_not_retryable")
+        return status_code.isdigit() and 500 <= int(status_code) <= 599
+    return False
 
 
 @dataclass(frozen=True)

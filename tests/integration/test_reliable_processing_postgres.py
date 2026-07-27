@@ -203,6 +203,7 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
         )
         assert task is not None
         assert task.attempt_count == 1
+        assert task.previous_error_code is None
         queue.mark_failed(
             task,
             reason_code="integration_retry",
@@ -215,6 +216,7 @@ def test_replay_keeps_one_inbox_signal_and_outbox_row() -> None:
         )
         assert retry is not None
         assert retry.attempt_count == 2
+        assert retry.previous_error_code == "integration_retry"
         queue.mark_delivered(retry, delivered_at=claim_at)
         with connection.cursor() as cursor:
             cursor.execute(
