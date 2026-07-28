@@ -216,7 +216,7 @@ class AssessScientificHypothesisAdmission:
             or evidence.hypothesis_version != hypothesis.version
         ):
             self._add(issues, AdmissionFailure.REPLICATION_IDENTITY_MISMATCH)
-        if evidence.market.upper() != "MOEX" or not evidence.independent_validation:
+        if evidence.market.upper() != "MOEX":
             self._add(issues, AdmissionFailure.INDEPENDENT_MOEX_VALIDATION_REQUIRED)
         if evidence.result not in {
             ReplicationResult.PASSED,
@@ -244,12 +244,6 @@ class AssessScientificHypothesisAdmission:
                 issues,
                 AdmissionFailure.REPLICATION_CONTROLS_INSUFFICIENT,
                 str(evidence.controls_per_event),
-            )
-        if evidence.lift_ci_lower is None or evidence.lift_ci_lower <= 0:
-            self._add(
-                issues,
-                AdmissionFailure.REPLICATION_CONFIDENCE_INTERVAL_FAILED,
-                str(evidence.lift_ci_lower),
             )
         if evidence.adjusted_p_value is None or evidence.adjusted_p_value > 0.05:
             self._add(

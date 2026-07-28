@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
 from math import exp, log1p, sqrt
-from statistics import fmean
+from statistics import fmean, median
 from typing import Iterable, Sequence
 from zoneinfo import ZoneInfo
 
@@ -42,12 +42,9 @@ class PreviousSignalEvent:
             raise ValueError("previous signal event_at must be timezone-aware")
         if self.direction not in (-1, 0, 1):
             raise ValueError("previous signal direction must be -1, 0, or 1")
-        if (
-            self.outcome_ready_at is not None
-            and (
-                self.outcome_ready_at.tzinfo is None
-                or self.outcome_ready_at.utcoffset() is None
-            )
+        if self.outcome_ready_at is not None and (
+            self.outcome_ready_at.tzinfo is None
+            or self.outcome_ready_at.utcoffset() is None
         ):
             raise ValueError("outcome_ready_at must be timezone-aware")
 
@@ -70,7 +67,7 @@ class ResearchFeature:
 
 @dataclass(frozen=True, slots=True)
 class MorningRetracementResearchPolicy:
-    version: str = "morning-retracement-discovery-v1.1.0"
+    version: str = "morning-retracement-discovery-v1.3.0"
     morning_start_minute: int = 7 * 60
     first_snapshot_minute: int = 7 * 60 + 15
     final_snapshot_minute: int = 10 * 60
@@ -85,7 +82,8 @@ class MorningRetracementResearchPolicy:
         if not self.version.strip():
             raise ValueError("policy version must not be empty")
         if not (
-            0 <= self.morning_start_minute
+            0
+            <= self.morning_start_minute
             < self.first_snapshot_minute
             <= self.final_snapshot_minute
             < self.outcome_deadline_minute
@@ -162,12 +160,18 @@ class BuildMorningRetracementResearch:
         result: list[MorningRetracementExample] = []
         for ticker, days in sorted(days_by_ticker.items()):
             ordered_days = sorted(set(days))
+            cumulative_volume_history: defaultdict[int, list[float]] = defaultdict(list)
             for position, trading_day in enumerate(ordered_days):
+                current_rows = series[(ticker, trading_day)]
                 if position == 0:
+                    _record_cumulative_volume_history(
+                        cumulative_volume_history,
+                        current_rows,
+                        policy=self._policy,
+                    )
                     continue
                 previous_day = ordered_days[position - 1]
                 previous_rows = series[(ticker, previous_day)]
-                current_rows = series[(ticker, trading_day)]
                 previous_close = previous_rows[-1].close
                 tick_size = _estimate_tick_size(previous_rows + current_rows)
                 previous_features = _previous_session_features(previous_rows)
@@ -222,7 +226,14 @@ class BuildMorningRetracementResearch:
                         fractions=self._policy.retracement_fractions,
                     )
                     features = (
-                        _morning_features(snapshot, observed)
+                        _morning_features(
+                            snapshot,
+                            observed,
+                            historical_cumulative_volume=_historical_cumulative_volume(
+                                cumulative_volume_history,
+                                minute,
+                            ),
+                        )
                         + _current_signal_features(
                             signals.get((ticker, trading_day), ()),
                             feature_cutoff_at=snapshot.observed_at,
@@ -261,6 +272,11 @@ class BuildMorningRetracementResearch:
                             label_available=label_available,
                         )
                     )
+                _record_cumulative_volume_history(
+                    cumulative_volume_history,
+                    current_rows,
+                    policy=self._policy,
+                )
         return tuple(
             sorted(
                 result,
@@ -289,7 +305,9 @@ def _group_candles(
 def _group_signals(
     signals: Iterable[PreviousSignalEvent],
 ) -> dict[tuple[str, date], tuple[PreviousSignalEvent, ...]]:
-    grouped: defaultdict[tuple[str, date], list[PreviousSignalEvent]] = defaultdict(list)
+    grouped: defaultdict[tuple[str, date], list[PreviousSignalEvent]] = defaultdict(
+        list
+    )
     for event in signals:
         grouped[(event.ticker, event.event_at.astimezone(MOSCOW).date())].append(event)
     return {
@@ -322,14 +340,10 @@ def _previous_session_features(
         "prior_return_15m_bps": _window_return(rows, 15),
         "prior_return_30m_bps": _window_return(rows, 30),
         "prior_return_60m_bps": _window_return(rows, 60),
-        "prior_close_position": (
-            (rows[-1].close - low) / span if span > 0.0 else 0.5
-        ),
+        "prior_close_position": ((rows[-1].close - low) / span if span > 0.0 else 0.5),
         "prior_close_to_vwap_bps": (rows[-1].close / vwap - 1.0) * 10_000.0,
         "prior_range_bps": span / rows[0].open * 10_000.0,
-        "prior_realized_volatility_bps": sqrt(
-            sum(value * value for value in returns)
-        ),
+        "prior_realized_volatility_bps": sqrt(sum(value * value for value in returns)),
         "prior_log_total_volume": log1p(total_volume),
         "prior_closing_volume_ratio": (
             closing_volume / prior_volume if prior_volume > 0.0 else 0.0
@@ -371,10 +385,7 @@ def _previous_signal_features(
     }
     for hours in decay_hours:
         values[f"prior_signal_decay_{hours}h"] = sum(
-            exp(
-                -(feature_cutoff_at - item.event_at).total_seconds()
-                / (hours * 3600.0)
-            )
+            exp(-(feature_cutoff_at - item.event_at).total_seconds() / (hours * 3600.0))
             for item in events
             if item.event_at < feature_cutoff_at
         )
@@ -414,17 +425,11 @@ def _current_signal_features(
             sum(item.direction == -excursion_direction for item in eligible)
         ),
         "morning_signal_decay_15m": sum(
-            exp(
-                -(feature_cutoff_at - item.event_at).total_seconds()
-                / (15.0 * 60.0)
-            )
+            exp(-(feature_cutoff_at - item.event_at).total_seconds() / (15.0 * 60.0))
             for item in eligible
         ),
         "morning_signal_decay_60m": sum(
-            exp(
-                -(feature_cutoff_at - item.event_at).total_seconds()
-                / 3600.0
-            )
+            exp(-(feature_cutoff_at - item.event_at).total_seconds() / 3600.0)
             for item in eligible
         ),
     }
@@ -446,6 +451,8 @@ def _current_signal_features(
 def _morning_features(
     snapshot: MorningSnapshot,
     rows: tuple[HistoricalCandle, ...],
+    *,
+    historical_cumulative_volume: float | None,
 ) -> tuple[ResearchFeature, ...]:
     direction = int(snapshot.direction)
     high = max(item.high for item in rows)
@@ -461,10 +468,19 @@ def _morning_features(
         for left, right in zip(rows, rows[1:])
         if left.close > 0.0
     ]
-    favorable_progress = direction * (
-        snapshot.current_price - snapshot.running_extreme
-    )
+    favorable_progress = direction * (snapshot.current_price - snapshot.running_extreme)
     streak = _directional_streak(rows)
+    elapsed_minutes = max(
+        1,
+        _local_minute(snapshot.observed_at) - 7 * 60 + 1,
+    )
+    active_minutes = len({_local_minute(item.at) for item in rows})
+    baseline_available = (
+        historical_cumulative_volume is not None and historical_cumulative_volume > 0.0
+    )
+    relative_volume = (
+        volume / historical_cumulative_volume if baseline_available else 0.0
+    )
     values = {
         "decision_local_minute": float(_local_minute(snapshot.observed_at)),
         "excursion_bps": snapshot.excursion_bps,
@@ -485,11 +501,26 @@ def _morning_features(
             sum(value * value for value in returns)
         ),
         "morning_range_bps": (high - low) / snapshot.previous_close * 10_000.0,
-        "morning_close_to_vwap_bps": (
-            snapshot.current_price / vwap - 1.0
-        )
-        * 10_000.0,
+        "morning_close_to_vwap_bps": (snapshot.current_price / vwap - 1.0) * 10_000.0,
         "morning_log_cumulative_volume": log1p(volume),
+        "morning_log_cumulative_turnover_proxy": log1p(
+            sum(item.close * item.volume for item in rows)
+        ),
+        "morning_active_minute_ratio": min(
+            1.0,
+            active_minutes / elapsed_minutes,
+        ),
+        "morning_volume_per_active_minute": (
+            volume / active_minutes if active_minutes else 0.0
+        ),
+        "morning_volume_baseline_available": float(baseline_available),
+        "morning_log_historical_cumulative_volume": (
+            log1p(historical_cumulative_volume) if baseline_available else 0.0
+        ),
+        "morning_relative_volume": min(relative_volume, 10.0),
+        "morning_relative_volume_at_most_half": float(
+            baseline_available and relative_volume <= 0.50
+        ),
         "morning_directional_streak": float(streak),
         "tradable_excursion": float(snapshot.excursion_bps >= 40.0),
     }
@@ -497,6 +528,43 @@ def _morning_features(
         ResearchFeature(name, value, snapshot.observed_at, "morning")
         for name, value in sorted(values.items())
     )
+
+
+def _historical_cumulative_volume(
+    history: defaultdict[int, list[float]],
+    local_minute: int,
+    *,
+    maximum_sessions: int = 20,
+) -> float | None:
+    values = history.get(local_minute, ())
+    if not values:
+        return None
+    return float(median(values[-maximum_sessions:]))
+
+
+def _record_cumulative_volume_history(
+    history: defaultdict[int, list[float]],
+    rows: tuple[HistoricalCandle, ...],
+    *,
+    policy: MorningRetracementResearchPolicy,
+) -> None:
+    morning = tuple(
+        item
+        for item in rows
+        if policy.morning_start_minute
+        <= _local_minute(item.at)
+        <= policy.final_snapshot_minute
+    )
+    if not morning:
+        return
+    for minute in range(
+        policy.first_snapshot_minute,
+        policy.final_snapshot_minute + 1,
+        policy.snapshot_step_minutes,
+    ):
+        observed = tuple(item for item in morning if _local_minute(item.at) <= minute)
+        if observed:
+            history[minute].append(sum(item.volume for item in observed))
 
 
 def _cross_session_features(
@@ -558,7 +626,7 @@ def _local_minute(at: datetime) -> int:
 
 
 def _window_return(rows: tuple[HistoricalCandle, ...], minutes: int) -> float:
-    window = rows[-max(2, minutes):]
+    window = rows[-max(2, minutes) :]
     if len(window) < 2:
         return 0.0
     return (window[-1].close / window[0].open - 1.0) * 10_000.0
@@ -591,9 +659,7 @@ def _estimate_tick_size(rows: tuple[HistoricalCandle, ...]) -> float:
         }
     )
     differences = [
-        right - left
-        for left, right in zip(prices, prices[1:])
-        if right - left > 1e-9
+        right - left for left, right in zip(prices, prices[1:]) if right - left > 1e-9
     ]
     if differences:
         return min(differences)

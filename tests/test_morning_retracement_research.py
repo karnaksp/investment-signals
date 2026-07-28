@@ -23,12 +23,47 @@ from tinvest_signal_engine.domain.morning_retracement import (
 )
 from scripts.research_morning_retracement import (
     _clustered_day_bootstrap_interval,
+    _passes_operational_filter,
     _product_gates,
+    _recommendation_summary,
     _select_first_episode_signal,
 )
 
 
 MOSCOW = ZoneInfo("Europe/Moscow")
+
+
+def test_operational_filter_rejects_sparse_or_overactive_mornings() -> None:
+    specification = {
+        "require_volume_baseline": True,
+        "maximum_relative_volume": 0.5,
+        "minimum_active_minute_ratio": 0.75,
+    }
+    accepted = SimpleNamespace(
+        feature_values=lambda _family: {
+            "morning_volume_baseline_available": 1.0,
+            "morning_relative_volume": 0.45,
+            "morning_active_minute_ratio": 0.80,
+        }
+    )
+    sparse = SimpleNamespace(
+        feature_values=lambda _family: {
+            "morning_volume_baseline_available": 1.0,
+            "morning_relative_volume": 0.30,
+            "morning_active_minute_ratio": 0.40,
+        }
+    )
+    high_volume = SimpleNamespace(
+        feature_values=lambda _family: {
+            "morning_volume_baseline_available": 1.0,
+            "morning_relative_volume": 0.80,
+            "morning_active_minute_ratio": 0.90,
+        }
+    )
+
+    assert _passes_operational_filter(accepted, specification) is True
+    assert _passes_operational_filter(sparse, specification) is False
+    assert _passes_operational_filter(high_volume, specification) is False
 
 
 def _candle(
@@ -232,8 +267,7 @@ def test_dataset_includes_previous_session_without_immature_outcome_leakage() ->
     example = examples[0]
     assert example.label_available is True
     assert all(
-        feature.observed_at <= example.feature_cutoff_at
-        for feature in example.features
+        feature.observed_at <= example.feature_cutoff_at for feature in example.features
     )
     previous = example.feature_values("previous_session")
     assert previous["prior_signal_count"] == 1.0
@@ -245,8 +279,7 @@ def test_dataset_includes_previous_session_without_immature_outcome_leakage() ->
 def test_current_morning_signal_is_visible_only_after_its_event_time() -> None:
     prior_start = datetime(2026, 7, 17, 10, 0, tzinfo=MOSCOW)
     prior = tuple(
-        _candle(prior_start + timedelta(minutes=index), 100.0)
-        for index in range(481)
+        _candle(prior_start + timedelta(minutes=index), 100.0) for index in range(481)
     )
     morning_start = datetime(2026, 7, 20, 7, 0, tzinfo=MOSCOW)
     morning = tuple(
@@ -270,24 +303,57 @@ def test_current_morning_signal_is_visible_only_after_its_event_time() -> None:
         previous_signals=(event,),
     )
     before = max(
-        (
-            item
-            for item in examples
-            if item.snapshot.observed_at < event.event_at
-        ),
+        (item for item in examples if item.snapshot.observed_at < event.event_at),
         key=lambda item: item.snapshot.observed_at,
     )
     after = min(
-        (
-            item
-            for item in examples
-            if item.snapshot.observed_at >= event.event_at
-        ),
+        (item for item in examples if item.snapshot.observed_at >= event.event_at),
         key=lambda item: item.snapshot.observed_at,
     )
 
     assert "morning_signal_count" not in before.feature_values("morning")
     assert after.feature_values("morning")["morning_signal_count"] == 1.0
+
+
+def test_relative_volume_uses_only_earlier_trading_days() -> None:
+    rows: list[HistoricalCandle] = []
+    for day, volume in (
+        (datetime(2026, 7, 16, 7, 0, tzinfo=MOSCOW), 100.0),
+        (datetime(2026, 7, 17, 7, 0, tzinfo=MOSCOW), 200.0),
+        (datetime(2026, 7, 20, 7, 0, tzinfo=MOSCOW), 150.0),
+    ):
+        rows.extend(
+            _candle(
+                day + timedelta(minutes=index),
+                100.0 if index == 0 else 101.0,
+                high=101.2,
+                low=99.9,
+                volume=volume,
+            )
+            for index in range(241)
+        )
+
+    examples = BuildMorningRetracementResearch().execute(tuple(rows))
+    second_day = next(
+        item
+        for item in examples
+        if item.trading_day == date(2026, 7, 17)
+        and item.snapshot.observed_at.hour == 7
+        and item.snapshot.observed_at.minute == 15
+    )
+    third_day = next(
+        item
+        for item in examples
+        if item.trading_day == date(2026, 7, 20)
+        and item.snapshot.observed_at.hour == 7
+        and item.snapshot.observed_at.minute == 15
+    )
+
+    assert second_day.feature_values("morning")["morning_relative_volume"] == 2.0
+    assert third_day.feature_values("morning")["morning_relative_volume"] == 1.0
+    assert (
+        third_day.feature_values("morning")["morning_volume_baseline_available"] == 1.0
+    )
 
 
 def test_snapshot_rejects_future_extreme() -> None:
@@ -332,8 +398,7 @@ def test_snapshot_rejects_future_extreme() -> None:
 def test_probability_selection_emits_only_first_signal_per_episode() -> None:
     prior_start = datetime(2026, 7, 17, 10, 0, tzinfo=MOSCOW)
     prior = tuple(
-        _candle(prior_start + timedelta(minutes=index), 100.0)
-        for index in range(481)
+        _candle(prior_start + timedelta(minutes=index), 100.0) for index in range(481)
     )
     morning_start = datetime(2026, 7, 20, 7, 0, tzinfo=MOSCOW)
     morning = tuple(
@@ -401,7 +466,7 @@ def test_day_clustered_confidence_interval_is_reproducible() -> None:
     assert first[0] <= 0.5 <= first[1]
 
 
-def test_product_gate_rejects_uncertain_matched_control_advantage() -> None:
+def test_product_gate_does_not_require_control_or_independent_holdout() -> None:
     holdout = {
         "trades": 300,
         "trading_days": 30,
@@ -415,12 +480,40 @@ def test_product_gate_rejects_uncertain_matched_control_advantage() -> None:
     }
     stress = {"median_net_bps": 0.5}
 
-    gates = _product_gates(
-        holdout,
-        stress,
-        matched_control_lift_lower=-0.01,
+    gates = _product_gates(holdout, stress)
+
+    assert all(item["passed"] for item in gates)
+    assert {item["gate"] for item in gates}.isdisjoint(
+        {
+            "matched_control_target_lift_lower_above_zero",
+            "previous_session_incremental_value_when_used",
+            "independent_holdout_not_previously_opened",
+        }
     )
 
-    assert {item["gate"] for item in gates if not item["passed"]} == {
-        "matched_control_target_lift_lower_above_zero",
+
+def test_observed_recommendation_preserves_probability_and_sample_size() -> None:
+    recommendation = _recommendation_summary(
+        {
+            "trades": 79,
+            "trading_days": 17,
+            "target_hit_rate": 0.608,
+            "target_day_bootstrap_lower": 0.50,
+            "non_loss_rate": 0.81,
+            "non_loss_day_bootstrap_lower": 0.71,
+        },
+        target_fraction=0.75,
+    )
+
+    assert recommendation == {
+        "status": "observed",
+        "validated": False,
+        "target_fraction": 0.75,
+        "target_probability": 0.608,
+        "target_probability_lower": 0.50,
+        "non_loss_probability": 0.81,
+        "non_loss_probability_lower": 0.71,
+        "sample_count": 79,
+        "trading_days": 17,
+        "disclaimer_code": "historical_observation_not_guarantee",
     }

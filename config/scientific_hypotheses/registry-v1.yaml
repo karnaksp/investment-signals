@@ -376,6 +376,45 @@ hypotheses:
       data_split_policy: 60/20/20 chronological trading days; all snapshots of a ticker-day stay together
       multiple_testing_policy: Fixed grids; validation-only selection; one locked candidate opened on holdout; all failed candidates retained
 
+  - hypothesis_id: h1-morning-low-volume-reversion
+    version: "2.2.0"
+    title: Избирательный возврат половины утреннего отклонения при обычном или слабом объёме
+    origin: research_extension
+    source_ids: [heston-korajczyk-sadka-2010, jegadeesh-titman-1995, kitapbayev-leung-2017, lipton-lopez-de-prado-2020]
+    testable_statement: Если с 07:00 до 10:00 акция существенно отклонилась от предыдущего закрытия, оставшийся возврат покрывает издержки с запасом, а накопленный объём не превышает причинно рассчитанную обычную величину для этого инструмента и минуты, то модель может рекомендовать позицию против отклонения с целью возврата половины движения до 11:00.
+    economic_mechanism: Временное утреннее давление при обычной или слабой активности чаще поглощается с приходом основной ликвидности; высокий относительный объём, напротив, может указывать на информационное продолжение и требует отказа от рекомендации.
+    market_phase: morning_0700_1000
+    trigger_conditions:
+      - running excursion is measured every five minutes without future extrema
+      - "analytical excursion >= max(10 bps, 2 ticks)"
+      - remaining gross move from snapshot price to R50 >= 2 x round trip cost
+      - causal historical cumulative volume baseline is available
+      - cumulative relative volume <= 1.00
+      - frozen logistic probability >= 0.50
+    expected_direction: path_reversion_from_running_extreme
+    horizon_seconds: [1800, 3600, 7200, 13500]
+    abstention_conditions: [missing_previous_close, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, remaining_target_move_below_twice_round_trip_cost, historical_volume_baseline_unavailable, cumulative_relative_volume_above_1_00, model_probability_below_0_50]
+    falsification_criterion: Наблюдаемая вероятность достижения цели или результата без чистого убытка существенно снижается, медианный результат после удвоенного проскальзывания становится неположительным либо результат концентрируется в одном инструменте.
+    original_market_result: Исходные работы поддерживают механизм краткосрочного возврата и конечные границы сделки; фильтр причинного относительного объёма и точная схема возврата половины утреннего отклонения являются локальным развитием для Московской биржи.
+    evidence_level: researching
+    lifecycle: evaluated
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h1-v2-2
+      hypothesis_id: h1-morning-low-volume-reversion
+      hypothesis_version: "2.2.0"
+      sealed_at: "2026-07-28T14:00:00+03:00"
+      expected_direction: path_reversion_from_running_extreme
+      feature_definitions: [all morning features end at the five-minute snapshot, cumulative relative volume uses only prior trading days for the same instrument and minute, previous-session events end before the snapshot, immature previous outcomes are excluded, final morning extreme is label-only, one earliest threshold crossing is allowed per ticker-day, remaining move is measured from snapshot price without future execution data]
+      thresholds: {analytical_floor_bps: 10.0, tradable_excursion_multiple_of_round_trip_cost: 4.0, remaining_target_move_multiple_of_round_trip_cost: 2.0, target_fraction: 0.50, stop_extension_fraction: 0.40, break_even_trigger_fraction: 0.33, deadline_moscow: "11:00", maximum_cumulative_relative_volume: 1.00, model_probability_min: 0.50, minimum_recommendation_events: 1, minimum_validated_events: 300, minimum_validated_days: 30}
+      market_phase: morning_0700_1000
+      horizon_seconds: [1800, 3600, 7200, 13500]
+      success_criterion: A recommendation always shows observed target and non-loss probabilities with conservative lower estimates and sample size; validated status additionally requires at least 300 independent ticker-days and 30 trading days, target rate >=0.90 with Wilson lower >=0.80, non-loss rate >=0.95 with Wilson lower >=0.90, and positive median net bps after doubled slippage.
+      abstention_conditions: [missing_previous_close, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, remaining_target_move_below_twice_round_trip_cost, historical_volume_baseline_unavailable, cumulative_relative_volume_above_1_00, model_probability_below_0_50]
+      cost_model_version: "1.0.0"
+      data_split_policy: Chronological training and sequential calibration; later periods remain visible diagnostics and are not a prerequisite for an observed recommendation
+      multiple_testing_policy: Fixed model, execution, probability, and operational-filter grids; selection on the calibration period; all failed candidates retained
+
   - hypothesis_id: h2-morning-high-volume-continuation
     version: "1.0.0"
     title: Продолжение утреннего отклонения при подтверждающем объёме
@@ -1296,4 +1335,35 @@ replication_evidence:
     abstention_rate: 0.9122222222222223
     success_rate: 0.810126582278481
     success_wilson_lower: 0.7100735815818733
+  - evidence_id: evidence-h1-v2-2-volume-filter-20260728
+    hypothesis_id: h1-morning-low-volume-reversion
+    hypothesis_version: "2.2.0"
+    market: Moscow Exchange TQBR
+    observed_at: "2026-07-28T14:30:00+03:00"
+    result: inconclusive
+    independent_validation: false
+    trading_days: 22
+    eligible_events: 72
+    cost_adjusted: true
+    matched_controls_applied: false
+    multiple_testing_applied: true
+    stability_checked: false
+    mean_net_bps: -8.878126732263823
+    result_summary: Причинный фильтр накопленного относительного объёма не выше 1,00 повысил достижение цели R50 с 60,8% в версии 2.1.0 до 72,2% в 72 сделках по 20 инструментам; нижняя дневная оценка составила 57,7%, медианный результат после издержек +12,83 б. п. При этом средний результат -8,88 б. п. указывает на редкие крупные убытки, а данных по отдельным бумагам недостаточно для устойчивого списка разрешённых инструментов. Версия пригодна только для честно обозначенной наблюдаемой рекомендации и пока не подтверждает вероятность 90%.
+    artifact_uri: var/research/morning_retracement_runs/353b1fe6eb1aa3f7/selected-policy.json
+    primary_metric: target_hit_rate_after_costs
+    controls_per_event: 0
+    lift_ci_lower: null
+    lift_ci_upper: null
+    adjusted_p_value: null
+    stable_blocks: 0
+    total_blocks: 0
+    max_ticker_share: 0.125
+    max_period_share: null
+    dataset_fingerprint: sha256:fa3078834ee1496395e98b8ff1b3bb6818360b16ff4893172e195006cdc9509f
+    formula_fingerprint: sha256:b4bc046949f2fd15280067a0a6374a46d2648c0971707f3318d05dba7d3002d2
+    cost_model_version: "1.0.0"
+    abstention_rate: null
+    success_rate: 0.7222222222222222
+    success_wilson_lower: 0.5774647887323944
 applied_catalog: []

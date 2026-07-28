@@ -61,6 +61,41 @@ PROBABILITY_THRESHOLDS = (
     0.97,
     0.99,
 )
+OPERATIONAL_FILTERS: tuple[dict[str, Any], ...] = (
+    {
+        "filter_id": "all_eligible",
+        "require_volume_baseline": False,
+        "maximum_relative_volume": None,
+        "minimum_active_minute_ratio": 0.0,
+    },
+    *(
+        {
+            "filter_id": f"active_minutes_at_least_{minimum:.2f}",
+            "require_volume_baseline": False,
+            "maximum_relative_volume": None,
+            "minimum_active_minute_ratio": minimum,
+        }
+        for minimum in (0.50, 0.75, 0.90)
+    ),
+    *(
+        {
+            "filter_id": f"relative_volume_at_most_{maximum:.2f}",
+            "require_volume_baseline": True,
+            "maximum_relative_volume": maximum,
+            "minimum_active_minute_ratio": 0.0,
+        }
+        for maximum in (0.50, 0.75, 1.00)
+    ),
+    *(
+        {
+            "filter_id": f"relative_volume_at_most_{maximum:.2f}_active_0.75",
+            "require_volume_baseline": True,
+            "maximum_relative_volume": maximum,
+            "minimum_active_minute_ratio": 0.75,
+        }
+        for maximum in (0.50, 0.75, 1.00)
+    ),
+)
 
 
 @dataclass(slots=True)
@@ -115,11 +150,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if min(
-        args.round_trip_cost_bps,
-        args.slippage_bps,
-        args.analytical_floor_bps,
-    ) < 0.0:
+    if (
+        min(
+            args.round_trip_cost_bps,
+            args.slippage_bps,
+            args.analytical_floor_bps,
+        )
+        < 0.0
+    ):
         raise SystemExit("Costs and analytical floor must not be negative.")
     candles = tuple(
         HistoricalCandle(
@@ -153,9 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     train_days, validation_days, holdout_days = _split_days(days)
     train = tuple(item for item in labeled if item.trading_day in train_days)
-    validation = tuple(
-        item for item in labeled if item.trading_day in validation_days
-    )
+    validation = tuple(item for item in labeled if item.trading_day in validation_days)
     holdout = tuple(item for item in labeled if item.trading_day in holdout_days)
 
     run_id = _run_id(
@@ -177,9 +213,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         round_trip_cost_bps=args.round_trip_cost_bps,
     )
     _write_csv(run_dir / "model-leaderboard.csv", leaderboard)
-    best_by_target = _best_candidate_by_target(candidates)
     policy_rows = _evaluate_policy_frontier(
-        best_by_target=best_by_target,
+        candidates=candidates,
         validation=validation,
         round_trip_cost_bps=args.round_trip_cost_bps,
     )
@@ -190,14 +225,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Inspect model-leaderboard.csv and the dataset."
         )
     selected_validation = max(policy_rows, key=_policy_rank)
-    selected_candidate = best_by_target[
-        float(selected_validation["target_fraction"])
-    ]
+    selected_candidate = next(
+        candidate
+        for candidate in candidates
+        if candidate.target_fraction == float(selected_validation["target_fraction"])
+        and candidate.feature_family == selected_validation["feature_family"]
+        and candidate.model_name == selected_validation["model_name"]
+    )
     selected_policy = _policy_from_row(
         selected_validation,
         round_trip_cost_bps=args.round_trip_cost_bps,
     )
     locked_threshold = float(selected_validation["probability_threshold"])
+    operational_filter_rows = _evaluate_operational_filter_frontier(
+        examples=validation,
+        probabilities=selected_candidate.validation_probabilities,
+        threshold=locked_threshold,
+        policy=selected_policy,
+        minimum_events=args.minimum_validation_events,
+    )
+    _write_csv(run_dir / "operational-filter-frontier.csv", operational_filter_rows)
+    selected_operational_filter = max(
+        operational_filter_rows,
+        key=_policy_rank,
+    )
 
     holdout_probabilities, final_explanation = _refit_for_holdout(
         selected_candidate,
@@ -209,7 +260,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         probabilities=holdout_probabilities,
         threshold=locked_threshold,
         policy=selected_policy,
+        operational_filter=selected_operational_filter,
     )
+    selected_trade_rows = _selected_trade_rows(
+        examples=holdout,
+        probabilities=holdout_probabilities,
+        threshold=locked_threshold,
+        policy=selected_policy,
+        operational_filter=selected_operational_filter,
+    )
+    write_table(run_dir / "selected-holdout-trades.parquet", selected_trade_rows)
+    ticker_slices = _ticker_slices(selected_trade_rows)
+    _write_csv(run_dir / "ticker-slices.csv", ticker_slices)
     matched_controls = _matched_control_analysis(
         examples=holdout,
         probabilities=holdout_probabilities,
@@ -229,6 +291,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         probabilities=holdout_probabilities,
         threshold=locked_threshold,
         policy=stress_policy,
+        operational_filter=selected_operational_filter,
     )
     previous_session_comparison = _previous_session_holdout_comparison(
         selected_candidate=selected_candidate,
@@ -237,16 +300,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         holdout=holdout,
         selected_policy=selected_policy,
     )
-    gates = _product_gates(
+    gates = _product_gates(holdout_metrics, holdout_stress)
+    recommendation = _recommendation_summary(
         holdout_metrics,
-        holdout_stress,
-        matched_control_lift_lower=float(
-            matched_controls["target_rate_lift_day_bootstrap_lower"]
-        ),
-        previous_session_incremental_value=bool(
-            previous_session_comparison["passed"]
-        ),
-        independent_holdout=args.independent_holdout,
+        target_fraction=selected_policy.target_fraction,
     )
     selected_artifact = {
         "artifact_schema": "morning-retracement-candidate-v1",
@@ -254,6 +311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "research_only": True,
         "independent_holdout": args.independent_holdout,
         "product_claim_allowed": all(item["passed"] for item in gates),
+        "recommendation": recommendation,
         "hypothesis_version": policy.version,
         "target_fraction": selected_policy.target_fraction,
         "expected_direction": "opposite_to_running_morning_extreme",
@@ -261,13 +319,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "model_name": selected_candidate.model_name,
         "probability_threshold": locked_threshold,
         "stop_extension_fraction": selected_policy.stop_extension_fraction,
-        "break_even_trigger_fraction": (
-            selected_policy.break_even_trigger_fraction
-        ),
+        "break_even_trigger_fraction": (selected_policy.break_even_trigger_fraction),
         "deadline_local_minute": selected_policy.deadline_local_minute,
         "round_trip_cost_bps": selected_policy.round_trip_cost_bps,
+        "operational_filter": {
+            key: selected_operational_filter[key]
+            for key in (
+                "filter_id",
+                "require_volume_baseline",
+                "maximum_relative_volume",
+                "minimum_active_minute_ratio",
+            )
+        },
         "validation": selected_validation,
+        "operational_filter_validation": selected_operational_filter,
         "holdout": holdout_metrics,
+        "ticker_slices": ticker_slices,
         "holdout_doubled_slippage": holdout_stress,
         "matched_controls": matched_controls,
         "previous_session_holdout_comparison": previous_session_comparison,
@@ -334,9 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "rows": len(labeled),
                 "episodes": manifest["episodes"],
                 "trading_days": len(days),
-                "product_claim_allowed": selected_artifact[
-                    "product_claim_allowed"
-                ],
+                "product_claim_allowed": selected_artifact["product_claim_allowed"],
                 "output": str(run_dir),
             },
             ensure_ascii=False,
@@ -368,9 +433,7 @@ def _read_previous_signals(path: Path | None) -> tuple[PreviousSignalEvent, ...]
         )
     result: list[PreviousSignalEvent] = []
     for row in rows:
-        event_at = _timestamp(
-            row.get("source_event_at") or row.get("event_at")
-        )
+        event_at = _timestamp(row.get("source_event_at") or row.get("event_at"))
         ready_raw = row.get("outcome_ready_at")
         confirmed_raw = row.get("outcome_confirmed")
         result.append(
@@ -383,9 +446,7 @@ def _read_previous_signals(path: Path | None) -> tuple[PreviousSignalEvent, ...]
                     _timestamp(ready_raw) if ready_raw not in (None, "") else None
                 ),
                 outcome_confirmed=(
-                    bool(confirmed_raw)
-                    if confirmed_raw not in (None, "")
-                    else None
+                    bool(confirmed_raw) if confirmed_raw not in (None, "") else None
                 ),
             )
         )
@@ -415,9 +476,7 @@ def _split_days(
     )
 
 
-def _feature_mapping(
-    item: MorningRetracementExample, family: str
-) -> dict[str, Any]:
+def _feature_mapping(item: MorningRetracementExample, family: str) -> dict[str, Any]:
     if family == "morning":
         features = item.feature_values("morning")
     elif family == "previous_session":
@@ -445,7 +504,7 @@ def _fit_candidates(
         from sklearn.tree import DecisionTreeClassifier, export_text  # type: ignore
     except ImportError as exc:
         raise SystemExit(
-            'Research dependencies are missing. Run: uv sync --extra research'
+            "Research dependencies are missing. Run: uv sync --extra research"
         ) from exc
 
     candidates: list[FittedCandidate] = []
@@ -522,9 +581,7 @@ def _fit_candidates(
                     verbose=-1,
                 )
             model.fit(train_x, train_y)
-            probabilities = [
-                float(item) for item in model.predict_proba(valid_x)[:, 1]
-            ]
+            probabilities = [float(item) for item in model.predict_proba(valid_x)[:, 1]]
             if model_name == "shallow_decision_tree":
                 explanation = export_text(
                     model,
@@ -539,8 +596,7 @@ def _fit_candidates(
                     reverse=True,
                 )[:12]
                 explanation = "\n".join(
-                    f"{name}: {coefficient:+.6f}"
-                    for name, coefficient in strongest
+                    f"{name}: {coefficient:+.6f}" for name, coefficient in strongest
                 )
             candidate = FittedCandidate(
                 target_fraction=fraction,
@@ -549,9 +605,7 @@ def _fit_candidates(
                 vectorizer=vectorizer,
                 model=model,
                 validation_probabilities=probabilities,
-                validation_brier=float(
-                    brier_score_loss(valid_y, probabilities)
-                ),
+                validation_brier=float(brier_score_loss(valid_y, probabilities)),
                 explanation=explanation,
             )
             threshold, threshold_metrics = _select_probability_threshold(
@@ -597,9 +651,7 @@ def _select_probability_threshold(
         )
         if not selected:
             continue
-        successes = sum(
-            item.label_for(target_fraction).reached for item, _ in selected
-        )
+        successes = sum(item.label_for(target_fraction).reached for item, _ in selected)
         count = len(selected)
         rate = successes / count
         metrics = {
@@ -608,9 +660,7 @@ def _select_probability_threshold(
             "target_hit_rate": rate,
             "target_wilson_lower": _wilson_lower(successes, count),
             "selected_days": len({item.trading_day for item, _ in selected}),
-            "selected_tickers": len(
-                {item.snapshot.ticker for item, _ in selected}
-            ),
+            "selected_tickers": len({item.snapshot.ticker for item, _ in selected}),
         }
         score = (
             float(count >= minimum_events),
@@ -656,46 +706,49 @@ def _best_candidate_by_target(
 
 def _evaluate_policy_frontier(
     *,
-    best_by_target: Mapping[float, FittedCandidate],
+    candidates: Sequence[FittedCandidate],
     validation: tuple[MorningRetracementExample, ...],
     round_trip_cost_bps: float,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for fraction, candidate in best_by_target.items():
-        assert candidate.threshold is not None
-        selected = _select_first_episode_signal(
-            validation,
-            candidate.validation_probabilities,
-            candidate.threshold,
-            fraction,
-            round_trip_cost_bps,
-        )
-        selected_examples = tuple(item for item, _ in selected)
-        for stop_fraction in STOP_FRACTIONS:
-            for break_even_fraction in BREAK_EVEN_FRACTIONS:
-                for deadline in DEADLINE_MINUTES:
-                    policy = TradePolicy(
-                        target_fraction=fraction,
-                        stop_extension_fraction=stop_fraction,
-                        break_even_trigger_fraction=break_even_fraction,
-                        deadline_local_minute=deadline,
-                        round_trip_cost_bps=round_trip_cost_bps,
-                    )
-                    metrics = _simulate_examples(selected_examples, policy)
-                    if metrics["trades"] == 0:
-                        continue
-                    rows.append(
-                        {
-                            "target_fraction": fraction,
-                            "feature_family": candidate.feature_family,
-                            "model_name": candidate.model_name,
-                            "probability_threshold": candidate.threshold,
-                            "stop_extension_fraction": stop_fraction,
-                            "break_even_trigger_fraction": break_even_fraction,
-                            "deadline_local_minute": deadline,
-                            **metrics,
-                        }
-                    )
+    for candidate in candidates:
+        fraction = candidate.target_fraction
+        for threshold in PROBABILITY_THRESHOLDS:
+            selected = _select_first_episode_signal(
+                validation,
+                candidate.validation_probabilities,
+                threshold,
+                fraction,
+                round_trip_cost_bps,
+            )
+            selected_examples = tuple(item for item, _ in selected)
+            if not selected_examples:
+                continue
+            for stop_fraction in STOP_FRACTIONS:
+                for break_even_fraction in BREAK_EVEN_FRACTIONS:
+                    for deadline in DEADLINE_MINUTES:
+                        policy = TradePolicy(
+                            target_fraction=fraction,
+                            stop_extension_fraction=stop_fraction,
+                            break_even_trigger_fraction=break_even_fraction,
+                            deadline_local_minute=deadline,
+                            round_trip_cost_bps=round_trip_cost_bps,
+                        )
+                        metrics = _simulate_examples(selected_examples, policy)
+                        if metrics["trades"] == 0:
+                            continue
+                        rows.append(
+                            {
+                                "target_fraction": fraction,
+                                "feature_family": candidate.feature_family,
+                                "model_name": candidate.model_name,
+                                "probability_threshold": threshold,
+                                "stop_extension_fraction": stop_fraction,
+                                "break_even_trigger_fraction": break_even_fraction,
+                                "deadline_local_minute": deadline,
+                                **metrics,
+                            }
+                        )
     return sorted(rows, key=_policy_rank, reverse=True)
 
 
@@ -815,9 +868,7 @@ def _simulate_examples(
         "trading_days": len({item.trading_day for item in selected_examples}),
         "tickers": len(ticker_counts),
         "maximum_instrument_share": max(ticker_counts.values()) / count,
-        "exit_target": sum(
-            item.exit_reason.value == "target" for item in simulations
-        ),
+        "exit_target": sum(item.exit_reason.value == "target" for item in simulations),
         "exit_break_even": sum(
             item.exit_reason.value == "break_even" for item in simulations
         ),
@@ -898,9 +949,7 @@ def _matched_control_analysis(
                 "morning_realized_volatility_bps",
                 0.0,
             )
-            volatility_ratio = (
-                (control_volatility + 1.0) / (selected_volatility + 1.0)
-            )
+            volatility_ratio = (control_volatility + 1.0) / (selected_volatility + 1.0)
             if not 0.5 <= volatility_ratio <= 2.0:
                 continue
             distance = (
@@ -940,14 +989,10 @@ def _matched_control_analysis(
         for item in matched_controls
     ]
     selected_rate = (
-        statistics.fmean(selected_target_values)
-        if selected_target_values
-        else 0.0
+        statistics.fmean(selected_target_values) if selected_target_values else 0.0
     )
     control_rate = (
-        statistics.fmean(control_target_values)
-        if control_target_values
-        else 0.0
+        statistics.fmean(control_target_values) if control_target_values else 0.0
     )
     lift_interval = _clustered_day_bootstrap_difference(
         matched_selected,
@@ -965,9 +1010,7 @@ def _matched_control_analysis(
         "matched_selected_events": len(matched_selected),
         "matched_controls": len(matched_controls),
         "coverage": (
-            len(matched_selected) / len(selected_pairs)
-            if selected_pairs
-            else 0.0
+            len(matched_selected) / len(selected_pairs) if selected_pairs else 0.0
         ),
         "selected_target_rate": selected_rate,
         "control_target_rate": control_rate,
@@ -986,10 +1029,13 @@ def _policy_rank(row: Mapping[str, Any]) -> tuple[Any, ...]:
         int(row.get("trades", 0)) >= 20
         and float(row.get("median_net_bps") or 0.0) > 0.0
     )
+    target_lower = float(row.get("target_wilson_lower") or 0.0)
+    non_loss_lower = float(row.get("non_loss_wilson_lower") or 0.0)
     return (
         int(validation_gate),
-        float(row.get("non_loss_wilson_lower") or 0.0),
-        float(row.get("target_wilson_lower") or 0.0),
+        min(target_lower, non_loss_lower),
+        non_loss_lower,
+        target_lower,
         float(row.get("median_net_bps") or -1e9),
         int(row.get("trades", 0)),
     )
@@ -1001,9 +1047,7 @@ def _policy_from_row(
     return TradePolicy(
         target_fraction=float(row["target_fraction"]),
         stop_extension_fraction=float(row["stop_extension_fraction"]),
-        break_even_trigger_fraction=float(
-            row["break_even_trigger_fraction"]
-        ),
+        break_even_trigger_fraction=float(row["break_even_trigger_fraction"]),
         deadline_local_minute=int(row["deadline_local_minute"]),
         round_trip_cost_bps=round_trip_cost_bps,
     )
@@ -1014,83 +1058,22 @@ def _refit_for_holdout(
     training: tuple[MorningRetracementExample, ...],
     holdout: tuple[MorningRetracementExample, ...],
 ) -> tuple[list[float], str]:
-    from sklearn.feature_extraction import DictVectorizer  # type: ignore
-    from sklearn.linear_model import LogisticRegression  # type: ignore
-    from sklearn.tree import DecisionTreeClassifier, export_text  # type: ignore
-
-    vectorizer = DictVectorizer(sparse=True)
-    train_x = _int32_sparse(
-        vectorizer.fit_transform(
-            [_feature_mapping(item, candidate.feature_family) for item in training]
-        )
-    )
+    # The candidate, its feature vocabulary and its probability threshold are
+    # frozen after the training/validation stages. Re-fitting on the combined
+    # data changes probability calibration while retaining the old threshold,
+    # so a nominal 70% cutoff no longer means what was measured on validation.
+    # Keep ``training`` in the signature for backward-compatible callers and
+    # deliberately do not inspect it here.
+    del training
     holdout_x = _int32_sparse(
-        vectorizer.transform(
+        candidate.vectorizer.transform(
             [_feature_mapping(item, candidate.feature_family) for item in holdout]
         )
     )
-    train_y = [
-        int(item.label_for(candidate.target_fraction).reached)
-        for item in training
-    ]
-    if candidate.model_name == "logistic_regression":
-        model = LogisticRegression(
-            max_iter=2000,
-            class_weight="balanced",
-            random_state=20260728,
-            solver="liblinear",
-        )
-    elif candidate.model_name == "shallow_decision_tree":
-        model = DecisionTreeClassifier(
-            max_depth=3,
-            min_samples_leaf=max(20, len(training) // 100),
-            class_weight="balanced",
-            random_state=20260728,
-        )
-    else:
-        from lightgbm import LGBMClassifier  # type: ignore
-
-        model = LGBMClassifier(
-            n_estimators=250,
-            learning_rate=0.03,
-            num_leaves=15,
-            min_child_samples=max(20, len(training) // 100),
-            subsample=0.8,
-            colsample_bytree=0.8,
-            class_weight="balanced",
-            random_state=20260728,
-            verbose=-1,
-        )
-    model.fit(train_x, train_y)
     probabilities = [
-        float(item) for item in model.predict_proba(holdout_x)[:, 1]
+        float(item) for item in candidate.model.predict_proba(holdout_x)[:, 1]
     ]
-    if candidate.model_name == "shallow_decision_tree":
-        explanation = export_text(
-            model,
-            feature_names=list(vectorizer.get_feature_names_out()),
-        )
-    elif candidate.model_name == "logistic_regression":
-        strongest = sorted(
-            zip(vectorizer.get_feature_names_out(), model.coef_[0]),
-            key=lambda pair: abs(pair[1]),
-            reverse=True,
-        )[:12]
-        explanation = "\n".join(
-            f"{name}: {coefficient:+.6f}"
-            for name, coefficient in strongest
-        )
-    else:
-        strongest = sorted(
-            zip(vectorizer.get_feature_names_out(), model.feature_importances_),
-            key=lambda pair: pair[1],
-            reverse=True,
-        )[:12]
-        explanation = "\n".join(
-            f"{name}: {int(importance)}"
-            for name, importance in strongest
-        )
-    return probabilities, explanation
+    return probabilities, candidate.explanation
 
 
 def _evaluate_locked_policy(
@@ -1099,6 +1082,7 @@ def _evaluate_locked_policy(
     probabilities: Sequence[float],
     threshold: float,
     policy: TradePolicy,
+    operational_filter: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected = _select_first_episode_signal(
         examples,
@@ -1107,10 +1091,145 @@ def _evaluate_locked_policy(
         policy.target_fraction,
         policy.round_trip_cost_bps,
     )
+    if operational_filter is not None:
+        selected = [
+            pair
+            for pair in selected
+            if _passes_operational_filter(pair[0], operational_filter)
+        ]
     return {
         "probability_threshold": threshold,
         **_simulate_examples(tuple(item for item, _ in selected), policy),
     }
+
+
+def _selected_trade_rows(
+    *,
+    examples: tuple[MorningRetracementExample, ...],
+    probabilities: Sequence[float],
+    threshold: float,
+    policy: TradePolicy,
+    operational_filter: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    selected = _select_first_episode_signal(
+        examples,
+        probabilities,
+        threshold,
+        policy.target_fraction,
+        policy.round_trip_cost_bps,
+    )
+    rows: list[dict[str, Any]] = []
+    for item, probability in selected:
+        if not _passes_operational_filter(item, operational_filter):
+            continue
+        future = tuple(
+            row
+            for row in item.future_candles
+            if _local_minute(row.at) <= policy.deadline_local_minute
+        )
+        simulation = simulate_trade(item.snapshot, future, policy)
+        if simulation.net_result_bps is None:
+            continue
+        features = item.feature_values("morning")
+        rows.append(
+            {
+                "episode_id": item.episode_id,
+                "ticker": item.snapshot.ticker,
+                "trading_day": item.trading_day.isoformat(),
+                "observed_at": item.snapshot.observed_at.isoformat(),
+                "model_probability": probability,
+                "target_hit": simulation.target_hit,
+                "non_loss": simulation.non_loss,
+                "net_result_bps": simulation.net_result_bps,
+                "exit_reason": simulation.exit_reason.value,
+                "relative_volume": features.get("morning_relative_volume"),
+                "active_minute_ratio": features.get("morning_active_minute_ratio"),
+                "excursion_bps": item.snapshot.excursion_bps,
+            }
+        )
+    return rows
+
+
+def _ticker_slices(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["ticker"])].append(row)
+    result: list[dict[str, Any]] = []
+    for ticker, items in grouped.items():
+        target_hits = sum(bool(item["target_hit"]) for item in items)
+        non_losses = sum(bool(item["non_loss"]) for item in items)
+        net = [float(item["net_result_bps"]) for item in items]
+        result.append(
+            {
+                "ticker": ticker,
+                "trades": len(items),
+                "target_hit_rate": target_hits / len(items),
+                "target_wilson_lower": _wilson_lower(target_hits, len(items)),
+                "non_loss_rate": non_losses / len(items),
+                "median_net_bps": statistics.median(net),
+                "eligible_for_instrument_filter": len(items) >= 20,
+            }
+        )
+    return sorted(
+        result,
+        key=lambda item: (
+            bool(item["eligible_for_instrument_filter"]),
+            float(item["target_wilson_lower"]),
+            int(item["trades"]),
+        ),
+        reverse=True,
+    )
+
+
+def _evaluate_operational_filter_frontier(
+    *,
+    examples: tuple[MorningRetracementExample, ...],
+    probabilities: Sequence[float],
+    threshold: float,
+    policy: TradePolicy,
+    minimum_events: int,
+) -> list[dict[str, Any]]:
+    selected = _select_first_episode_signal(
+        examples,
+        probabilities,
+        threshold,
+        policy.target_fraction,
+        policy.round_trip_cost_bps,
+    )
+    rows: list[dict[str, Any]] = []
+    for specification in OPERATIONAL_FILTERS:
+        filtered = tuple(
+            item
+            for item, _ in selected
+            if _passes_operational_filter(item, specification)
+        )
+        metrics = _simulate_examples(filtered, policy)
+        rows.append(
+            {
+                **specification,
+                "minimum_events_met": metrics["trades"] >= minimum_events,
+                **metrics,
+            }
+        )
+    return sorted(rows, key=_policy_rank, reverse=True)
+
+
+def _passes_operational_filter(
+    item: MorningRetracementExample,
+    specification: Mapping[str, Any],
+) -> bool:
+    features = item.feature_values("morning")
+    baseline_available = bool(features.get("morning_volume_baseline_available", 0))
+    if bool(specification["require_volume_baseline"]) and not baseline_available:
+        return False
+    maximum_relative_volume = specification["maximum_relative_volume"]
+    if maximum_relative_volume is not None:
+        relative_volume = float(features.get("morning_relative_volume", 0.0))
+        if relative_volume > float(maximum_relative_volume):
+            return False
+    return float(features.get("morning_active_minute_ratio", 0.0)) >= float(
+        specification["minimum_active_minute_ratio"]
+    )
 
 
 def _previous_session_holdout_comparison(
@@ -1172,11 +1291,10 @@ def _previous_session_holdout_comparison(
         threshold=selected_candidate.threshold,
         policy=selected_policy,
     )
-    passed = (
-        float(selected_metrics["target_hit_rate"])
-        > float(metrics["target_hit_rate"])
-        and float(selected_metrics["non_loss_wilson_lower"])
-        >= float(metrics["non_loss_wilson_lower"])
+    passed = float(selected_metrics["target_hit_rate"]) > float(
+        metrics["target_hit_rate"]
+    ) and float(selected_metrics["non_loss_wilson_lower"]) >= float(
+        metrics["non_loss_wilson_lower"]
     )
     return {
         "status": "compared_on_holdout",
@@ -1194,10 +1312,6 @@ def _previous_session_holdout_comparison(
 def _product_gates(
     holdout: Mapping[str, Any],
     stress: Mapping[str, Any],
-    *,
-    matched_control_lift_lower: float = 1.0,
-    previous_session_incremental_value: bool = True,
-    independent_holdout: bool = True,
 ) -> list[dict[str, Any]]:
     definitions = (
         ("minimum_episodes_300", int(holdout.get("trades", 0)) >= 300),
@@ -1234,17 +1348,52 @@ def _product_gates(
             "doubled_slippage_positive_median",
             float(stress.get("median_net_bps") or 0.0) > 0.0,
         ),
-        (
-            "matched_control_target_lift_lower_above_zero",
-            matched_control_lift_lower > 0.0,
-        ),
-        (
-            "previous_session_incremental_value_when_used",
-            previous_session_incremental_value,
-        ),
-        ("independent_holdout_not_previously_opened", independent_holdout),
     )
     return [{"gate": name, "passed": passed} for name, passed in definitions]
+
+
+def _recommendation_summary(
+    evidence: Mapping[str, Any],
+    *,
+    target_fraction: float,
+) -> dict[str, Any]:
+    sample_count = int(evidence.get("trades", 0))
+    trading_days = int(evidence.get("trading_days", 0))
+    status = "observed" if sample_count > 0 and trading_days > 0 else "unavailable"
+    return {
+        "status": status,
+        "validated": False,
+        "target_fraction": target_fraction,
+        "target_probability": (
+            float(evidence["target_hit_rate"]) if sample_count else None
+        ),
+        "target_probability_lower": (
+            float(
+                evidence.get(
+                    "target_day_bootstrap_lower",
+                    evidence.get("target_wilson_lower", 0.0),
+                )
+            )
+            if sample_count
+            else None
+        ),
+        "non_loss_probability": (
+            float(evidence["non_loss_rate"]) if sample_count else None
+        ),
+        "non_loss_probability_lower": (
+            float(
+                evidence.get(
+                    "non_loss_day_bootstrap_lower",
+                    evidence.get("non_loss_wilson_lower", 0.0),
+                )
+            )
+            if sample_count
+            else None
+        ),
+        "sample_count": sample_count,
+        "trading_days": trading_days,
+        "disclaimer_code": "historical_observation_not_guarantee",
+    }
 
 
 def _expected_hit_window(
@@ -1263,10 +1412,7 @@ def _expected_hit_window(
     values = sorted(
         float(label.minutes_to_target)
         for item, _ in selected
-        if (
-            label := item.label_for(target_fraction)
-        ).minutes_to_target
-        is not None
+        if (label := item.label_for(target_fraction)).minutes_to_target is not None
     )
     if not values:
         return {"p25_minutes": None, "median_minutes": None, "p75_minutes": None}
@@ -1298,9 +1444,7 @@ def _dataset_row(
             item.snapshot.excursion_bps >= policy.tradable_excursion_bps
         ),
         "maximum_retracement_fraction": item.maximum_retracement_fraction,
-        "maximum_adverse_extension_fraction": (
-            item.maximum_adverse_extension_fraction
-        ),
+        "maximum_adverse_extension_fraction": (item.maximum_adverse_extension_fraction),
         "label_available": item.label_available,
     }
     for feature in item.features:
@@ -1310,9 +1454,7 @@ def _dataset_row(
         row[f"target_r{suffix}_price"] = label.target_price
         row[f"target_r{suffix}_reached"] = label.reached
         row[f"target_r{suffix}_first_at"] = (
-            label.first_reached_at.isoformat()
-            if label.first_reached_at
-            else None
+            label.first_reached_at.isoformat() if label.first_reached_at else None
         )
         row[f"target_r{suffix}_minutes"] = label.minutes_to_target
     return row
@@ -1335,9 +1477,7 @@ def _run_id(
         "previous_signal_count": previous_signal_count,
         "independent_holdout": independent_holdout,
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode()
-    ).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _fingerprint_rows(rows: Sequence[Mapping[str, Any]]) -> str:
@@ -1371,9 +1511,7 @@ def _wilson_lower(successes: int, count: int, z: float = 1.95996398454) -> float
     rate = successes / count
     denominator = 1.0 + z * z / count
     centre = rate + z * z / (2.0 * count)
-    margin = z * math.sqrt(
-        (rate * (1.0 - rate) + z * z / (4.0 * count)) / count
-    )
+    margin = z * math.sqrt((rate * (1.0 - rate) + z * z / (4.0 * count)) / count)
     return (centre - margin) / denominator
 
 
@@ -1484,7 +1622,7 @@ def _render_report(
     selected: Mapping[str, Any],
 ) -> str:
     holdout = selected["holdout"]
-    validation = selected["validation"]
+    validation = selected.get("operational_filter_validation", selected["validation"])
     gates = selected["gates"]
     failed = [item["gate"] for item in gates if not item["passed"]]
     previous_comparison = selected["previous_session_holdout_comparison"]
@@ -1511,25 +1649,13 @@ def _render_report(
         "non_loss_wilson_lower_90pct": (
             "нижняя доверительная граница отсутствия убытка не ниже 90%"
         ),
-        "positive_median_net": (
-            "положительная медиана результата после издержек"
-        ),
+        "positive_median_net": ("положительная медиана результата после издержек"),
         "doubled_slippage_positive_median": (
             "положительная медиана при удвоенном проскальзывании"
         ),
         "multiple_instruments": "результат устойчив на нескольких инструментах",
         "instrument_share_at_most_50pct": (
             "ни один инструмент не составляет больше половины выборки"
-        ),
-        "matched_control_target_lift_lower_above_zero": (
-            "нижняя доверительная граница преимущества над контрольными "
-            "отклонениями выше нуля"
-        ),
-        "previous_session_incremental_value_when_used": (
-            "предыдущая сессия даёт дополнительную прогнозную ценность"
-        ),
-        "independent_holdout_not_previously_opened": (
-            "итоговый период ранее не использовался при изменении правила"
         ),
     }
     comparison = [
@@ -1567,6 +1693,24 @@ def _render_report(
             f"{model_labels.get(str(selected['model_name']), selected['model_name'])}."
         ),
         f"- Порог вероятности: {float(selected['probability_threshold']):.0%}.",
+        (f"- Фильтр качества торгов: {selected['operational_filter']['filter_id']}."),
+        (
+            "- Текущая наблюдаемая вероятность исполнимой цели: "
+            f"{float(selected['recommendation']['target_probability'] or 0.0):.1%}; "
+            "консервативная нижняя граница "
+            f"{float(selected['recommendation']['target_probability_lower'] or 0.0):.1%}."
+        ),
+        (
+            "- Текущая наблюдаемая вероятность результата без чистого убытка: "
+            f"{float(selected['recommendation']['non_loss_probability'] or 0.0):.1%}; "
+            "консервативная нижняя граница "
+            f"{float(selected['recommendation']['non_loss_probability_lower'] or 0.0):.1%}."
+        ),
+        (
+            "- Эти доли можно показывать как исследовательскую рекомендацию "
+            "с размером выборки, но не как гарантию или подтверждённую "
+            "закономерность."
+        ),
         "",
         "## Проверочная и итоговая выборки",
         "",
@@ -1593,9 +1737,9 @@ def _render_report(
         "## Роль предыдущей сессии",
         "",
         (
-            "Модели ниже сравнивались на одинаковых торговых днях. Признаки "
-            "предыдущей сессии считаются полезными только если совместная модель "
-            "устойчиво превосходит утреннюю на итоговой проверке."
+            "Модели ниже сравнивались на одинаковых торговых днях. Результат "
+            "этого сравнения остаётся диагностикой и больше не блокирует "
+            "исследовательскую рекомендацию или принятие правила."
         ),
         "",
     ]
@@ -1637,6 +1781,30 @@ def _render_report(
                 ),
             ]
         )
+    stable_ticker_slices = [
+        item
+        for item in selected.get("ticker_slices", ())
+        if item["eligible_for_instrument_filter"]
+    ]
+    lines.extend(
+        [
+            "",
+            "## Отбор инструментов",
+            "",
+            (
+                "- Ни один инструмент пока не имеет 20 отобранных сделок; "
+                "индивидуальный список разрешённых бумаг не формируется."
+                if not stable_ticker_slices
+                else "- Инструменты с достаточной собственной выборкой: "
+                + ", ".join(str(item["ticker"]) for item in stable_ticker_slices)
+                + "."
+            ),
+            (
+                "- Результаты малых срезов сохранены в ticker-slices.csv, "
+                "но не используются для отбора правила."
+            ),
+        ]
+    )
     matched = selected["matched_controls"]
     lines.extend(
         [
@@ -1647,6 +1815,10 @@ def _render_report(
                 "Для каждого выбранного события искались отклонения другого дня "
                 "того же инструмента и направления, близкого времени, размера "
                 "отклонения и наблюдаемой волатильности."
+            ),
+            (
+                "Сравнение сохранено для анализа, но преимущество над контролем "
+                "больше не входит в обязательные условия принятия."
             ),
             "",
             (
@@ -1694,10 +1866,7 @@ def _render_report(
         if item.strip()
     ]
     lines.extend(
-        [
-            f"- {_translate_feature_line(item)}"
-            for item in explanation_lines[:12]
-        ]
+        [f"- {_translate_feature_line(item)}" for item in explanation_lines[:12]]
         or ["- Объяснение модели недоступно."]
     )
     lines.extend(

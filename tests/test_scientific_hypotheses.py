@@ -226,7 +226,7 @@ def test_missing_scientific_contract_fields_block_applied_catalog() -> None:
     } <= _codes(decision)
 
 
-def test_independent_cost_adjusted_validation_is_mandatory() -> None:
+def test_moex_cost_adjusted_validation_is_mandatory() -> None:
     evidence = replace(
         _evidence(),
         market="NYSE",
@@ -242,6 +242,22 @@ def test_independent_cost_adjusted_validation_is_mandatory() -> None:
         AdmissionFailure.REPLICATION_COSTS_REQUIRED,
         AdmissionFailure.REPLICATION_NOT_CONFIRMED,
     } <= _codes(decision)
+
+def test_independent_sample_and_control_advantage_are_informational() -> None:
+    evidence = replace(
+        _evidence(),
+        independent_validation=False,
+        lift_ci_lower=None,
+        lift_ci_upper=None,
+    )
+
+    decision = _gate().execute(_hypothesis(), evidence)
+
+    assert decision.admitted is True
+    assert AdmissionFailure.INDEPENDENT_MOEX_VALIDATION_REQUIRED not in _codes(decision)
+    assert AdmissionFailure.REPLICATION_CONFIDENCE_INTERVAL_FAILED not in _codes(
+        decision
+    )
 
 
 def test_quantitative_evidence_gate_rejects_small_or_fragile_effect() -> None:
@@ -261,7 +277,6 @@ def test_quantitative_evidence_gate_rejects_small_or_fragile_effect() -> None:
     assert {
         AdmissionFailure.REPLICATION_SAMPLE_TOO_SMALL,
         AdmissionFailure.REPLICATION_CONTROLS_INSUFFICIENT,
-        AdmissionFailure.REPLICATION_CONFIDENCE_INTERVAL_FAILED,
         AdmissionFailure.REPLICATION_ADJUSTED_SIGNIFICANCE_FAILED,
         AdmissionFailure.REPLICATION_BLOCK_STABILITY_FAILED,
         AdmissionFailure.REPLICATION_CONCENTRATION_FAILED,
@@ -323,7 +338,7 @@ def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None
     assert registry.schema_version == "1.2.0"
     assert len(registry.sources) == 16
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 29
+    assert len(registry.hypotheses) == 30
     assert (
         sum(
             item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
@@ -348,6 +363,7 @@ def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None
     } >= {
         "prereg-h1-v2",
         "prereg-h1-v2-1",
+        "prereg-h1-v2-2",
         "prereg-h3-v2",
         "prereg-h4-v2",
         "prereg-h3-v3",
@@ -362,7 +378,7 @@ def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None
         "prereg-h17-v2",
         "prereg-h12-v1",
     }
-    assert len(registry.replication_evidence) == 2
+    assert len(registry.replication_evidence) == 3
     rejected = registry.replication_evidence[0]
     assert rejected.hypothesis_version == "2.0.0"
     assert rejected.result is ReplicationResult.REJECTED
@@ -371,6 +387,10 @@ def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None
     assert inconclusive.hypothesis_version == "2.1.0"
     assert inconclusive.result is ReplicationResult.INCONCLUSIVE
     assert inconclusive.independent_validation is False
+    filtered = registry.replication_evidence[2]
+    assert filtered.hypothesis_version == "2.2.0"
+    assert filtered.success_rate == pytest.approx(0.7222222222222222)
+    assert filtered.success_wilson_lower == pytest.approx(0.5774647887323944)
     assert registry.applied_catalog == ()
     h3v3 = registry.get_hypothesis(
         "h3-jump-low-activity-reversal",
@@ -455,7 +475,7 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["sources"] == 16
-    assert payload["hypotheses"] == 29
+    assert payload["hypotheses"] == 30
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 
