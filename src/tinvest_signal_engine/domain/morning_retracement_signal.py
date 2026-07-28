@@ -103,6 +103,7 @@ class MorningRetracementRuntimeSettings:
     minimum_remaining_move_bps: float
     first_decision_local_minute: int
     last_decision_local_minute: int
+    monitor_until_local_minute: int
     maximum_signals_per_day: int
     enabled_tickers: frozenset[str]
     telegram_enabled: bool
@@ -122,9 +123,12 @@ class MorningRetracementRuntimeSettings:
             7 * 60
             <= self.first_decision_local_minute
             <= self.last_decision_local_minute
-            <= 10 * 60
+            <= self.monitor_until_local_minute
+            <= 11 * 60
         ):
-            raise ValueError("decision window must stay inside 07:00-10:00 Moscow")
+            raise ValueError(
+                "decision and monitoring windows must stay inside 07:00-11:00 Moscow"
+            )
         if not 1 <= self.maximum_signals_per_day <= 25:
             raise ValueError("maximum signals per day must be between 1 and 25")
 
@@ -148,6 +152,95 @@ class MorningRetracementRecommendation:
             if self.snapshot.direction is RetracementDirection.RETURN_UP
             else "down"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class MorningRetracementLiveAssessment:
+    """One causal minute-by-minute model assessment.
+
+    Assessments are persisted even when an owner filter rejects a notification.
+    This keeps the live screen useful and preserves the negative examples needed
+    to learn which entry minutes actually work.
+    """
+
+    instrument_id: str
+    ticker: str
+    trading_day: str
+    recommendation: MorningRetracementRecommendation
+    eligible_for_signal: bool
+    reason_codes: tuple[str, ...]
+    settings_revision: int
+    policy_version: str
+    hypothesis_version: str
+    model_fingerprint: str
+    probability_threshold: float
+    maximum_relative_volume: float
+    minimum_excursion_bps: float
+    minimum_remaining_move_bps: float
+    remaining_move_bps: float
+    deadline_local_minute: int
+    expected_hit_minutes_p25: int
+    expected_hit_minutes_median: int
+    expected_hit_minutes_p75: int
+    training_window_ended: bool
+
+    def __post_init__(self) -> None:
+        if not self.instrument_id.strip() or not self.ticker.strip():
+            raise ValueError("live assessment instrument identity is required")
+        if not self.trading_day.strip():
+            raise ValueError("live assessment trading day is required")
+        if self.settings_revision < 1:
+            raise ValueError("live assessment settings revision must be positive")
+        if self.eligible_for_signal == bool(self.reason_codes):
+            raise ValueError("eligible assessment must have no rejection reasons")
+        if self.remaining_move_bps < 0.0:
+            raise ValueError("remaining move must not be negative")
+        if not (
+            0
+            <= self.expected_hit_minutes_p25
+            <= self.expected_hit_minutes_median
+            <= self.expected_hit_minutes_p75
+        ):
+            raise ValueError("expected hit minute quantiles must be ordered")
+
+    @property
+    def observed_at(self) -> datetime:
+        return self.recommendation.observed_at
+
+    @property
+    def observation_key(self) -> str:
+        return (
+            f"{self.instrument_id}:{self.trading_day}:"
+            f"{self.observed_at.isoformat()}:{self.policy_version}:"
+            f"settings-{self.settings_revision}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MorningRetracementTrackedOutcome:
+    observation_id: str
+    instrument_id: str
+    ticker: str
+    trading_day: str
+    target_hit: bool | None
+    non_loss: bool | None
+    exit_reason: str
+    entry_at: datetime | None
+    exit_at: datetime | None
+    entry_price: float | None
+    exit_price: float | None
+    net_result_bps: float | None
+    minutes_to_exit: float | None
+    evaluated_at: datetime
+    outcome_policy_version: str
+
+    def __post_init__(self) -> None:
+        if not self.observation_id.strip() or not self.instrument_id.strip():
+            raise ValueError("tracked outcome identity is required")
+        if self.evaluated_at.tzinfo is None or self.evaluated_at.utcoffset() is None:
+            raise ValueError("tracked outcome evaluation time must be timezone-aware")
+        if self.minutes_to_exit is not None and self.minutes_to_exit < 0.0:
+            raise ValueError("minutes_to_exit must not be negative")
 
 
 def build_recommendation(

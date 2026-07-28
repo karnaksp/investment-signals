@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from hashlib import sha256
 import json
@@ -91,6 +92,7 @@ def _settings(**overrides: object) -> MorningRetracementRuntimeSettings:
         "minimum_remaining_move_bps": 20.0,
         "first_decision_local_minute": 7 * 60 + 15,
         "last_decision_local_minute": 10 * 60,
+        "monitor_until_local_minute": 11 * 60,
         "maximum_signals_per_day": 10,
         "enabled_tickers": frozenset(),
         "telegram_enabled": False,
@@ -153,7 +155,7 @@ def test_runtime_artifact_is_valid_and_contains_the_sealed_model() -> None:
     assert 0.0 <= policy.model.probability({}) <= 1.0
 
 
-def test_live_use_case_scores_latest_completed_five_minute_snapshot() -> None:
+def test_formal_signal_keeps_registered_five_minute_snapshot() -> None:
     result = GenerateMorningRetracementRecommendations(_policy()).execute(
         (_series(),),
         settings=_settings(),
@@ -166,6 +168,51 @@ def test_live_use_case_scores_latest_completed_five_minute_snapshot() -> None:
     assert recommendation.model_probability > 0.99
     assert recommendation.target_price == pytest.approx(101.025)
     assert recommendation.initial_stop_price == pytest.approx(102.87)
+
+
+def test_live_assessment_scores_latest_completed_minute_snapshot() -> None:
+    result = GenerateMorningRetracementRecommendations(_policy()).assess(
+        (_series(),),
+        settings=_settings(),
+    )
+
+    assert len(result) == 1
+    assessment = result[0][1]
+    assert (
+        assessment.recommendation.observed_at.astimezone(MOSCOW).strftime("%H:%M")
+        == "07:16"
+    )
+    assert assessment.eligible_for_signal is True
+
+
+def test_live_monitoring_continues_after_signal_window_without_emitting() -> None:
+    series = _series()
+    observed_at = datetime(2026, 7, 28, 10, 30, tzinfo=MOSCOW)
+    series = replace(
+        series,
+        current_session=series.current_session + (_candle(observed_at, 101.5),),
+    )
+    use_case = GenerateMorningRetracementRecommendations(_policy())
+
+    assessments = use_case.assess(
+        (series,),
+        settings=_settings(),
+        as_of=observed_at,
+    )
+
+    assert len(assessments) == 1
+    assessment = assessments[0][1]
+    assert assessment.training_window_ended is True
+    assert assessment.eligible_for_signal is False
+    assert "outside_signal_window" in assessment.reason_codes
+    assert (
+        use_case.execute(
+            (series,),
+            settings=_settings(),
+            as_of=observed_at,
+        )
+        == ()
+    )
 
 
 def test_owner_filters_disable_or_reject_overactive_events() -> None:
@@ -186,6 +233,21 @@ def test_owner_filters_disable_or_reject_overactive_events() -> None:
         )
         == ()
     )
+
+
+def test_live_assessment_is_kept_when_notification_threshold_is_not_met() -> None:
+    use_case = GenerateMorningRetracementRecommendations(_policy())
+
+    assessments = use_case.assess(
+        (_series(cumulative_volume=100.0),),
+        settings=_settings(maximum_relative_volume=0.5),
+    )
+
+    assert len(assessments) == 1
+    assessment = assessments[0][1]
+    assert assessment.eligible_for_signal is False
+    assert "relative_volume_above_maximum" in assessment.reason_codes
+    assert assessment.recommendation.model_probability > 0.99
 
 
 def test_stale_morning_snapshot_is_not_emitted_later_in_the_day() -> None:

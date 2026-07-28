@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from tinvest_signal_engine.adapters.kafka_reliability import KafkaSignalPublisher
 from tinvest_signal_engine.adapters.morning_retracement_runtime import (
     ClickHouseMorningRetracementSource,
+    ClickHouseMorningRetracementTrackingStore,
     load_morning_retracement_policy,
     load_morning_retracement_settings,
 )
@@ -26,6 +27,10 @@ from tinvest_signal_engine.adapters.reliability_metrics import (
 )
 from tinvest_signal_engine.application.morning_retracement_signals import (
     GenerateMorningRetracementRecommendations,
+)
+from tinvest_signal_engine.application.morning_retracement_tracking import (
+    ProcessMorningRetracementOutcomes,
+    RecordMorningRetracementAssessments,
 )
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
@@ -100,10 +105,24 @@ def main() -> None:
             os.getenv("MORNING_RETRACEMENT_CLICKHOUSE_TIMEOUT_SECONDS") or "30"
         ),
     )
+    tracking_store = ClickHouseMorningRetracementTrackingStore(
+        base_url=_required("CLICKHOUSE_HTTP_URL"),
+        database=(os.getenv("CLICKHOUSE_DATABASE") or "signal_engine").strip(),
+        username=_required("CLICKHOUSE_USERNAME"),
+        password=clickhouse_password,
+        timeout_seconds=float(
+            os.getenv("MORNING_RETRACEMENT_CLICKHOUSE_TIMEOUT_SECONDS") or "30"
+        ),
+    )
     instruments = tuple(load_instrument_configs(runtime.instruments_path))
     store = connect_reliable_processing_store(runtime)
     publisher = KafkaSignalPublisher(runtime)
     scorer = GenerateMorningRetracementRecommendations(policy)
+    record_assessments = RecordMorningRetracementAssessments(tracking_store)
+    process_outcomes = ProcessMorningRetracementOutcomes(
+        store=tracking_store,
+        policy=policy,
+    )
     metrics = PrometheusReliabilityMetrics()
     poll_seconds = max(
         10.0,
@@ -114,13 +133,27 @@ def main() -> None:
         while True:
             now = datetime.now(tz=timezone.utc)
             settings = load_morning_retracement_settings(public_config, policy)
+            market = source.load(as_of=now, instruments=instruments)
             if settings.enabled:
+                assessments = scorer.assess(
+                    market,
+                    settings=settings,
+                    as_of=now,
+                )
+                observation_ids = record_assessments.execute(
+                    tuple(item[1] for item in assessments),
+                    recorded_at=now,
+                )
+                if observation_ids:
+                    logger.info(
+                        "Stored live morning-retracement assessments",
+                        extra={"assessment_count": len(observation_ids)},
+                    )
                 local_day = now.astimezone(MOSCOW).date()
                 emitted = store.emitted_instruments_for_trading_day(
                     signal_type=SIGNAL_TYPE,
                     trading_day=local_day.isoformat(),
                 )
-                market = source.load(as_of=now, instruments=instruments)
                 recommendations = scorer.execute(
                     market,
                     settings=settings,
@@ -150,6 +183,15 @@ def main() -> None:
                             "target_price": recommendation.target_price,
                         },
                     )
+            outcome_batch = process_outcomes.execute(now=now, market=market)
+            if outcome_batch.stored:
+                logger.info(
+                    "Stored morning-retracement entry outcomes",
+                    extra={
+                        "stored_count": outcome_batch.stored,
+                        "unavailable_count": outcome_batch.unavailable,
+                    },
+                )
             time.sleep(poll_seconds)
     except KeyboardInterrupt:
         logger.info("Morning-retracement recommendation worker stopped")
