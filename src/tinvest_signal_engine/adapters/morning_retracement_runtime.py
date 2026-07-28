@@ -8,9 +8,11 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from statistics import median
+from threading import Lock
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from tinvest_signal_engine.application.morning_retracement_signals import (
@@ -55,10 +57,29 @@ SELECT
     argMax(volume, record_version) AS volume,
     argMax(is_complete, record_version) AS is_complete
 FROM scientific_candles_1m
+PREWHERE instrument_id IN {instrument_ids:Array(String)}
 WHERE trading_day >= today() - 10
   AND candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+  AND trading_day IN
+  (
+      SELECT trading_day
+      FROM scientific_candles_1m
+      PREWHERE instrument_id IN {instrument_ids:Array(String)}
+      WHERE trading_day >= today() - 10
+        AND candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+      GROUP BY trading_day
+      ORDER BY trading_day DESC
+      LIMIT 2
+  )
 GROUP BY instrument_id, ticker, trading_day, candle_at
 ORDER BY ticker, trading_day, candle_at
+LIMIT 100000
+SETTINGS max_execution_time = 10,
+         timeout_before_checking_execution_speed = 0,
+         max_threads = 2,
+         max_rows_to_read = 2000000,
+         max_result_rows = 100000,
+         result_overflow_mode = 'throw'
 FORMAT JSONEachRow
 """.strip()
 
@@ -73,6 +94,7 @@ FROM
         argMax(volume, record_version) AS volume,
         argMax(is_complete, record_version) AS is_complete
     FROM scientific_candles_1m
+    PREWHERE instrument_id IN {instrument_ids:Array(String)}
     WHERE trading_day >= today() - 45
       AND trading_day < toDate(parseDateTime64BestEffort({as_of:String}, 6, 'UTC'))
       AND toHour(toTimeZone(candle_at, 'Europe/Moscow')) * 60
@@ -83,6 +105,13 @@ FROM
 WHERE is_complete = 1
 GROUP BY ticker, trading_day
 ORDER BY ticker, trading_day DESC
+LIMIT 2000
+SETTINGS max_execution_time = 10,
+         timeout_before_checking_execution_speed = 0,
+         max_threads = 2,
+         max_rows_to_read = 3000000,
+         max_result_rows = 2000,
+         result_overflow_mode = 'throw'
 FORMAT JSONEachRow
 """.strip()
 
@@ -231,6 +260,9 @@ class ClickHouseMorningRetracementSource:
         self._username = username
         self._password = password
         self._timeout_seconds = timeout_seconds
+        self._volume_cache_lock = Lock()
+        self._volume_cache_key: tuple[date, int, tuple[str, ...]] | None = None
+        self._volume_cache_rows: tuple[dict[str, Any], ...] = ()
 
     def load(
         self,
@@ -241,12 +273,27 @@ class ClickHouseMorningRetracementSource:
         cutoff = as_of.astimezone(timezone.utc)
         local = cutoff.astimezone(MOSCOW)
         local_minute = local.hour * 60 + local.minute
+        instrument_ids = tuple(
+            dict.fromkeys(
+                item.instrument_id.strip()
+                for item in instruments
+                if item.instrument_id.strip()
+            )
+        )
+        if not instrument_ids:
+            return ()
         parameters = {
             "as_of": cutoff.strftime("%Y-%m-%d %H:%M:%S.%f"),
             "local_minute": str(local_minute),
+            "instrument_ids": _array_parameter(instrument_ids),
         }
         candles = self._rows(_LATEST_SESSION_CANDLES_SQL, parameters)
-        volumes = self._rows(_VOLUME_HISTORY_SQL, parameters)
+        volumes = self._volume_rows(
+            parameters=parameters,
+            local_day=local.date(),
+            local_minute=local_minute,
+            instrument_ids=instrument_ids,
+        )
         volume_history: defaultdict[str, list[float]] = defaultdict(list)
         for row in volumes:
             values = volume_history[str(row["ticker"]).upper()]
@@ -303,13 +350,34 @@ class ClickHouseMorningRetracementSource:
             )
         return tuple(result)
 
+    def _volume_rows(
+        self,
+        *,
+        parameters: Mapping[str, str],
+        local_day: date,
+        local_minute: int,
+        instrument_ids: tuple[str, ...],
+    ) -> tuple[dict[str, Any], ...]:
+        cache_key = (local_day, local_minute // 5, instrument_ids)
+        with self._volume_cache_lock:
+            if self._volume_cache_key == cache_key:
+                return self._volume_cache_rows
+        rows = self._rows(_VOLUME_HISTORY_SQL, parameters)
+        with self._volume_cache_lock:
+            self._volume_cache_key = cache_key
+            self._volume_cache_rows = rows
+        return rows
+
     def _rows(
         self,
         sql: str,
         parameters: Mapping[str, str],
     ) -> tuple[dict[str, Any], ...]:
+        query_id = f"morning-retracement-{uuid4()}"
         query = {
             "database": self._database,
+            "query_id": query_id,
+            "cancel_http_readonly_queries_on_client_close": "1",
             **{f"param_{key}": value for key, value in parameters.items()},
         }
         request = Request(
@@ -328,6 +396,14 @@ class ClickHouseMorningRetracementSource:
                 for line in response.read().decode("utf-8").splitlines()
                 if line.strip()
             )
+
+
+def _array_parameter(values: Sequence[str]) -> str:
+    escaped = (
+        "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        for value in values
+    )
+    return "[" + ",".join(escaped) + "]"
 
 
 class ClickHouseMorningRetracementTrackingStore(

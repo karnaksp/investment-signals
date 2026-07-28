@@ -5,17 +5,22 @@ from datetime import date, datetime, timedelta
 from hashlib import sha256
 import json
 from pathlib import Path
+from typing import Mapping
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from tinvest_signal_engine.adapters.morning_retracement_runtime import (
+    ClickHouseMorningRetracementSource,
+    _LATEST_SESSION_CANDLES_SQL,
+    _VOLUME_HISTORY_SQL,
     load_morning_retracement_policy,
 )
 from tinvest_signal_engine.application.morning_retracement_signals import (
     GenerateMorningRetracementRecommendations,
     MorningRetracementMarketSeries,
 )
+from tinvest_signal_engine.config import InstrumentSubscriptionConfig
 from tinvest_signal_engine.domain.historical_hypothesis_replay import (
     HistoricalCandle,
 )
@@ -260,3 +265,45 @@ def test_stale_morning_snapshot_is_not_emitted_later_in_the_day() -> None:
     )
 
     assert result == ()
+
+
+class _RecordingMorningSource(ClickHouseMorningRetracementSource):
+    def __init__(self) -> None:
+        super().__init__(
+            base_url="http://clickhouse.invalid",
+            database="signal_engine",
+            username="reader",
+            password="secret",
+        )
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def _rows(
+        self,
+        sql: str,
+        parameters: Mapping[str, str],
+    ) -> tuple[dict[str, object], ...]:
+        self.calls.append((sql, dict(parameters)))
+        return ()
+
+
+def test_market_source_bounds_queries_and_reuses_five_minute_volume_window() -> None:
+    source = _RecordingMorningSource()
+    instrument = InstrumentSubscriptionConfig(
+        ticker="SBER",
+        class_code="TQBR",
+        alias="sber_tqbr",
+    )
+    first = datetime(2026, 7, 28, 7, 16, tzinfo=MOSCOW)
+    second = datetime(2026, 7, 28, 7, 19, tzinfo=MOSCOW)
+
+    assert source.load(as_of=first, instruments=(instrument,)) == ()
+    assert source.load(as_of=second, instruments=(instrument,)) == ()
+
+    candle_calls = [call for call in source.calls if call[0] == _LATEST_SESSION_CANDLES_SQL]
+    volume_calls = [call for call in source.calls if call[0] == _VOLUME_HISTORY_SQL]
+    assert len(candle_calls) == 2
+    assert len(volume_calls) == 1
+    assert candle_calls[0][1]["instrument_ids"] == "['SBER_TQBR']"
+    assert "max_execution_time = 10" in _LATEST_SESSION_CANDLES_SQL
+    assert "LIMIT 2" in _LATEST_SESSION_CANDLES_SQL
+    assert "instrument_id IN {instrument_ids:Array(String)}" in _VOLUME_HISTORY_SQL

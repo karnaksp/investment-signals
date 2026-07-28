@@ -9,9 +9,13 @@ import logging
 import os
 from pathlib import Path
 import time
+from urllib.error import URLError
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo
 
+from tinvest_signal_engine.adapters.clickhouse_resilience import (
+    TransientClickHouseError,
+)
 from tinvest_signal_engine.adapters.kafka_reliability import KafkaSignalPublisher
 from tinvest_signal_engine.adapters.morning_retracement_runtime import (
     ClickHouseMorningRetracementSource,
@@ -129,70 +133,92 @@ def main() -> None:
         float(os.getenv("MORNING_RETRACEMENT_POLL_SECONDS") or "60"),
     )
     logger.info("Starting live morning-retracement recommendation worker")
+    retry_delay = poll_seconds
     try:
         while True:
+            cycle_started = time.monotonic()
             now = datetime.now(tz=timezone.utc)
-            settings = load_morning_retracement_settings(public_config, policy)
-            market = source.load(as_of=now, instruments=instruments)
-            if settings.enabled:
-                assessments = scorer.assess(
-                    market,
-                    settings=settings,
-                    as_of=now,
-                )
-                observation_ids = record_assessments.execute(
-                    tuple(item[1] for item in assessments),
-                    recorded_at=now,
-                )
-                if observation_ids:
-                    logger.info(
-                        "Stored live morning-retracement assessments",
-                        extra={"assessment_count": len(observation_ids)},
-                    )
-                local_day = now.astimezone(MOSCOW).date()
-                emitted = store.emitted_instruments_for_trading_day(
-                    signal_type=SIGNAL_TYPE,
-                    trading_day=local_day.isoformat(),
-                )
-                recommendations = scorer.execute(
-                    market,
-                    settings=settings,
-                    already_emitted_instruments=emitted,
-                    as_of=now,
-                )
-                for series, recommendation in recommendations:
-                    prepared = _prepared_signal(
-                        series=series,
-                        recommendation=recommendation,
-                        policy=policy,
+            try:
+                settings = load_morning_retracement_settings(public_config, policy)
+                market = source.load(as_of=now, instruments=instruments)
+                if settings.enabled:
+                    assessments = scorer.assess(
+                        market,
                         settings=settings,
-                        runtime=runtime,
+                        as_of=now,
                     )
-                    event = _broker_event(prepared.signal)
-                    ReliableEventProcessor(
-                        detector=_PreparedRecommendation(prepared),
-                        store=store,
-                        publisher=publisher,
-                        metrics=metrics,
-                    ).process(event)
+                    observation_ids = record_assessments.execute(
+                        tuple(item[1] for item in assessments),
+                        recorded_at=now,
+                    )
+                    if observation_ids:
+                        logger.info(
+                            "Stored live morning-retracement assessments",
+                            extra={"assessment_count": len(observation_ids)},
+                        )
+                    local_day = now.astimezone(MOSCOW).date()
+                    emitted = store.emitted_instruments_for_trading_day(
+                        signal_type=SIGNAL_TYPE,
+                        trading_day=local_day.isoformat(),
+                    )
+                    recommendations = scorer.execute(
+                        market,
+                        settings=settings,
+                        already_emitted_instruments=emitted,
+                        as_of=now,
+                    )
+                    for series, recommendation in recommendations:
+                        prepared = _prepared_signal(
+                            series=series,
+                            recommendation=recommendation,
+                            policy=policy,
+                            settings=settings,
+                            runtime=runtime,
+                        )
+                        event = _broker_event(prepared.signal)
+                        ReliableEventProcessor(
+                            detector=_PreparedRecommendation(prepared),
+                            store=store,
+                            publisher=publisher,
+                            metrics=metrics,
+                        ).process(event)
+                        logger.info(
+                            "Stored morning-retracement recommendation",
+                            extra={
+                                "instrument_id": series.instrument_id,
+                                "probability": recommendation.model_probability,
+                                "target_price": recommendation.target_price,
+                            },
+                        )
+                outcome_batch = process_outcomes.execute(now=now, market=market)
+                if outcome_batch.stored:
                     logger.info(
-                        "Stored morning-retracement recommendation",
+                        "Stored morning-retracement entry outcomes",
                         extra={
-                            "instrument_id": series.instrument_id,
-                            "probability": recommendation.model_probability,
-                            "target_price": recommendation.target_price,
+                            "stored_count": outcome_batch.stored,
+                            "unavailable_count": outcome_batch.unavailable,
                         },
                     )
-            outcome_batch = process_outcomes.execute(now=now, market=market)
-            if outcome_batch.stored:
-                logger.info(
-                    "Stored morning-retracement entry outcomes",
+            except (
+                TimeoutError,
+                URLError,
+                TransientClickHouseError,
+                ConnectionError,
+            ) as error:
+                logger.warning(
+                    "Morning-retracement cycle delayed by a temporary data-store "
+                    "failure; the worker will retry without restarting",
                     extra={
-                        "stored_count": outcome_batch.stored,
-                        "unavailable_count": outcome_batch.unavailable,
+                        "retry_delay_seconds": retry_delay,
+                        "error_type": type(error).__name__,
                     },
                 )
-            time.sleep(poll_seconds)
+                time.sleep(retry_delay)
+                retry_delay = min(max(poll_seconds, retry_delay * 2), 300.0)
+                continue
+            retry_delay = poll_seconds
+            elapsed = time.monotonic() - cycle_started
+            time.sleep(max(0.0, poll_seconds - elapsed))
     except KeyboardInterrupt:
         logger.info("Morning-retracement recommendation worker stopped")
     finally:
