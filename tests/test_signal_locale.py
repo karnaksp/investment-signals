@@ -187,6 +187,46 @@ def test_spoofing_explanation_ask_not_bid() -> None:
     assert "бида" not in text
 
 
+def test_morning_retracement_telegram_shows_direction_probability_and_target() -> None:
+    signal = _signal(
+        signal_type="morning_retracement_recommendation",
+        metric_value=0.73,
+        baseline_value=0.65,
+        payload={
+            "expected_direction": "down",
+            "entry_reference_price": 102.0,
+            "target_price": 101.0,
+            "initial_stop_price": 102.8,
+            "break_even_trigger_price": 101.35,
+            "expected_hit_at": "2026-07-28T08:20:00+03:00",
+            "expected_hit_window_start": "2026-07-28T08:00:00+03:00",
+            "expected_hit_window_end": "2026-07-28T09:10:00+03:00",
+            "deadline_at": "2026-07-28T11:00:00+03:00",
+            "model_probability": 0.73,
+            "historical_target_probability": 0.72,
+            "historical_target_probability_lower": 0.58,
+            "evidence_sample_count": 72,
+        },
+    )
+
+    html = build_telegram_html(
+        signal,
+        {
+            "quality_score": 73,
+            "quality_tier_ru": "исследовательская",
+            "quality_hint_ru": "Вероятность рассчитана моделью события.",
+        },
+        ticker_terminal_url="https://example.test/chart",
+        instrument_page_url="https://example.test/instrument",
+    )
+
+    assert "ВОЗВРАТ ВНИЗ" in html
+    assert "73,0%" in html
+    assert "R50" in html
+    assert "101" in html
+    assert "не гарантирует" in html
+
+
 def test_instrument_url_tqbr() -> None:
     u = t_invest_instrument_url(ticker="SBER", class_code="TQBR")
     assert "SBER" in u

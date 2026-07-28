@@ -345,6 +345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             selected_policy.target_fraction,
         ),
         "model_explanation": final_explanation,
+        "runtime_model": _runtime_model_artifact(selected_candidate),
         "gates": gates,
         "scientific_sources": [
             "https://arxiv.org/abs/1707.03498",
@@ -409,6 +410,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     return 0
+
+
+def _runtime_model_artifact(candidate: FittedCandidate) -> dict[str, Any]:
+    """Seal the fitted tabular model in a vendor-neutral runtime format.
+
+    Production deliberately does not import scikit-learn.  The selected
+    logistic model is represented as an ordered feature vocabulary, one
+    coefficient per feature, and an intercept.  A content fingerprint lets
+    the composition root fail closed if the artifact is edited manually.
+    """
+
+    if candidate.model_name != "logistic_regression":
+        raise ValueError(
+            "only logistic_regression can be exported to the production runtime"
+        )
+    feature_names = [
+        str(item) for item in candidate.vectorizer.get_feature_names_out()
+    ]
+    coefficients = [float(item) for item in candidate.model.coef_[0]]
+    if len(feature_names) != len(coefficients):
+        raise ValueError("runtime model feature and coefficient counts differ")
+    payload: dict[str, Any] = {
+        "schema": "linear-probability-model-v1",
+        "link": "logit",
+        "positive_class": 1,
+        "feature_names": feature_names,
+        "coefficients": coefficients,
+        "intercept": float(candidate.model.intercept_[0]),
+    }
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    payload["fingerprint"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return payload
 
 
 def _parse_tickers(raw: str) -> tuple[str, ...]:

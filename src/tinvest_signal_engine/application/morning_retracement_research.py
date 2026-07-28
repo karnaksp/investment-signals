@@ -289,6 +289,38 @@ class BuildMorningRetracementResearch:
         )
 
 
+def causal_morning_feature_values(
+    snapshot: MorningSnapshot,
+    rows: tuple[HistoricalCandle, ...],
+    *,
+    historical_cumulative_volume: float | None,
+) -> dict[str, float]:
+    """Return the exact point-in-time morning features used by research."""
+
+    return {
+        item.name: item.value
+        for item in _morning_features(
+            snapshot,
+            rows,
+            historical_cumulative_volume=historical_cumulative_volume,
+        )
+    }
+
+
+def causal_previous_session_feature_values(
+    rows: tuple[HistoricalCandle, ...],
+) -> dict[str, float]:
+    """Return the sealed previous-session features for a live decision."""
+
+    return {item.name: item.value for item in _previous_session_features(rows)}
+
+
+def estimate_tick_size(candles: Sequence[HistoricalCandle]) -> float:
+    """Expose the causal tick-size estimator shared by research and runtime."""
+
+    return _estimate_tick_size(tuple(candles))
+
+
 def _group_candles(
     candles: Iterable[HistoricalCandle],
 ) -> dict[tuple[str, date], tuple[HistoricalCandle, ...]]:

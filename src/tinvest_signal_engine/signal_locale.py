@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import html
+from zoneinfo import ZoneInfo
 
 from .models import TriggerSignal
 from .signal_interpretation import build_signal_interpretation
 from .terminal_links import t_invest_web_terminal_url
 
+_MOSCOW = ZoneInfo("Europe/Moscow")
 _SIGNAL_TYPE_RU: dict[str, str] = {
     # Имена из detector_core.py и исторические алиасы
     "volume_spike": "Всплеск объёма",
@@ -34,6 +37,7 @@ _SIGNAL_TYPE_RU: dict[str, str] = {
     "open_interest_spike": "Всплеск открытого интереса",
     "candle_range_spike": "Широкий диапазон свечи",
     "bond_maturity_convergence": "Схождение облигации к номиналу",
+    "morning_retracement_recommendation": "Вероятный утренний возврат цены",
 }
 
 
@@ -64,6 +68,16 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
     z = abs(float(signal.z_score))
     win = int(signal.window_seconds)
 
+    if st == "morning_retracement_recommendation":
+        direction = "вверх" if p.get("expected_direction") == "up" else "вниз"
+        probability = _percent_ru(p.get("model_probability"))
+        target = float(p.get("target_price") or 0.0)
+        deadline = _time_ru(p.get("deadline_at"))
+        return (
+            f"Модель оценивает вероятность возврата {direction} к уровню "
+            f"{target:g} в {probability}. Расчётный срок — не позже "
+            f"{deadline}; это исследовательская рекомендация, а не гарантия."
+        )
     if st == "trading_status_changed":
         prev = str(p.get("previous_status", "—"))
         cur = str(p.get("current_status", "—"))
@@ -189,6 +203,37 @@ def build_telegram_html(
     wterm = html.escape(t_invest_web_terminal_url())
     score = quality["quality_score"]
     tier = html.escape(str(quality["quality_tier_ru"]))
+    if signal.signal_type == "morning_retracement_recommendation":
+        payload = signal.payload or {}
+        direction = (
+            "ВВЕРХ" if payload.get("expected_direction") == "up" else "ВНИЗ"
+        )
+        probability = _percent_ru(payload.get("model_probability"))
+        historical = _percent_ru(payload.get("historical_target_probability"))
+        lower = _percent_ru(payload.get("historical_target_probability_lower"))
+        expected_at = _time_ru(payload.get("expected_hit_at"))
+        expected_start = _time_ru(payload.get("expected_hit_window_start"))
+        expected_end = _time_ru(payload.get("expected_hit_window_end"))
+        deadline = _time_ru(payload.get("deadline_at"))
+        return (
+            f"<a href=\"{term_href}\"><b>{t_esc}</b></a> · "
+            f"<b>ВОЗВРАТ {direction}</b>\n"
+            f"Вероятность текущего события: <b>{probability}</b>\n"
+            f"Расчётный вход: {float(payload.get('entry_reference_price') or 0):g}\n"
+            f"Цель R50: <b>{float(payload.get('target_price') or 0):g}</b>\n"
+            f"Начальное ограничение убытка: "
+            f"{float(payload.get('initial_stop_price') or 0):g}\n"
+            f"Защита безубытка после: "
+            f"{float(payload.get('break_even_trigger_price') or 0):g}\n"
+            f"Ожидаемое время: около {expected_at} "
+            f"(обычно {expected_start}–{expected_end})\n"
+            f"Предельный срок: {deadline}\n"
+            f"История правила: {historical} "
+            f"(осторожная оценка {lower}, "
+            f"{int(payload.get('evidence_sample_count') or 0)} случаев)\n"
+            f"<a href=\"{inv_href}\">Открыть карточку инструмента</a>\n\n"
+            "Исследовательская рекомендация: вероятность не гарантирует результат."
+        )
     # Вложенность <b><a>…</a></b> у Bot API часто даёт 400; допустимо <a><b>…</b></a>.
     return (
         f"<a href=\"{term_href}\"><b>{t_esc}</b></a> ({html.escape(signal.class_code)})\n"
@@ -218,3 +263,23 @@ def format_plain_alert_ru(
     if score != "":
         head += f"Оценка: {score}/100 ({tier})\n"
     return head + "\n" + signal.summary
+
+
+def _percent_ru(value: object) -> str:
+    try:
+        percent = float(value) * 100.0
+    except (TypeError, ValueError):
+        return "—"
+    return f"{percent:.1f}%".replace(".", ",")
+
+
+def _time_ru(value: object) -> str:
+    if value in (None, ""):
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return html.escape(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_MOSCOW)
+    return parsed.astimezone(_MOSCOW).strftime("%H:%M")

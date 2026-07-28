@@ -53,6 +53,26 @@ class PostgresReliableProcessingStore:
             signals = self._load_signals(cursor, event.event_id)
         return StoredEvent(signals=signals, replayed=True)
 
+    def emitted_instruments_for_trading_day(
+        self,
+        *,
+        signal_type: str,
+        trading_day: str,
+    ) -> frozenset[str]:
+        """Return live-policy episodes already materialized for one local day."""
+
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT DISTINCT instrument_id
+                FROM {self._signal_table}
+                WHERE signal_type = %s
+                  AND payload_json->>'trading_day' = %s
+                """,
+                (signal_type, trading_day),
+            )
+            return frozenset(str(row[0]) for row in cursor.fetchall())
+
     def persist_detection_once(
         self,
         event: BrokerEvent,
