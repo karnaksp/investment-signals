@@ -44,6 +44,8 @@ from tinvest_signal_engine.domain.morning_retracement_signal import (
 
 
 MOSCOW = ZoneInfo("Europe/Moscow")
+_MORNING_START_LOCAL_MINUTE = 7 * 60
+_MORNING_MONITOR_UNTIL_LOCAL_MINUTE = 11 * 60
 _LATEST_SESSION_CANDLES_SQL = """
 SELECT
     instrument_id,
@@ -260,6 +262,9 @@ class ClickHouseMorningRetracementSource:
         self._username = username
         self._password = password
         self._timeout_seconds = timeout_seconds
+        self._market_cache_lock = Lock()
+        self._market_cache_key: tuple[date, int, tuple[str, ...]] | None = None
+        self._market_cache_rows: tuple[MorningRetracementMarketSeries, ...] = ()
         self._volume_cache_lock = Lock()
         self._volume_cache_key: tuple[date, int, tuple[str, ...]] | None = None
         self._volume_cache_rows: tuple[dict[str, Any], ...] = ()
@@ -273,6 +278,8 @@ class ClickHouseMorningRetracementSource:
         cutoff = as_of.astimezone(timezone.utc)
         local = cutoff.astimezone(MOSCOW)
         local_minute = local.hour * 60 + local.minute
+        if local_minute < _MORNING_START_LOCAL_MINUTE:
+            return ()
         instrument_ids = tuple(
             dict.fromkeys(
                 item.instrument_id.strip()
@@ -282,16 +289,35 @@ class ClickHouseMorningRetracementSource:
         )
         if not instrument_ids:
             return ()
+        effective_local_minute = min(
+            local_minute,
+            _MORNING_MONITOR_UNTIL_LOCAL_MINUTE,
+        )
+        if local_minute > _MORNING_MONITOR_UNTIL_LOCAL_MINUTE:
+            cutoff = local.replace(
+                hour=_MORNING_MONITOR_UNTIL_LOCAL_MINUTE // 60,
+                minute=_MORNING_MONITOR_UNTIL_LOCAL_MINUTE % 60,
+                second=59,
+                microsecond=999_999,
+            ).astimezone(timezone.utc)
+        market_cache_key = (
+            local.date(),
+            effective_local_minute,
+            instrument_ids,
+        )
+        with self._market_cache_lock:
+            if self._market_cache_key == market_cache_key:
+                return self._market_cache_rows
         parameters = {
             "as_of": cutoff.strftime("%Y-%m-%d %H:%M:%S.%f"),
-            "local_minute": str(local_minute),
+            "local_minute": str(effective_local_minute),
             "instrument_ids": _array_parameter(instrument_ids),
         }
         candles = self._rows(_LATEST_SESSION_CANDLES_SQL, parameters)
         volumes = self._volume_rows(
             parameters=parameters,
             local_day=local.date(),
-            local_minute=local_minute,
+            local_minute=effective_local_minute,
             instrument_ids=instrument_ids,
         )
         volume_history: defaultdict[str, list[float]] = defaultdict(list)
@@ -348,7 +374,12 @@ class ClickHouseMorningRetracementSource:
                     historical_cumulative_volume=baseline.get(ticker),
                 )
             )
-        return tuple(result)
+        market = tuple(result)
+        if market or local_minute <= _MORNING_MONITOR_UNTIL_LOCAL_MINUTE:
+            with self._market_cache_lock:
+                self._market_cache_key = market_cache_key
+                self._market_cache_rows = market
+        return market
 
     def _volume_rows(
         self,

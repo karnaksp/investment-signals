@@ -286,6 +286,45 @@ class _RecordingMorningSource(ClickHouseMorningRetracementSource):
         return ()
 
 
+class _PopulatedRecordingMorningSource(_RecordingMorningSource):
+    def _rows(
+        self,
+        sql: str,
+        parameters: Mapping[str, str],
+    ) -> tuple[dict[str, object], ...]:
+        self.calls.append((sql, dict(parameters)))
+        if sql == _VOLUME_HISTORY_SQL:
+            return (
+                {
+                    "ticker": "SBER",
+                    "trading_day": "2026-07-27",
+                    "cumulative_volume": 10_000,
+                },
+            )
+        common = {
+            "instrument_id": "SBER_TQBR",
+            "ticker": "SBER",
+            "open_price": 100,
+            "high_price": 101,
+            "low_price": 99,
+            "close_price": 100,
+            "volume": 100,
+            "is_complete": 1,
+        }
+        return (
+            {
+                **common,
+                "trading_day": "2026-07-27",
+                "candle_at": "2026-07-27 08:00:00.000000",
+            },
+            {
+                **common,
+                "trading_day": "2026-07-28",
+                "candle_at": "2026-07-28 08:00:00.000000",
+            },
+        )
+
+
 def test_market_source_bounds_queries_and_reuses_five_minute_volume_window() -> None:
     source = _RecordingMorningSource()
     instrument = InstrumentSubscriptionConfig(
@@ -307,3 +346,43 @@ def test_market_source_bounds_queries_and_reuses_five_minute_volume_window() -> 
     assert "max_execution_time = 10" in _LATEST_SESSION_CANDLES_SQL
     assert "LIMIT 2" in _LATEST_SESSION_CANDLES_SQL
     assert "instrument_id IN {instrument_ids:Array(String)}" in _VOLUME_HISTORY_SQL
+
+
+def test_market_source_does_not_query_before_morning_session() -> None:
+    source = _RecordingMorningSource()
+    instrument = InstrumentSubscriptionConfig(
+        ticker="SBER",
+        class_code="TQBR",
+        alias="sber_tqbr",
+    )
+
+    result = source.load(
+        as_of=datetime(2026, 7, 28, 6, 59, tzinfo=MOSCOW),
+        instruments=(instrument,),
+    )
+
+    assert result == ()
+    assert source.calls == []
+
+
+def test_market_source_reuses_frozen_snapshot_after_monitoring_window() -> None:
+    source = _PopulatedRecordingMorningSource()
+    instrument = InstrumentSubscriptionConfig(
+        ticker="SBER",
+        class_code="TQBR",
+        alias="sber_tqbr",
+    )
+    first = datetime(2026, 7, 28, 12, 16, tzinfo=MOSCOW)
+    second = datetime(2026, 7, 28, 18, 40, tzinfo=MOSCOW)
+
+    first_result = source.load(as_of=first, instruments=(instrument,))
+    second_result = source.load(as_of=second, instruments=(instrument,))
+
+    assert len(first_result) == 1
+    assert second_result == first_result
+    assert len(source.calls) == 2
+    assert source.calls[0][0] == _LATEST_SESSION_CANDLES_SQL
+    assert source.calls[1][0] == _VOLUME_HISTORY_SQL
+    assert source.calls[0][1]["local_minute"] == "660"
+    assert source.calls[1][1]["local_minute"] == "660"
+    assert source.calls[0][1]["as_of"].endswith("08:00:59.999999")
