@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
+import gzip
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -332,10 +333,10 @@ def test_partition_source_loads_one_trading_day_and_preserves_no_future_guard(
         cost_model_version="cost-v1",
         combination_ids=(ScientificCombinationId.C1,),
     )
-    partition_payload = json.loads(
+    partition_payload = _read_partition(
         next(
-            (Path(completion.artifact.artifact_uri) / "partitions").glob("*.json")
-        ).read_text(encoding="utf-8")
+            (Path(completion.artifact.artifact_uri) / "partitions").glob("*.json*")
+        )
     )
     assert partition_payload["observations"]
     assert all(
@@ -351,7 +352,7 @@ def test_staged_source_detects_corrupted_partition(tmp_path: Path) -> None:
         _c1_report(event_forward_bps=30.0),
         tmp_path / "source",
     )
-    partition = next((tmp_path / "source").glob("*/partitions/*.json"))
+    partition = next((tmp_path / "source").glob("*/partitions/*.json*"))
     partition.write_text("{}\n", encoding="utf-8")
 
     try:
@@ -360,6 +361,13 @@ def test_staged_source_detects_corrupted_partition(tmp_path: Path) -> None:
         assert "failed verification" in str(exc)
     else:  # pragma: no cover - fail loudly without importing pytest here
         raise AssertionError("corrupted source partition was accepted")
+
+
+def _read_partition(path: Path) -> object:
+    if path.name.endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _evaluator() -> EvaluateScientificCombinationPortfolio:

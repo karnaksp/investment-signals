@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+from tinvest_signal_engine.adapters.worker_health_file import WorkerHealthFileSink
+from tinvest_signal_engine.domain.worker_health import (
+    WorkerHealthSnapshot,
+    WorkerState,
+)
 from tinvest_signal_engine.services import api as api_module
 
 
@@ -119,6 +126,151 @@ def test_admin_pipeline_status_reports_delivery_health(
     }.items():
         assert statuses[key] == value
     assert "Postgres" in data["incident_note"]
+
+
+def _write_worker_health(
+    path: Path,
+    *,
+    worker_id: str,
+    state: WorkerState = WorkerState.ACTIVE,
+    age_seconds: int = 0,
+    stale_after_seconds: int = 30,
+) -> None:
+    heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    WorkerHealthFileSink(path).persist(
+        WorkerHealthSnapshot(
+            schema_version="worker-health-v1",
+            worker_id=worker_id,
+            state=state,
+            started_at=heartbeat_at - timedelta(minutes=1),
+            last_heartbeat_at=heartbeat_at,
+            last_success_at=(
+                heartbeat_at if state is WorkerState.ACTIVE else None
+            ),
+            last_error_at=(
+                heartbeat_at if state is WorkerState.DEGRADED else None
+            ),
+            reason_code=(
+                "worker_cycle_failed"
+                if state is WorkerState.DEGRADED
+                else None
+            ),
+            consecutive_failures=(1 if state is WorkerState.DEGRADED else 0),
+            stale_after_seconds=stale_after_seconds,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("defect", "expected_reason"),
+    [
+        ("missing", "heartbeat_missing"),
+        ("stale", "heartbeat_stale"),
+        ("invalid", "heartbeat_invalid"),
+        ("degraded", "worker_cycle_failed"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("target_check_id", "target_worker_id"),
+    [
+        ("detector_worker", "detector"),
+        ("delivery_worker", "delivery_worker"),
+    ],
+)
+def test_admin_pipeline_status_fails_closed_for_worker_heartbeat_defects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    defect: str,
+    expected_reason: str,
+    target_check_id: str,
+    target_worker_id: str,
+) -> None:
+    detector_path = tmp_path / "detector.json"
+    delivery_path = tmp_path / "delivery.json"
+    monkeypatch.setenv("ADMIN_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("ADMIN_API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("SIGNAL_DELIVERY_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setenv("DETECTOR_HEALTH_SNAPSHOT_PATH", str(detector_path))
+    monkeypatch.setenv("DELIVERY_HEALTH_SNAPSHOT_PATH", str(delivery_path))
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    paths = {
+        "detector_worker": detector_path,
+        "delivery_worker": delivery_path,
+    }
+    worker_ids = {
+        "detector_worker": "detector",
+        "delivery_worker": "delivery_worker",
+    }
+    for check_id, path in paths.items():
+        _write_worker_health(path, worker_id=worker_ids[check_id])
+    target_path = paths[target_check_id]
+    if defect == "missing":
+        target_path.unlink()
+    if defect == "stale":
+        _write_worker_health(
+            target_path,
+            worker_id=target_worker_id,
+            age_seconds=90,
+            stale_after_seconds=30,
+        )
+    elif defect == "invalid":
+        target_path.write_text("not-json", encoding="utf-8")
+    elif defect == "degraded":
+        _write_worker_health(
+            target_path,
+            worker_id=target_worker_id,
+            state=WorkerState.DEGRADED,
+        )
+
+    mock_store = MagicMock()
+    mock_store.ping.return_value = True
+    mock_store.close = MagicMock()
+    mock_store.fetch_admin_overview.return_value = {
+        "totals": {
+            "total": 12,
+            "last_detected_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    mock_store.fetch_admin_delivery_overview.return_value = {
+        "totals": {
+            "delivered": 3,
+            "suppressed": 9,
+            "delivery_rate": 0.25,
+        },
+        "recent_delivered": [
+            {"detected_at": datetime.now(timezone.utc).isoformat()}
+        ],
+    }
+    monkeypatch.setattr(
+        api_module,
+        "create_postgres_signal_store_with_retry",
+        lambda *a, **k: mock_store,
+    )
+
+    app = api_module.create_app()
+    with TestClient(app) as client:
+        response = client.get(
+            "/admin/api/pipeline/status",
+            headers={"X-Admin-Token": "test-secret-token"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "critical"
+    assert data["metrics"]["generated"] == 12
+    assert data["metrics"]["delivered"] == 3
+    checks = {check["id"]: check for check in data["checks"]}
+    assert checks[target_check_id]["status"] == "critical"
+    assert checks[target_check_id]["reason_code"] == expected_reason
+    healthy_check_id = (
+        "delivery_worker"
+        if target_check_id == "detector_worker"
+        else "detector_worker"
+    )
+    assert checks[healthy_check_id]["status"] == "ok"
 
 
 def test_ready_degraded_when_ping_fails(

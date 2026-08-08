@@ -32,6 +32,7 @@ class ReplayRetentionPolicy:
 
     keep_completed_sets: int = 2
     raw_ttl: timedelta = timedelta(days=7)
+    orphan_ttl: timedelta = timedelta(days=7)
     hard_byte_budget: int = 16 * 1024 * 1024 * 1024
 
     def __post_init__(self) -> None:
@@ -39,6 +40,8 @@ class ReplayRetentionPolicy:
             raise ValueError("keep_completed_sets must be positive")
         if self.raw_ttl <= timedelta(0):
             raise ValueError("raw_ttl must be positive")
+        if self.orphan_ttl <= timedelta(0):
+            raise ValueError("orphan_ttl must be positive")
         if self.hard_byte_budget <= 0:
             raise ValueError("hard_byte_budget must be positive")
 

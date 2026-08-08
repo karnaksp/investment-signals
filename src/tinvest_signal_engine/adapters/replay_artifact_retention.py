@@ -118,6 +118,17 @@ class LocalReplayArtifactRetention:
                 skipped_reason=f"unsafe_retention_state:{type(exc).__name__}",
             )
 
+        if not has_active_jobs:
+            try:
+                orphan_paths = self._expired_orphan_raw_paths(jobs)
+                for item in orphan_paths:
+                    self._remove_validated_tree(item.path)
+                    deleted.append(self._relative(item.path))
+            except (OSError, ValueError):
+                # An unowned path is never important enough to make cleanup
+                # unsafe for the known, validated job inventory.
+                pass
+
         compacted: list[str] = []
         try:
             combination_paths = (
@@ -311,9 +322,7 @@ class LocalReplayArtifactRetention:
                     )
                 )
 
-        for path, owners in sorted(
-            references.items(), key=lambda item: str(item[0])
-        ):
+        for path, owners in sorted(references.items(), key=lambda item: str(item[0])):
             if not path.exists():
                 # An older result may already have been retained only as its
                 # sealed aggregate JSON and fingerprints.
@@ -347,12 +356,28 @@ class LocalReplayArtifactRetention:
         expected = (
             self._artifact_root / "scientific-combinations" / "evidence"
         ).resolve(strict=False)
+        if not expected.exists():
+            return ()
+        if expected.is_symlink() or not expected.is_dir():
+            raise ValueError("combination evidence root is unsafe")
         result: list[Path] = []
-        for path in references:
-            if path.parent.resolve(strict=False) != expected:
+        referenced = {path.resolve(strict=False) for path in references}
+        for path in sorted(expected.iterdir()):
+            if path.is_symlink() or not path.is_dir():
+                raise ValueError("combination evidence entry is unsafe")
+            if len(path.name) != 64 or any(
+                character not in "0123456789abcdef" for character in path.name
+            ):
+                # Unknown names are preserved fail-closed.  Canonically named
+                # completed artifacts are safe to compact even when an old
+                # job state no longer references them: the retention seal
+                # keeps every original partition hash for resume validation.
                 continue
-            if (path / "completion.json").is_file():
+            completion_path = path / "completion.json"
+            if completion_path.is_file() and not completion_path.is_symlink():
                 result.append(path)
+            elif path.resolve(strict=False) in referenced:
+                raise ValueError("referenced combination completion is missing")
         return tuple(sorted(result))
 
     def _validated_working_children(self) -> tuple[_ValidatedTree, ...]:
@@ -362,6 +387,40 @@ class LocalReplayArtifactRetention:
         if root.is_symlink() or not root.is_dir():
             raise ValueError("working root is unsafe")
         return tuple(self._validated_tree(path) for path in sorted(root.iterdir()))
+
+    def _expired_orphan_raw_paths(
+        self,
+        jobs: Sequence[ReplayRetentionJob],
+    ) -> tuple[_ValidatedTree, ...]:
+        """Return old derived trees that cannot belong to any persisted job.
+
+        Orphans are considered only when no replay is active.  Their directory
+        name must be a canonical SHA-256 fingerprint and they must remain
+        untouched for the full grace period before becoming removable.
+        """
+
+        known = {item.run_fingerprint.removeprefix("sha256:") for item in jobs}
+        cutoff = self._clock() - self._policy.orphan_ttl
+        rows: list[_ValidatedTree] = []
+        for base in (
+            self._artifact_root / "scientific-combinations" / "source",
+            self._artifact_root / "prospective-spool",
+        ):
+            if not base.exists():
+                continue
+            if base.is_symlink() or not base.is_dir():
+                raise ValueError("orphan replay root is unsafe")
+            for path in sorted(base.iterdir()):
+                if path.name in known:
+                    continue
+                if len(path.name) != 64 or any(
+                    character not in "0123456789abcdef" for character in path.name
+                ):
+                    continue
+                tree = self._validated_tree(path)
+                if tree.modified_at <= cutoff:
+                    rows.append(tree)
+        return tuple(sorted(rows, key=lambda item: (item.modified_at, str(item.path))))
 
     def _paths_for_ids(
         self,

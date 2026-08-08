@@ -120,10 +120,23 @@ class SignalDetector:
     def _settings_for(self, instrument_id: str) -> DetectorSettings:
         return self._per_instrument.get(instrument_id, self._default_settings)
 
-    def process(self, event: NormalizedEvent) -> list[TriggerSignal]:
+    def process(
+        self,
+        event: NormalizedEvent,
+        *,
+        emit_signals: bool = True,
+    ) -> list[TriggerSignal]:
         self._pending_observations = []
         cfg = self._settings_for(event.instrument_id)
         state = self._states[event.instrument_id]
+        alert_state_before = (
+            {
+                instrument_id: dict(instrument_state.last_alert_at)
+                for instrument_id, instrument_state in self._states.items()
+            }
+            if not emit_signals
+            else None
+        )
         if event.event_type == "trade":
             signals = self._process_trade_event(event, state, cfg)
         elif event.event_type == "last_price":
@@ -144,6 +157,14 @@ class SignalDetector:
             signals = []
         signals = list(signals)
         signals.extend(self._maybe_lead_lag(event, cfg))
+        if not emit_signals:
+            for instrument_id, instrument_state in self._states.items():
+                instrument_state.last_alert_at.clear()
+                instrument_state.last_alert_at.update(
+                    (alert_state_before or {}).get(instrument_id, {})
+                )
+            self._pending_observations = []
+            return []
         return [self._attach_provenance(signal, event) for signal in signals]
 
     def drain_observations(self) -> tuple[DetectorObservation, ...]:
@@ -456,6 +477,7 @@ class SignalDetector:
         spread_bps = ((best_ask - best_bid) / mid) * 10_000
         imbalance_abs = abs((top_bids_qty - top_asks_qty) / total_qty)
         imbalance_ratio = top_bids_qty / total_qty
+        volatility_context = self._baseline_volatility_context(event, cfg)
 
         signals.extend(
             self._maybe_emit_from_history(
@@ -482,6 +504,7 @@ class SignalDetector:
                     "depth_levels": depth,
                     "top_bid_qty": top_bids_qty,
                     "top_ask_qty": top_asks_qty,
+                    **volatility_context,
                 },
             )
         )
@@ -513,6 +536,7 @@ class SignalDetector:
                     "best_bid": best_bid,
                     "best_ask": best_ask,
                     "mid": mid,
+                    **volatility_context,
                 },
                 absolute_gate_passed=(
                     imbalance_abs >= cfg.imbalance_absolute_threshold
@@ -553,6 +577,7 @@ class SignalDetector:
                             "depth_levels": depth,
                             "top_bid_qty": top_bids_qty,
                             "top_ask_qty": top_asks_qty,
+                            **volatility_context,
                         },
                         absolute_gate_passed=(
                             abs(delta_obi) >= cfg.obi_delta_absolute_threshold
@@ -890,6 +915,7 @@ class SignalDetector:
                         "imbalance_ratio": imbalance_ratio,
                         "signed_delta_qty": signed_delta_qty,
                         "combo_detail": combo_detail,
+                        **self._baseline_volatility_context(event, cfg),
                     },
                 )
             )
@@ -928,6 +954,7 @@ class SignalDetector:
                         "imbalance_ratio": imbalance_ratio,
                         "signed_delta_qty": signed_delta_qty,
                         "combo_detail": combo_detail,
+                        **self._baseline_volatility_context(event, cfg),
                     },
                 )
             )
@@ -1053,6 +1080,7 @@ class SignalDetector:
                     ),
                     "mid_move_bps": mid_move_bps,
                     "gap_seconds": (cur.ts - prev.ts).total_seconds(),
+                    **self._baseline_volatility_context(event, cfg),
                     "event_payload": event.payload,
                 },
             )
@@ -1267,7 +1295,7 @@ class SignalDetector:
             ),
             "baseline_volatility_observed_until": event.source_time.isoformat(),
             "baseline_volatility_estimator": "tick_realized_rv",
-            "baseline_volatility_estimator_version": "1.0.0",
+            "baseline_volatility_estimator_version": "2.0.0",
         }
 
     def _maybe_emit_trade_burst(

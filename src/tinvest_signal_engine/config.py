@@ -27,7 +27,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     ),
     "bond_convergence_emitter": frozenset({"TINVEST_TOKEN"}),
     "candle_cache": frozenset({"TINVEST_TOKEN"}),
-    "dagster": frozenset({"TINVEST_TOKEN"}),
+    "dagster": frozenset({"POSTGRES_PASSWORD", "TINVEST_TOKEN"}),
     "detector": frozenset(
         {
             "ALERT_WEBHOOK_URL",
@@ -125,6 +125,11 @@ def _env_optional_int(name: str) -> int | None:
     return int(value) if value else None
 
 
+def _env_optional_path(name: str) -> Path | None:
+    value = (os.getenv(name) or "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def _secret_optional_int(name: str, *, service_name: str | None = None) -> int | None:
     raw_value = load_secret(name, service_name=service_name)
     if raw_value is None:
@@ -179,7 +184,7 @@ class DetectorSettings:
     trade_window_seconds: int = 60
     price_window_seconds: int = 90
     orderbook_window_seconds: int = 120
-    baseline_volatility_window_seconds: int = 60
+    baseline_volatility_window_seconds: int = 180
     alert_cooldown_seconds: int = 120
     volume_zscore_threshold: float = 4.0
     trade_count_zscore_threshold: float = 4.0
@@ -248,6 +253,7 @@ class RuntimeSettings:
     kafka_signal_topic: str
     kafka_consumer_group: str
     kafka_auto_offset_reset: str
+    kafka_first_boot_warmup_age_seconds: int
     local_notifier_consumer_group: str
     local_notification_duration_seconds: int
     postgres_host: str
@@ -273,6 +279,16 @@ class RuntimeSettings:
     ingestor_orderbook_min_interval_ms: int
     ingestor_health_snapshot_path: Path
     ingestor_health_stale_after_seconds: int
+    detector_health_snapshot_path: Path | None
+    delivery_health_snapshot_path: Path | None
+    ingestor_recovery_lookback_minutes: int
+    ingestor_candle_recovery_interval_seconds: int
+    ingestor_candle_recovery_overlap_minutes: int
+    market_schedule_timezone: str
+    market_collection_start: str
+    market_collection_end: str
+    market_signal_start: str
+    market_signal_end: str
     threshold_recalc_interval_hours: int
     threshold_lookback_days: int
     threshold_hourly_deviation_multiplier: float
@@ -341,6 +357,11 @@ class RuntimeSettings:
     observation_worker_retry_base_seconds: int
     observation_worker_retry_max_seconds: int
     observation_worker_metrics_listen_port: int | None
+    observation_retention_hours: int
+    observation_purge_batch_size: int
+    processed_event_retention_days: int
+    processed_event_purge_interval_seconds: int
+    processed_event_purge_batch_size: int
 
     @classmethod
     def from_env(
@@ -386,6 +407,10 @@ class RuntimeSettings:
             ),
             kafka_auto_offset_reset=os.getenv(
                 "KAFKA_AUTO_OFFSET_RESET", "latest"
+            ),
+            kafka_first_boot_warmup_age_seconds=max(
+                0,
+                int(os.getenv("KAFKA_FIRST_BOOT_WARMUP_AGE_SECONDS", "900")),
             ),
             local_notifier_consumer_group=os.getenv(
                 "LOCAL_NOTIFIER_CONSUMER_GROUP", "local-notifier"
@@ -452,6 +477,59 @@ class RuntimeSettings:
                         "180",
                     )
                 ),
+            ),
+            detector_health_snapshot_path=_env_optional_path(
+                "DETECTOR_HEALTH_SNAPSHOT_PATH"
+            ),
+            delivery_health_snapshot_path=_env_optional_path(
+                "DELIVERY_HEALTH_SNAPSHOT_PATH"
+            ),
+            ingestor_recovery_lookback_minutes=max(
+                0,
+                int(
+                    os.getenv(
+                        "INGESTOR_RECOVERY_LOOKBACK_MINUTES",
+                        "240",
+                    )
+                ),
+            ),
+            ingestor_candle_recovery_interval_seconds=max(
+                0,
+                int(
+                    os.getenv(
+                        "INGESTOR_CANDLE_RECOVERY_INTERVAL_SECONDS",
+                        "300",
+                    )
+                ),
+            ),
+            ingestor_candle_recovery_overlap_minutes=max(
+                1,
+                int(
+                    os.getenv(
+                        "INGESTOR_CANDLE_RECOVERY_OVERLAP_MINUTES",
+                        "15",
+                    )
+                ),
+            ),
+            market_schedule_timezone=(
+                os.getenv("MARKET_SCHEDULE_TIMEZONE", "Europe/Moscow").strip()
+                or "Europe/Moscow"
+            ),
+            market_collection_start=(
+                os.getenv("MARKET_COLLECTION_START", "07:00").strip()
+                or "07:00"
+            ),
+            market_collection_end=(
+                os.getenv("MARKET_COLLECTION_END", "23:00").strip()
+                or "23:00"
+            ),
+            market_signal_start=(
+                os.getenv("MARKET_SIGNAL_START", "07:15").strip()
+                or "07:15"
+            ),
+            market_signal_end=(
+                os.getenv("MARKET_SIGNAL_END", "22:45").strip()
+                or "22:45"
             ),
             threshold_recalc_interval_hours=int(
                 os.getenv("THRESHOLD_RECALC_INTERVAL_HOURS", "24")
@@ -650,6 +728,37 @@ class RuntimeSettings:
             observation_worker_metrics_listen_port=_env_optional_int(
                 "OBSERVATION_WORKER_METRICS_LISTEN_PORT"
             ),
+            observation_retention_hours=max(
+                24,
+                int(os.getenv("OBSERVATION_RETENTION_HOURS", "24")),
+            ),
+            observation_purge_batch_size=min(
+                100_000,
+                max(
+                    1,
+                    int(os.getenv("OBSERVATION_PURGE_BATCH_SIZE", "50000")),
+                ),
+            ),
+            processed_event_retention_days=max(
+                1,
+                int(os.getenv("PROCESSED_EVENT_RETENTION_DAYS", "3")),
+            ),
+            processed_event_purge_interval_seconds=max(
+                60,
+                int(
+                    os.getenv(
+                        "PROCESSED_EVENT_PURGE_INTERVAL_SECONDS",
+                        "900",
+                    )
+                ),
+            ),
+            processed_event_purge_batch_size=min(
+                100_000,
+                max(
+                    1,
+                    int(os.getenv("PROCESSED_EVENT_PURGE_BATCH_SIZE", "100000")),
+                ),
+            ),
         )
 
 
@@ -666,7 +775,7 @@ def _detector_settings_from_mapping(
             detector.get("orderbook_window_seconds", 120)
         ),
         baseline_volatility_window_seconds=int(
-            detector.get("baseline_volatility_window_seconds", 60)
+            detector.get("baseline_volatility_window_seconds", 180)
         ),
         alert_cooldown_seconds=int(
             detector.get("alert_cooldown_seconds", 120)
@@ -832,17 +941,23 @@ def load_detector_config(
     detector_block = raw.get("detector", {}) or {}
     if not isinstance(detector_block, dict):
         raise ValueError(f"'detector' in {path} must be a mapping")
-    base_settings = _detector_settings_from_mapping(detector_block)
 
     per_raw = raw.get("per_instrument") or {}
     if overrides_path is not None and overrides_path.exists():
         override_raw = _read_yaml(overrides_path)
+        override_detector = override_raw.get("detector") or {}
+        if override_detector and not isinstance(override_detector, dict):
+            raise ValueError(
+                f"'detector' in {overrides_path} must be a mapping"
+            )
+        detector_block = {**detector_block, **override_detector}
         override_per_raw = override_raw.get("per_instrument") or {}
         if override_per_raw and not isinstance(override_per_raw, dict):
             raise ValueError(
                 f"'per_instrument' in {overrides_path} must be a mapping"
             )
         per_raw = {**per_raw, **override_per_raw}
+    base_settings = _detector_settings_from_mapping(detector_block)
     if per_raw and not isinstance(per_raw, dict):
         raise ValueError(f"'per_instrument' in {path} must be a mapping")
     per_instrument: dict[str, DetectorSettings] = {}

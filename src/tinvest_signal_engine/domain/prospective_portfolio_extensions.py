@@ -46,7 +46,7 @@ class R2Reason(str, Enum):
 class R2ExtensionPolicy:
     """Immutable implementation parameters derived from the sealed registry."""
 
-    version: str = "r2-h10-h11-v1.0.0"
+    version: str = "r2-h10-h11-v1.0.1"
     cost_model_version: str = "1.0.0"
     opening_gap_history_days: int = 20
     opening_gap_z_min: float = 2.0
@@ -57,6 +57,7 @@ class R2ExtensionPolicy:
     residual_percentile_min: float = 0.99
     residual_basket_coverage_min: float = 0.80
     residual_horizons_seconds: tuple[int, ...] = (900, 1800)
+    outcome_candle_tolerance_seconds: int = 300
     round_trip_cost_bps: float = 10.0
 
     def __post_init__(self) -> None:
@@ -81,6 +82,8 @@ class R2ExtensionPolicy:
             raise ValueError("R2 basket coverage must be in (0, 1]")
         if self.round_trip_cost_bps < 0:
             raise ValueError("R2 costs must be non-negative")
+        if not 0 <= self.outcome_candle_tolerance_seconds <= 300:
+            raise ValueError("R2 outcome candle tolerance must be between 0 and 300 seconds")
         if tuple(sorted(set(self.opening_gap_horizons_seconds))) != self.opening_gap_horizons_seconds:
             raise ValueError("R2 opening-gap horizons must be sorted and unique")
         if tuple(sorted(set(self.residual_horizons_seconds))) != self.residual_horizons_seconds:
@@ -95,6 +98,9 @@ class R2ExtensionPolicy:
                 "opening_gap_history_days": self.opening_gap_history_days,
                 "opening_gap_horizons_seconds": self.opening_gap_horizons_seconds,
                 "opening_gap_z_min": self.opening_gap_z_min,
+                "outcome_candle_tolerance_seconds": (
+                    self.outcome_candle_tolerance_seconds
+                ),
                 "residual_basket_coverage_min": self.residual_basket_coverage_min,
                 "residual_beta_lookback_days": self.residual_beta_lookback_days,
                 "residual_horizons_seconds": self.residual_horizons_seconds,

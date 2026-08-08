@@ -338,7 +338,7 @@ def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None
     assert registry.schema_version == "1.2.0"
     assert len(registry.sources) == 16
     assert all(source.primary_publication for source in registry.sources)
-    assert len(registry.hypotheses) == 30
+    assert len(registry.hypotheses) == 31
     assert (
         sum(
             item.lifecycle is HypothesisLifecycle.PRE_REGISTERED
@@ -378,7 +378,7 @@ def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None
         "prereg-h17-v2",
         "prereg-h12-v1",
     }
-    assert len(registry.replication_evidence) == 3
+    assert len(registry.replication_evidence) == 4
     rejected = registry.replication_evidence[0]
     assert rejected.hypothesis_version == "2.0.0"
     assert rejected.result is ReplicationResult.REJECTED
@@ -391,6 +391,10 @@ def test_registry_loads_preregistered_portfolio_and_recorded_rejection() -> None
     assert filtered.hypothesis_version == "2.2.0"
     assert filtered.success_rate == pytest.approx(0.7222222222222222)
     assert filtered.success_wilson_lower == pytest.approx(0.5774647887323944)
+    competing = registry.replication_evidence[3]
+    assert competing.hypothesis_version == "2.3.0"
+    assert competing.success_rate == pytest.approx(0.96)
+    assert competing.success_wilson_lower == pytest.approx(0.8653990931249298)
     assert registry.applied_catalog == ()
     h3v3 = registry.get_hypothesis(
         "h3-jump-low-activity-reversal",
@@ -475,7 +479,7 @@ def test_registry_cli_validates_checked_in_source_registry() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["sources"] == 16
-    assert payload["hypotheses"] == 30
+    assert payload["hypotheses"] == 31
     assert payload["applied"] == 0
     assert payload["decisions"] == []
 

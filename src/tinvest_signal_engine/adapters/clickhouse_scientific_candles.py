@@ -53,8 +53,14 @@ class ClickHouseScientificCandleStore:
             json.dumps(_row(item), ensure_ascii=True, separators=(",", ":"))
             for item in candles
         )
+        query = {
+            "database": self._database,
+            "date_time_input_format": "best_effort",
+            "async_insert": "1",
+            "wait_for_async_insert": "1",
+        }
         request = Request(
-            f"{self._base_url}/?{urlencode({'database': self._database, 'date_time_input_format': 'best_effort'})}",
+            f"{self._base_url}/?{urlencode(query)}",
             data=(INSERT_SQL + "\n" + rows + "\n").encode("utf-8"),
             headers={
                 "Content-Type": "text/plain; charset=utf-8",

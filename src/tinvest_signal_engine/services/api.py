@@ -9,7 +9,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Iterator
+from typing import Annotated, Any, Callable, Iterator
 
 import httpx
 from dateutil.parser import isoparse
@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field, field_validator
 import uvicorn
 
+from ..adapters.worker_health_file import read_worker_health_snapshot
 from ..admin_http_guard import AdminApiRateLimiter, admin_client_ip
 from ..clickhouse_context import (
     fetch_instrument_insights,
@@ -26,6 +27,7 @@ from ..clickhouse_context import (
 )
 from ..config import RuntimeSettings, load_detector_config, load_instrument_configs
 from ..delivery_policy import DeliveryPolicy
+from ..domain.worker_health import WorkerState
 from ..market_unary import (
     RequestError as TinvestRequestError,
     fetch_market_values,
@@ -943,6 +945,99 @@ def _pipeline_status(checks: list[dict[str, Any]]) -> str:
     return "ok"
 
 
+def _worker_pipeline_check(
+    *,
+    path: Path,
+    expected_worker_id: str,
+    check_id: str,
+    label: str,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, Any]:
+    base: dict[str, Any] = {"id": check_id, "label": label}
+    try:
+        snapshot = read_worker_health_snapshot(path)
+    except FileNotFoundError:
+        return {
+            **base,
+            "status": "critical",
+            "detail": "Файл heartbeat отсутствует; работа процесса не подтверждена.",
+            "reason_code": "heartbeat_missing",
+        }
+    except (OSError, UnicodeError, TypeError, ValueError) as exc:
+        return {
+            **base,
+            "status": "critical",
+            "detail": (
+                "Heartbeat повреждён или недоступен; работа процесса не подтверждена "
+                f"({type(exc).__name__})."
+            ),
+            "reason_code": "heartbeat_invalid",
+        }
+
+    if snapshot.worker_id != expected_worker_id:
+        return {
+            **base,
+            "status": "critical",
+            "detail": "Heartbeat принадлежит другому процессу; работа не подтверждена.",
+            "reason_code": "heartbeat_invalid",
+            "worker_state": snapshot.state.value,
+        }
+
+    now = clock().astimezone(timezone.utc)
+    raw_age_seconds = (now - snapshot.last_heartbeat_at).total_seconds()
+    if raw_age_seconds < -30:
+        return {
+            **base,
+            "status": "critical",
+            "detail": "Время heartbeat находится в будущем; снимку нельзя доверять.",
+            "reason_code": "heartbeat_invalid",
+            "worker_state": snapshot.state.value,
+            "last_at": snapshot.last_heartbeat_at.isoformat(),
+        }
+    age_seconds = max(0, int(raw_age_seconds))
+    common = {
+        **base,
+        "worker_state": snapshot.state.value,
+        "last_at": snapshot.last_heartbeat_at.isoformat(),
+        "age_seconds": age_seconds,
+        "stale_after_seconds": snapshot.stale_after_seconds,
+    }
+    if age_seconds > snapshot.stale_after_seconds:
+        return {
+            **common,
+            "status": "critical",
+            "detail": (
+                f"Heartbeat устарел: {age_seconds} с без подтверждения работы "
+                f"(порог {snapshot.stale_after_seconds} с)."
+            ),
+            "reason_code": "heartbeat_stale",
+        }
+    if snapshot.state is WorkerState.DEGRADED:
+        return {
+            **common,
+            "status": "critical",
+            "detail": (
+                "Процесс сообщил об ошибке: "
+                f"{snapshot.reason_code or 'worker_degraded'}."
+            ),
+            "reason_code": snapshot.reason_code or "worker_degraded",
+            "consecutive_failures": snapshot.consecutive_failures,
+        }
+    if snapshot.state is WorkerState.STARTING:
+        return {
+            **common,
+            "status": "warning",
+            "detail": "Процесс запущен, но ещё не подтвердил успешный рабочий цикл.",
+            "reason_code": "worker_starting",
+        }
+    return {
+        **common,
+        "status": "ok",
+        "detail": "Процесс активен; heartbeat свежий.",
+        "reason_code": None,
+    }
+
+
 def require_admin(
     request: Request,
     token: Annotated[str | None, Query(description="Значение ADMIN_API_TOKEN")] = None,
@@ -975,7 +1070,7 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
     fastapi_app = FastAPI(
         title="T-Invest Signal API",
-        version=str(runtime.get("app_version") or "0.1.0"),
+        version=str(runtime.get("app_version") or "0.2.0"),
         description=(
             "Чтение накопленных аномалий рынка (сигналов), "
             "записанных сервисом детектора в Postgres. "
@@ -1359,6 +1454,29 @@ def create_app() -> FastAPI:
                 ),
             }
         )
+
+        # Existing deployments may not share worker snapshot files with the API
+        # container yet. Once either path is explicitly configured, its file is
+        # authoritative and every unreadable, stale, or degraded state fails
+        # closed instead of being masked by old signal activity.
+        if s.detector_health_snapshot_path is not None:
+            checks.append(
+                _worker_pipeline_check(
+                    path=s.detector_health_snapshot_path,
+                    expected_worker_id="detector",
+                    check_id="detector_worker",
+                    label="Detector worker",
+                )
+            )
+        if s.delivery_health_snapshot_path is not None:
+            checks.append(
+                _worker_pipeline_check(
+                    path=s.delivery_health_snapshot_path,
+                    expected_worker_id="delivery_worker",
+                    check_id="delivery_worker",
+                    label="Delivery worker",
+                )
+            )
 
         overview = store.fetch_admin_overview(minutes=minutes)
         delivery = store.fetch_admin_delivery_overview(minutes=minutes)

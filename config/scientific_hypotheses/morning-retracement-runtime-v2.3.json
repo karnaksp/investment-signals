@@ -1,0 +1,456 @@
+{
+  "artifact_schema": "morning-retracement-competing-runtime-v1",
+  "break_even_target_progress_fraction": null,
+  "break_even_trigger_fraction": 0.15,
+  "compact_rule_control": {
+    "control_feature_family": "morning_ticker",
+    "control_model_name": "dual_lightgbm_competing_outcomes",
+    "control_non_loss_probability": 0.8620689655172413,
+    "control_target_probability": 0.8683385579937304,
+    "within_three_percentage_points": true
+  },
+  "dataset": {
+    "episodes": 11744,
+    "evaluation_days": 197,
+    "market_regime_end": "2026-07-28",
+    "market_regime_start": "2025-01-27",
+    "training_days": 295
+  },
+  "deadline_local_minute": 660,
+  "evaluation": {
+    "break_even_target_progress_fraction": null,
+    "break_even_trigger_fraction": 0.15,
+    "deadline_local_minute": 660,
+    "doubled_slippage_available_count": 50,
+    "doubled_slippage_median_net_bps": 27.93721020047768,
+    "doubled_slippage_non_loss_rate": 0.96,
+    "doubled_slippage_target_rate": 0.96,
+    "enabled_tickers": null,
+    "instrument_filter": "all_instruments",
+    "maximum_instrument_share": 0.12,
+    "maximum_relative_volume": 10.0,
+    "mean_net_bps": 30.70433032848141,
+    "median_net_bps": 37.90429443170373,
+    "minimum_active_minute_ratio": 0.5,
+    "minimum_current_retracement_fraction": 0.1,
+    "minimum_relative_volume": 0.5,
+    "minimum_sample_met": false,
+    "non_loss_count": 48,
+    "non_loss_day_bootstrap_lower": 0.8787878787878788,
+    "non_loss_probability_threshold": 0.92,
+    "non_loss_rate": 0.96,
+    "non_loss_wilson_lower": 0.8653990931249298,
+    "require_volume_baseline": true,
+    "stop_extension_fraction": 0.4,
+    "target_day_bootstrap_lower": 0.8787878787878788,
+    "target_fraction": 0.25,
+    "target_hit_rate": 0.96,
+    "target_hits": 48,
+    "target_probability_threshold": 0.82,
+    "target_wilson_lower": 0.8653990931249298,
+    "tickers": 19,
+    "trades": 50,
+    "trading_days": 21
+  },
+  "evaluation_doubled_slippage": {
+    "median_net_bps": 27.93721020047768,
+    "non_loss_probability": 0.96,
+    "sample_count": 50,
+    "target_probability": 0.96
+  },
+  "expected_direction": "opposite_to_running_morning_extreme",
+  "expected_hit_window": {
+    "median_minutes": 13.5,
+    "p25_minutes": 6.0,
+    "p75_minutes": 31.0
+  },
+  "feature_family": "morning",
+  "gates": [
+    {
+      "gate": "minimum_episodes_300",
+      "passed": false
+    },
+    {
+      "gate": "minimum_trading_days_30",
+      "passed": false
+    },
+    {
+      "gate": "target_rate_90pct",
+      "passed": true
+    },
+    {
+      "gate": "target_day_bootstrap_lower_80pct",
+      "passed": true
+    },
+    {
+      "gate": "non_loss_rate_95pct",
+      "passed": true
+    },
+    {
+      "gate": "non_loss_day_bootstrap_lower_90pct",
+      "passed": false
+    },
+    {
+      "gate": "positive_median_net",
+      "passed": true
+    },
+    {
+      "gate": "multiple_instruments",
+      "passed": true
+    },
+    {
+      "gate": "instrument_share_at_most_50pct",
+      "passed": true
+    },
+    {
+      "gate": "doubled_slippage_target_rate_90pct",
+      "passed": true
+    },
+    {
+      "gate": "doubled_slippage_non_loss_rate_95pct",
+      "passed": true
+    },
+    {
+      "gate": "doubled_slippage_positive_median",
+      "passed": true
+    },
+    {
+      "gate": "compact_rule_within_3pp",
+      "passed": true
+    }
+  ],
+  "hypothesis_version": "morning-retracement-competing-v2.3.0",
+  "independent_holdout": false,
+  "model_explanation": "target: morning_log_cumulative_turnover_proxy=+0.0584, expected_direction=-0.0323, morning_relative_volume=+0.0280, morning_log_historical_cumulative_volume=-0.0270, morning_log_cumulative_volume=+0.0267, current_retracement_fraction=+0.0213, morning_active_minute_ratio=+0.0199, morning_relative_volume_at_most_half=-0.0185, morning_volume_baseline_available=+0.0138, tradable_excursion=+0.0138\nnon_loss: expected_direction=-0.1655, morning_log_cumulative_volume=+0.1627, morning_active_minute_ratio=+0.1554, morning_log_historical_cumulative_volume=-0.1469, morning_log_cumulative_turnover_proxy=+0.1155, morning_relative_volume_at_most_half=-0.0855, morning_volume_baseline_available=+0.0607, tradable_excursion=+0.0607, morning_directional_streak=+0.0156, morning_relative_volume=-0.0135",
+  "model_name": "dual_logistic_competing_outcomes",
+  "non_loss_probability_threshold": 0.92,
+  "operational_filter": {
+    "enabled_tickers": [],
+    "filter_id": "causal-reversal-and-liquidity-v1",
+    "maximum_relative_volume": 10.0,
+    "minimum_active_minute_ratio": 0.5,
+    "minimum_current_retracement_fraction": 0.1,
+    "minimum_relative_volume": 0.5,
+    "require_volume_baseline": true
+  },
+  "policy_version": "morning-retracement-competing-v2.3.0:runtime-v1",
+  "probability_threshold": 0.82,
+  "product_claim_allowed": false,
+  "product_hypothesis_version": "2.3.0",
+  "recommendation": {
+    "disclaimer_code": "historical_observation_not_guarantee",
+    "non_loss_probability": 0.96,
+    "non_loss_probability_lower": 0.8787878787878788,
+    "sample_count": 50,
+    "status": "observed",
+    "target_fraction": 0.25,
+    "target_probability": 0.96,
+    "target_probability_lower": 0.8787878787878788,
+    "trading_days": 21,
+    "validated": false
+  },
+  "research_only": true,
+  "round_trip_cost_bps": 10.0,
+  "run_id": "522d9204840a5326",
+  "runtime_model": {
+    "coefficients": [
+      0.021256303905983875,
+      -0.0034128512280064663,
+      0.0031322720430324302,
+      -0.03232390412628655,
+      0.00450902266208706,
+      -0.0004899576948075867,
+      0.019887951782311234,
+      0.0007126914054972871,
+      -0.013140700237712395,
+      0.058448027765679644,
+      0.02668645660594043,
+      -0.026955101903853872,
+      0.0027860578098648702,
+      -0.0009998893351434997,
+      0.027971328765366912,
+      -0.01846244410572263,
+      0.00010511889446943335,
+      -0.00045491806331613886,
+      0.013829572338239376,
+      -2.5888274416766205e-06,
+      0.013829572338239376
+    ],
+    "feature_names": [
+      "current_retracement_fraction",
+      "decision_local_minute",
+      "excursion_bps",
+      "expected_direction",
+      "minutes_since_extreme",
+      "morning_acceleration_bps",
+      "morning_active_minute_ratio",
+      "morning_close_to_vwap_bps",
+      "morning_directional_streak",
+      "morning_log_cumulative_turnover_proxy",
+      "morning_log_cumulative_volume",
+      "morning_log_historical_cumulative_volume",
+      "morning_range_bps",
+      "morning_realized_volatility_bps",
+      "morning_relative_volume",
+      "morning_relative_volume_at_most_half",
+      "morning_return_15m_bps",
+      "morning_return_5m_bps",
+      "morning_volume_baseline_available",
+      "morning_volume_per_active_minute",
+      "tradable_excursion"
+    ],
+    "fingerprint": "sha256:4bf8fa6b0d91fa0c4a32efe238cb2cf4f378a451be1249e15d6aa50a590960e3",
+    "intercept": 0.013829572338239376,
+    "link": "logit",
+    "positive_class": 1,
+    "schema": "linear-probability-model-v1"
+  },
+  "runtime_non_loss_model": {
+    "coefficients": [
+      0.008062244610254747,
+      -0.0018256266401971376,
+      -6.480443994074617e-05,
+      -0.16553454490123765,
+      -0.0022733444277196818,
+      -0.0017884463492243616,
+      0.15538483506181827,
+      0.0007797841797648721,
+      0.015577371608815185,
+      0.11547833032721358,
+      0.16271822631338984,
+      -0.14693627483669633,
+      0.0017001689275061385,
+      -0.0004979303889567703,
+      -0.013501775923483067,
+      -0.08550731396567941,
+      0.00019651515254920642,
+      -0.0017229412983723862,
+      0.06066553503946934,
+      2.438828592734631e-07,
+      0.06066553503946934
+    ],
+    "feature_names": [
+      "current_retracement_fraction",
+      "decision_local_minute",
+      "excursion_bps",
+      "expected_direction",
+      "minutes_since_extreme",
+      "morning_acceleration_bps",
+      "morning_active_minute_ratio",
+      "morning_close_to_vwap_bps",
+      "morning_directional_streak",
+      "morning_log_cumulative_turnover_proxy",
+      "morning_log_cumulative_volume",
+      "morning_log_historical_cumulative_volume",
+      "morning_range_bps",
+      "morning_realized_volatility_bps",
+      "morning_relative_volume",
+      "morning_relative_volume_at_most_half",
+      "morning_return_15m_bps",
+      "morning_return_5m_bps",
+      "morning_volume_baseline_available",
+      "morning_volume_per_active_minute",
+      "tradable_excursion"
+    ],
+    "fingerprint": "sha256:0d01e9eb8f4a37e165392755d651d483451d77306da60cd015ba9817db4fb60b",
+    "intercept": 0.06066553503946934,
+    "link": "logit",
+    "positive_class": 1,
+    "schema": "linear-probability-model-v1"
+  },
+  "runtime_target_model": {
+    "coefficients": [
+      0.021256303905983875,
+      -0.0034128512280064663,
+      0.0031322720430324302,
+      -0.03232390412628655,
+      0.00450902266208706,
+      -0.0004899576948075867,
+      0.019887951782311234,
+      0.0007126914054972871,
+      -0.013140700237712395,
+      0.058448027765679644,
+      0.02668645660594043,
+      -0.026955101903853872,
+      0.0027860578098648702,
+      -0.0009998893351434997,
+      0.027971328765366912,
+      -0.01846244410572263,
+      0.00010511889446943335,
+      -0.00045491806331613886,
+      0.013829572338239376,
+      -2.5888274416766205e-06,
+      0.013829572338239376
+    ],
+    "feature_names": [
+      "current_retracement_fraction",
+      "decision_local_minute",
+      "excursion_bps",
+      "expected_direction",
+      "minutes_since_extreme",
+      "morning_acceleration_bps",
+      "morning_active_minute_ratio",
+      "morning_close_to_vwap_bps",
+      "morning_directional_streak",
+      "morning_log_cumulative_turnover_proxy",
+      "morning_log_cumulative_volume",
+      "morning_log_historical_cumulative_volume",
+      "morning_range_bps",
+      "morning_realized_volatility_bps",
+      "morning_relative_volume",
+      "morning_relative_volume_at_most_half",
+      "morning_return_15m_bps",
+      "morning_return_5m_bps",
+      "morning_volume_baseline_available",
+      "morning_volume_per_active_minute",
+      "tradable_excursion"
+    ],
+    "fingerprint": "sha256:4bf8fa6b0d91fa0c4a32efe238cb2cf4f378a451be1249e15d6aa50a590960e3",
+    "intercept": 0.013829572338239376,
+    "link": "logit",
+    "positive_class": 1,
+    "schema": "linear-probability-model-v1"
+  },
+  "scientific_sources": [
+    "https://arxiv.org/abs/1707.03498",
+    "https://arxiv.org/abs/2003.10502",
+    "https://doi.org/10.1016/j.cor.2004.06.001"
+  ],
+  "stop_extension_fraction": 0.4,
+  "target_fraction": 0.25,
+  "ticker_slices": [
+    {
+      "median_net_bps": 60.23514339161761,
+      "non_loss_probability": 1.0,
+      "sample_count": 2,
+      "target_probability": 1.0,
+      "ticker": "AFKS"
+    },
+    {
+      "median_net_bps": 113.6539996947017,
+      "non_loss_probability": 1.0,
+      "sample_count": 1,
+      "target_probability": 1.0,
+      "ticker": "ALRS"
+    },
+    {
+      "median_net_bps": 37.966267478788396,
+      "non_loss_probability": 1.0,
+      "sample_count": 1,
+      "target_probability": 1.0,
+      "ticker": "CHMF"
+    },
+    {
+      "median_net_bps": 62.20099553441216,
+      "non_loss_probability": 1.0,
+      "sample_count": 2,
+      "target_probability": 1.0,
+      "ticker": "GAZP"
+    },
+    {
+      "median_net_bps": 53.436119847266596,
+      "non_loss_probability": 1.0,
+      "sample_count": 1,
+      "target_probability": 1.0,
+      "ticker": "GMKN"
+    },
+    {
+      "median_net_bps": 51.91144410415238,
+      "non_loss_probability": 1.0,
+      "sample_count": 1,
+      "target_probability": 1.0,
+      "ticker": "IRAO"
+    },
+    {
+      "median_net_bps": 17.479653825425157,
+      "non_loss_probability": 1.0,
+      "sample_count": 5,
+      "target_probability": 1.0,
+      "ticker": "LKOH"
+    },
+    {
+      "median_net_bps": 69.39280451036423,
+      "non_loss_probability": 1.0,
+      "sample_count": 1,
+      "target_probability": 1.0,
+      "ticker": "MGNT"
+    },
+    {
+      "median_net_bps": 35.1977874490178,
+      "non_loss_probability": 1.0,
+      "sample_count": 6,
+      "target_probability": 1.0,
+      "ticker": "NVTK"
+    },
+    {
+      "median_net_bps": 25.121016258166648,
+      "non_loss_probability": 0.75,
+      "sample_count": 4,
+      "target_probability": 0.75,
+      "ticker": "OZON"
+    },
+    {
+      "median_net_bps": 32.281717072785156,
+      "non_loss_probability": 1.0,
+      "sample_count": 2,
+      "target_probability": 1.0,
+      "ticker": "PHOR"
+    },
+    {
+      "median_net_bps": 27.728149338890894,
+      "non_loss_probability": 1.0,
+      "sample_count": 2,
+      "target_probability": 1.0,
+      "ticker": "PIKK"
+    },
+    {
+      "median_net_bps": 34.24781919134922,
+      "non_loss_probability": 1.0,
+      "sample_count": 6,
+      "target_probability": 1.0,
+      "ticker": "PLZL"
+    },
+    {
+      "median_net_bps": 46.84224134539061,
+      "non_loss_probability": 1.0,
+      "sample_count": 3,
+      "target_probability": 1.0,
+      "ticker": "POSI"
+    },
+    {
+      "median_net_bps": 47.13233951642471,
+      "non_loss_probability": 1.0,
+      "sample_count": 6,
+      "target_probability": 1.0,
+      "ticker": "ROSN"
+    },
+    {
+      "median_net_bps": 41.10121772935682,
+      "non_loss_probability": 1.0,
+      "sample_count": 1,
+      "target_probability": 1.0,
+      "ticker": "RUAL"
+    },
+    {
+      "median_net_bps": 54.15449382147885,
+      "non_loss_probability": 0.6666666666666666,
+      "sample_count": 3,
+      "target_probability": 0.6666666666666666,
+      "ticker": "TATN"
+    },
+    {
+      "median_net_bps": 15.125672962211233,
+      "non_loss_probability": 1.0,
+      "sample_count": 2,
+      "target_probability": 1.0,
+      "ticker": "VTBR"
+    },
+    {
+      "median_net_bps": 46.21111770918063,
+      "non_loss_probability": 1.0,
+      "sample_count": 1,
+      "target_probability": 1.0,
+      "ticker": "YDEX"
+    }
+  ]
+}

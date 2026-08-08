@@ -13,10 +13,15 @@ from urllib.error import URLError
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo
 
+from psycopg import Error as PsycopgError
+
 from tinvest_signal_engine.adapters.clickhouse_resilience import (
     TransientClickHouseError,
 )
 from tinvest_signal_engine.adapters.kafka_reliability import KafkaSignalPublisher
+from tinvest_signal_engine.adapters.live_shadow_health_file import (
+    AtomicJsonLiveShadowHealthStore,
+)
 from tinvest_signal_engine.adapters.morning_retracement_runtime import (
     ClickHouseMorningRetracementSource,
     ClickHouseMorningRetracementTrackingStore,
@@ -35,6 +40,9 @@ from tinvest_signal_engine.application.morning_retracement_signals import (
 from tinvest_signal_engine.application.morning_retracement_tracking import (
     ProcessMorningRetracementOutcomes,
     RecordMorningRetracementAssessments,
+)
+from tinvest_signal_engine.application.live_shadow_health import (
+    LiveShadowHealthTracker,
 )
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
@@ -64,6 +72,8 @@ logger = logging.getLogger(__name__)
 MOSCOW = ZoneInfo("Europe/Moscow")
 SIGNAL_TYPE = "morning_retracement_recommendation"
 _SIGNAL_NAMESPACE = UUID("cf97dd90-90af-5a5f-a95a-5c20969b4da2")
+_SESSION_START_LOCAL_MINUTE = 7 * 60
+_SESSION_DEADLINE_LOCAL_MINUTE = 11 * 60
 
 
 class _PreparedRecommendation:
@@ -87,7 +97,7 @@ def main() -> None:
     policy_path = Path(
         os.getenv(
             "MORNING_RETRACEMENT_POLICY_FILE",
-            "/app/config/scientific_hypotheses/morning-retracement-runtime-v2.2.json",
+            "/app/config/scientific_hypotheses/morning-retracement-runtime-v2.3.json",
         )
     )
     public_config = Path(
@@ -126,22 +136,50 @@ def main() -> None:
     process_outcomes = ProcessMorningRetracementOutcomes(
         store=tracking_store,
         policy=policy,
+        market_provider=source,
     )
     metrics = PrometheusReliabilityMetrics()
     poll_seconds = max(
         10.0,
         float(os.getenv("MORNING_RETRACEMENT_POLL_SECONDS") or "60"),
     )
+    health = LiveShadowHealthTracker(
+        store=AtomicJsonLiveShadowHealthStore(
+            os.getenv(
+                "MORNING_RETRACEMENT_HEALTH_SNAPSHOT_PATH",
+                "/var/lib/investment-signals-pro/runtime-health/"
+                "morning-retracement.json",
+            )
+        ),
+        clock=lambda: datetime.now(tz=timezone.utc),
+        stale_after_seconds=max(60, round(poll_seconds * 3)),
+    )
     logger.info("Starting live morning-retracement recommendation worker")
     retry_delay = poll_seconds
+    outcomes_drained_day = None
     try:
         while True:
             cycle_started = time.monotonic()
             now = datetime.now(tz=timezone.utc)
+            if not _morning_session_started(now):
+                health.heartbeat()
+                time.sleep(min(poll_seconds, _seconds_until_next_morning_session(now)))
+                continue
+            local_day = now.astimezone(MOSCOW).date()
+            if (
+                _morning_session_deadline_passed(now)
+                and outcomes_drained_day == local_day
+            ):
+                health.heartbeat()
+                time.sleep(poll_seconds)
+                continue
             try:
+                observations_processed = 0
+                if store is None:
+                    store = connect_reliable_processing_store(runtime)
                 settings = load_morning_retracement_settings(public_config, policy)
                 market = source.load(as_of=now, instruments=instruments)
-                if settings.enabled:
+                if settings.enabled and not _morning_session_deadline_passed(now):
                     assessments = scorer.assess(
                         market,
                         settings=settings,
@@ -151,12 +189,12 @@ def main() -> None:
                         tuple(item[1] for item in assessments),
                         recorded_at=now,
                     )
+                    observations_processed = len(observation_ids)
                     if observation_ids:
                         logger.info(
                             "Stored live morning-retracement assessments",
                             extra={"assessment_count": len(observation_ids)},
                         )
-                    local_day = now.astimezone(MOSCOW).date()
                     emitted = store.emitted_instruments_for_trading_day(
                         signal_type=SIGNAL_TYPE,
                         trading_day=local_day.isoformat(),
@@ -199,23 +237,65 @@ def main() -> None:
                             "unavailable_count": outcome_batch.unavailable,
                         },
                     )
+                if (
+                    _morning_session_deadline_passed(now)
+                    and outcome_batch.pending == 0
+                ):
+                    outcomes_drained_day = local_day
             except (
                 TimeoutError,
                 URLError,
                 TransientClickHouseError,
                 ConnectionError,
+                RuntimeError,
             ) as error:
+                health.failed()
                 logger.warning(
                     "Morning-retracement cycle delayed by a temporary data-store "
-                    "failure; the worker will retry without restarting",
-                    extra={
-                        "retry_delay_seconds": retry_delay,
-                        "error_type": type(error).__name__,
-                    },
+                    "failure (%s); retrying in %.0f seconds",
+                    type(error).__name__,
+                    retry_delay,
+                    exc_info=True,
                 )
                 time.sleep(retry_delay)
                 retry_delay = min(max(poll_seconds, retry_delay * 2), 300.0)
                 continue
+            except PsycopgError as error:
+                health.failed()
+                logger.warning(
+                    "Morning-retracement PostgreSQL connection failed (%s); "
+                    "reconnecting in %.0f seconds",
+                    type(error).__name__,
+                    retry_delay,
+                    exc_info=True,
+                )
+                if store is not None:
+                    try:
+                        store.close()
+                    except Exception:
+                        logger.debug(
+                            "Failed to close the invalid PostgreSQL connection",
+                            exc_info=True,
+                        )
+                store = None
+                time.sleep(retry_delay)
+                retry_delay = min(max(poll_seconds, retry_delay * 2), 300.0)
+                continue
+            except Exception as error:
+                health.failed()
+                logger.exception(
+                    "Morning-retracement cycle failed (%s); retrying in %.0f seconds",
+                    type(error).__name__,
+                    retry_delay,
+                )
+                time.sleep(retry_delay)
+                retry_delay = min(max(poll_seconds, retry_delay * 2), 300.0)
+                continue
+            health.succeeded(
+                observations_processed=observations_processed,
+                outcomes_processed=outcome_batch.stored,
+                outcomes_unavailable=outcome_batch.unavailable,
+            )
             retry_delay = poll_seconds
             elapsed = time.monotonic() - cycle_started
             time.sleep(max(0.0, poll_seconds - elapsed))
@@ -223,7 +303,8 @@ def main() -> None:
         logger.info("Morning-retracement recommendation worker stopped")
     finally:
         publisher.close()
-        store.close()
+        if store is not None:
+            store.close()
 
 
 def _prepared_signal(
@@ -285,7 +366,12 @@ def _prepared_signal(
         "expected_hit_window_start": earliest_hit.isoformat(),
         "expected_hit_window_end": latest_hit.isoformat(),
         "model_probability": recommendation.model_probability,
+        "target_probability": recommendation.model_probability,
+        "non_loss_probability": recommendation.effective_non_loss_probability,
         "probability_threshold": settings.probability_threshold,
+        "non_loss_probability_threshold": (
+            settings.effective_non_loss_probability_threshold(policy)
+        ),
         "historical_target_probability": policy.historical_target_probability,
         "historical_target_probability_lower": (
             policy.historical_target_probability_lower
@@ -299,9 +385,22 @@ def _prepared_signal(
         "evidence_sample_count": policy.historical_sample_count,
         "evidence_trading_days": policy.historical_trading_days,
         "relative_volume": recommendation.relative_volume,
+        "minimum_relative_volume": settings.minimum_relative_volume,
         "maximum_relative_volume": settings.maximum_relative_volume,
         "active_minute_ratio": recommendation.active_minute_ratio,
+        "current_retracement_fraction": max(
+            0.0,
+            int(snapshot.direction)
+            * (snapshot.current_price - snapshot.running_extreme)
+            / snapshot.excursion_price,
+        ),
+        "minimum_current_retracement_fraction": (
+            settings.minimum_current_retracement_fraction
+        ),
         "cost_model_round_trip_bps": policy.round_trip_cost_bps,
+        "break_even_target_progress_fraction": (
+            policy.break_even_target_progress_fraction
+        ),
     }
     source_event_id = "sha256:" + sha256(identity.encode("utf-8")).hexdigest()
     signal = SignalRecord(
@@ -372,6 +471,26 @@ def _required(name: str) -> str:
     if not value:
         raise ValueError(f"{name} is required")
     return value
+
+
+def _morning_session_started(now: datetime) -> bool:
+    local = now.astimezone(MOSCOW)
+    return local.hour * 60 + local.minute >= _SESSION_START_LOCAL_MINUTE
+
+
+def _morning_session_deadline_passed(now: datetime) -> bool:
+    local = now.astimezone(MOSCOW)
+    return local.hour * 60 + local.minute > _SESSION_DEADLINE_LOCAL_MINUTE
+
+
+def _seconds_until_next_morning_session(now: datetime) -> float:
+    local = now.astimezone(MOSCOW)
+    start = local.replace(hour=7, minute=0, second=0, microsecond=0)
+    if local >= start:
+        start += timedelta(days=1)
+    while start.weekday() >= 5:
+        start += timedelta(days=1)
+    return max(1.0, (start - local).total_seconds())
 
 
 if __name__ == "__main__":

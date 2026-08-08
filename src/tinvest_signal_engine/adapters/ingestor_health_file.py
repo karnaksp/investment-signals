@@ -50,6 +50,34 @@ class AtomicJsonIngestorHealthStore:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
+    def load(self) -> IngestorHealthSnapshot | None:
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        payload = json.loads(raw)
+        if not isinstance(payload, Mapping):
+            raise ValueError("ingestor health snapshot must be an object")
+        if payload.get("schema_version") != INGESTOR_HEALTH_SCHEMA_VERSION:
+            raise ValueError("unsupported ingestor health snapshot")
+        return IngestorHealthSnapshot(
+            state=_stream_state(payload.get("state")),
+            started_at=_required_timestamp(payload.get("started_at")),
+            last_market_event_at=_optional_parsed_timestamp(
+                payload.get("last_market_event_at")
+            ),
+            last_success_at=_optional_parsed_timestamp(
+                payload.get("last_success_at")
+            ),
+            last_error_at=_optional_parsed_timestamp(
+                payload.get("last_error_at")
+            ),
+            reason_code=str(payload.get("reason_code") or ""),
+            consecutive_failures=int(payload.get("consecutive_failures", -1)),
+            configured_instruments=int(payload.get("configured_instruments", -1)),
+            stale_after_seconds=int(payload.get("stale_after_seconds", 0)),
+        )
+
 
 def _payload(snapshot: IngestorHealthSnapshot) -> Mapping[str, object]:
     return {
@@ -74,6 +102,27 @@ def _timestamp(value: datetime) -> str:
 
 def _optional_timestamp(value: datetime | None) -> str | None:
     return None if value is None else _timestamp(value)
+
+
+def _stream_state(value: object):
+    from tinvest_signal_engine.domain.ingestor_health import IngestorStreamState
+
+    if not isinstance(value, str):
+        raise ValueError("state must be text")
+    return IngestorStreamState(value)
+
+
+def _required_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("timestamp must be text")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return parsed
+
+
+def _optional_parsed_timestamp(value: object) -> datetime | None:
+    return None if value is None else _required_timestamp(value)
 
 
 def _fsync_directory(directory: Path) -> None:

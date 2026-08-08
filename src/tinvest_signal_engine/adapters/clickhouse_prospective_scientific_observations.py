@@ -454,10 +454,24 @@ class ClickHouseProspectiveScientificStore:
             )
             if transient is not None:
                 raise transient from error
+            detail = _http_error_detail(error)
             raise RuntimeError(
                 "ClickHouse scientific evidence request failed "
-                f"with status {error.code}"
+                f"with status {error.code}{detail}"
             ) from error
+
+
+def _http_error_detail(error: object) -> str:
+    if not isinstance(error, HTTPError):
+        return ""
+    try:
+        payload = error.read(2_048).decode("utf-8", errors="replace").strip()
+    except (AttributeError, OSError):
+        return ""
+    if not payload:
+        return ""
+    first_line = " ".join(payload.splitlines()[0].split())
+    return f": {first_line[:500]}"
 
 
 class ClickHouseProspectiveLiveShadowStore(ClickHouseProspectiveScientificStore):

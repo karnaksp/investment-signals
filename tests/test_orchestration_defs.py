@@ -4,11 +4,17 @@ import pytest
 
 pytest.importorskip("dagster")
 
+from dagster import DefaultScheduleStatus
+
 from tinvest_signal_engine import orchestration_defs
 
 
 def test_dagster_definitions_exposes_jobs_and_schedules() -> None:
     assert orchestration_defs.threshold_recalc_job.name == "threshold_recalc_job"
+    assert (
+        orchestration_defs.daily_adaptive_calibration_job.name
+        == "daily_adaptive_calibration_job"
+    )
     assert orchestration_defs.unary_kafka_poll_once_job.name == "unary_kafka_poll_once_job"
     assert (
         orchestration_defs.bond_convergence_scan_job.name
@@ -23,4 +29,20 @@ def test_dagster_definitions_exposes_jobs_and_schedules() -> None:
     assert (
         orchestration_defs.daily_bond_convergence_schedule.name
         == "daily_bond_convergence_scan"
+    )
+    assert (
+        orchestration_defs.daily_threshold_schedule.default_status
+        is DefaultScheduleStatus.STOPPED
+    )
+    assert (
+        orchestration_defs.daily_adaptive_calibration_schedule.default_status
+        is DefaultScheduleStatus.RUNNING
+    )
+    assert (
+        orchestration_defs.quarter_hourly_unary_schedule.default_status
+        is DefaultScheduleStatus.STOPPED
+    )
+    assert (
+        orchestration_defs.daily_bond_convergence_schedule.default_status
+        is DefaultScheduleStatus.RUNNING
     )

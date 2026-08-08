@@ -62,7 +62,7 @@ def _model(*, intercept: float = 10.0) -> LinearProbabilityModel:
 def _policy() -> MorningRetracementRuntimePolicy:
     return MorningRetracementRuntimePolicy(
         policy_version="test-policy",
-        hypothesis_id="h1-selective-morning-retracement",
+        hypothesis_id="h1-morning-low-volume-reversion",
         hypothesis_version="2.2.0",
         model=_model(),
         target_fraction=0.5,
@@ -151,16 +151,97 @@ def test_runtime_artifact_is_valid_and_contains_the_sealed_model() -> None:
         ROOT
         / "config"
         / "scientific_hypotheses"
-        / "morning-retracement-runtime-v2.2.json"
+        / "morning-retracement-runtime-v2.3.json"
     )
 
-    assert policy.hypothesis_version == "2.2.0"
-    assert policy.target_fraction == 0.5
+    assert policy.hypothesis_id == "h1-morning-low-volume-reversion"
+    assert policy.hypothesis_version == "2.3.0"
+    assert policy.target_fraction == 0.25
     assert policy.model.feature_names
     assert 0.0 <= policy.model.probability({}) <= 1.0
 
 
-def test_formal_signal_keeps_registered_five_minute_snapshot() -> None:
+def test_runtime_artifact_loader_supports_independent_outcome_models(
+    tmp_path,
+) -> None:
+    model = _policy().model
+    target = {
+        "feature_names": list(model.feature_names),
+        "coefficients": list(model.coefficients),
+        "intercept": model.intercept,
+        "fingerprint": model.fingerprint,
+    }
+    non_loss = {
+        **target,
+        "intercept": model.intercept + 0.5,
+    }
+    non_loss_payload = {
+        "schema": "linear-probability-model-v1",
+        "link": "logit",
+        "positive_class": 1,
+        "feature_names": non_loss["feature_names"],
+        "coefficients": non_loss["coefficients"],
+        "intercept": non_loss["intercept"],
+    }
+    non_loss["fingerprint"] = "sha256:" + sha256(
+        json.dumps(
+            non_loss_payload,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    artifact = {
+        "hypothesis_version": "morning-retracement-competing-v2.0.0",
+        "product_hypothesis_version": "2.3.0",
+        "policy_version": "morning-retracement-competing-v2.3.0",
+        "runtime_target_model": target,
+        "runtime_non_loss_model": non_loss,
+        "target_fraction": 0.25,
+        "probability_threshold": 0.8,
+        "non_loss_probability_threshold": 0.9,
+        "stop_extension_fraction": 0.25,
+        "break_even_trigger_fraction": 0.15,
+        "break_even_target_progress_fraction": 0.67,
+        "deadline_local_minute": 660,
+        "round_trip_cost_bps": 10.0,
+        "operational_filter": {
+            "require_volume_baseline": True,
+            "maximum_relative_volume": 0.5,
+            "minimum_active_minute_ratio": 0.2,
+            "minimum_current_retracement_fraction": 0.18,
+        },
+        "recommendation": {
+            "target_probability": 0.9,
+            "target_probability_lower": 0.8,
+            "non_loss_probability": 0.95,
+            "non_loss_probability_lower": 0.9,
+            "sample_count": 300,
+            "trading_days": 120,
+        },
+        "expected_hit_window": {
+            "p25_minutes": 10,
+            "median_minutes": 25,
+            "p75_minutes": 55,
+        },
+    }
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    policy = load_morning_retracement_policy(path)
+
+    assert policy.hypothesis_version == "2.3.0"
+    assert policy.policy_version == "morning-retracement-competing-v2.3.0"
+    assert policy.target_fraction == 0.25
+    assert policy.non_loss_model is not None
+    assert policy.non_loss_model.fingerprint == non_loss["fingerprint"]
+    assert policy.default_non_loss_probability_threshold == 0.9
+    assert policy.break_even_target_progress_fraction == 0.67
+    assert policy.default_minimum_current_retracement_fraction == 0.18
+
+
+def test_formal_signal_uses_latest_causal_completed_minute() -> None:
     result = GenerateMorningRetracementRecommendations(_policy()).execute(
         (_series(),),
         settings=_settings(),
@@ -168,7 +249,7 @@ def test_formal_signal_keeps_registered_five_minute_snapshot() -> None:
 
     assert len(result) == 1
     recommendation = result[0][1]
-    assert recommendation.observed_at.astimezone(MOSCOW).strftime("%H:%M") == "07:15"
+    assert recommendation.observed_at.astimezone(MOSCOW).strftime("%H:%M") == "07:16"
     assert recommendation.expected_direction == "down"
     assert recommendation.model_probability > 0.99
     assert recommendation.target_price == pytest.approx(101.025)
@@ -190,6 +271,19 @@ def test_live_assessment_scores_latest_completed_minute_snapshot() -> None:
     assert assessment.eligible_for_signal is True
 
 
+def test_live_assessment_can_wait_for_partial_retracement_before_signal() -> None:
+    assessment = GenerateMorningRetracementRecommendations(_policy()).assess(
+        (_series(),),
+        settings=_settings(minimum_current_retracement_fraction=0.20),
+    )[0][1]
+
+    assert assessment.current_retracement_fraction == pytest.approx(
+        0.1707317073
+    )
+    assert assessment.eligible_for_signal is False
+    assert "current_retracement_below_minimum" in assessment.reason_codes
+
+
 def test_live_monitoring_continues_after_signal_window_without_emitting() -> None:
     series = _series()
     observed_at = datetime(2026, 7, 28, 10, 30, tzinfo=MOSCOW)
@@ -202,7 +296,7 @@ def test_live_monitoring_continues_after_signal_window_without_emitting() -> Non
     assessments = use_case.assess(
         (series,),
         settings=_settings(),
-        as_of=observed_at,
+        as_of=observed_at + timedelta(minutes=1),
     )
 
     assert len(assessments) == 1
@@ -255,6 +349,25 @@ def test_live_assessment_is_kept_when_notification_threshold_is_not_met() -> Non
     assert assessment.recommendation.model_probability > 0.99
 
 
+def test_target_and_non_loss_probabilities_gate_signal_independently() -> None:
+    policy = replace(
+        _policy(),
+        non_loss_model=_model(intercept=-10.0),
+        default_non_loss_probability_threshold=0.5,
+    )
+    use_case = GenerateMorningRetracementRecommendations(policy)
+
+    assessments = use_case.assess((_series(),), settings=_settings())
+
+    assert len(assessments) == 1
+    assessment = assessments[0][1]
+    assert assessment.recommendation.model_probability > 0.99
+    assert assessment.recommendation.effective_non_loss_probability < 0.01
+    assert assessment.eligible_for_signal is False
+    assert "non_loss_probability_below_threshold" in assessment.reason_codes
+    assert use_case.execute((_series(),), settings=_settings()) == ()
+
+
 def test_stale_morning_snapshot_is_not_emitted_later_in_the_day() -> None:
     as_of = datetime(2026, 7, 28, 12, 0, tzinfo=MOSCOW)
 
@@ -265,6 +378,48 @@ def test_stale_morning_snapshot_is_not_emitted_later_in_the_day() -> None:
     )
 
     assert result == ()
+
+
+def test_completed_candle_freshness_starts_at_end_of_minute() -> None:
+    series = _series()
+    latest = series.current_session[-1]
+    as_of = latest.at + timedelta(minutes=5, seconds=59)
+
+    assessments = GenerateMorningRetracementRecommendations(_policy()).assess(
+        (series,),
+        settings=_settings(),
+        as_of=as_of,
+    )
+
+    assert len(assessments) == 1
+
+
+def test_completed_candle_is_stale_after_five_minutes_from_close() -> None:
+    series = _series()
+    latest = series.current_session[-1]
+    as_of = latest.at + timedelta(minutes=6, seconds=1)
+
+    assessments = GenerateMorningRetracementRecommendations(_policy()).assess(
+        (series,),
+        settings=_settings(),
+        as_of=as_of,
+    )
+
+    assert assessments == ()
+
+
+def test_completed_candle_cannot_be_used_before_end_of_minute() -> None:
+    series = _series()
+    latest = series.current_session[-1]
+    as_of = latest.at + timedelta(seconds=59)
+
+    assessments = GenerateMorningRetracementRecommendations(_policy()).assess(
+        (series,),
+        settings=_settings(),
+        as_of=as_of,
+    )
+
+    assert assessments == ()
 
 
 class _RecordingMorningSource(ClickHouseMorningRetracementSource):
@@ -343,9 +498,14 @@ def test_market_source_bounds_queries_and_reuses_five_minute_volume_window() -> 
     assert len(candle_calls) == 2
     assert len(volume_calls) == 1
     assert candle_calls[0][1]["instrument_ids"] == "['SBER_TQBR']"
-    assert "max_execution_time = 10" in _LATEST_SESSION_CANDLES_SQL
-    assert "LIMIT 2" in _LATEST_SESSION_CANDLES_SQL
+    assert candle_calls[0][1]["session_days"] == "['2026-07-28','2026-07-27']"
+    assert "FROM scientific_candles_1m FINAL" in _LATEST_SESSION_CANDLES_SQL
+    assert "session_days:Array(Date)" in _LATEST_SESSION_CANDLES_SQL
+    assert "max_execution_time = 15" in _LATEST_SESSION_CANDLES_SQL
     assert "instrument_id IN {instrument_ids:Array(String)}" in _VOLUME_HISTORY_SQL
+    assert "trading_day >= toDate({history_start:String})" in _VOLUME_HISTORY_SQL
+    assert "HAVING min(" in _VOLUME_HISTORY_SQL
+    assert "toUInt16(480)" in _VOLUME_HISTORY_SQL
 
 
 def test_market_source_does_not_query_before_morning_session() -> None:

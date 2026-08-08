@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import pytest
+from kafka.errors import CommitFailedError
 
 from tinvest_signal_engine.adapters.clickhouse_resilience import (
     BoundedExponentialBackoff,
@@ -131,6 +132,13 @@ def test_clickhouse_store_batches_ticks_into_one_insert(monkeypatch) -> None:
     assert query["date_time_input_format"] == ["best_effort"]
     assert query["param_batch_start"] == [NOW_TEXT]
     assert query["param_batch_end"] == [NOW_TEXT]
+    assert query["param_batch_day"] == ["2026-07-10"]
+    assert query["param_batch_instruments"] == ["['SBER_TQBR']"]
+    assert "PREWHERE instrument_id IN" in sql
+    assert "toDate(event_at) =" in sql
+    assert "max_memory_usage = 536870912" in sql
+    assert "async_insert = 1" in sql
+    assert "wait_for_async_insert = 1" in sql
 
 
 def test_clickhouse_store_deduplicates_batch_input_before_idempotent_insert(
@@ -287,7 +295,7 @@ class _Consumer:
 
     def poll(self, *, timeout_ms: int, max_records: int):
         assert timeout_ms == 1_000
-        assert max_records == 500
+        assert max_records == 10_000
         if self.polled:
             raise KeyboardInterrupt
         self.polled = True
@@ -364,6 +372,40 @@ def test_kafka_runtime_commits_only_after_persistence() -> None:
     assert len(processor.events) == 1
     committed = next(iter(consumer.commits[0].values()))
     assert committed.offset == 8
+    assert consumer.closed is True
+
+
+def test_kafka_commit_rebalance_is_reported_and_rejoined_without_crash() -> None:
+    class _CommitLostConsumer(_Consumer):
+        def commit(self, *, offsets) -> None:
+            del offsets
+            raise CommitFailedError()
+
+    @dataclass
+    class _Health:
+        failures: list[str] = field(default_factory=list)
+
+        def heartbeat(self, *, force: bool = False) -> None:
+            del force
+
+        def succeeded(self, *, force: bool = False) -> None:
+            del force
+
+        def failed(self, reason_code: str) -> None:
+            self.failures.append(reason_code)
+
+    consumer = _CommitLostConsumer([_Message(_raw_trade())])
+    processor = _Processor()
+    health = _Health()
+
+    ReferenceTickKafkaRuntime(
+        consumer=consumer,
+        processor=processor,  # type: ignore[arg-type]
+        health=health,
+    ).run()
+
+    assert len(processor.events) == 1
+    assert health.failures == ["kafka_commit_uncertain"]
     assert consumer.closed is True
 
 
@@ -504,3 +546,7 @@ def test_reference_consumer_has_independent_group_and_manual_commits(monkeypatch
 
     assert captured["kwargs"]["enable_auto_commit"] is False
     assert captured["kwargs"]["group_id"] == "reference-tick-writer-v1"
+    assert captured["kwargs"]["fetch_min_bytes"] == 512 * 1024
+    assert captured["kwargs"]["fetch_max_wait_ms"] == 2_000
+    assert captured["kwargs"]["max_poll_records"] == 10_000
+    assert captured["kwargs"]["max_poll_interval_ms"] == 900_000

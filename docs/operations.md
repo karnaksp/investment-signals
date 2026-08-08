@@ -18,7 +18,7 @@ Docker builds могут передавать:
 
 ```bash
 docker build \
-  --build-arg APP_VERSION=0.1.0 \
+  --build-arg APP_VERSION=0.2.0 \
   --build-arg APP_COMMIT_SHA="$(git rev-parse --short=12 HEAD)" \
   --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t tinvest-signal-engine .

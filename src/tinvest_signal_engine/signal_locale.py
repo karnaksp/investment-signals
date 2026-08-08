@@ -208,9 +208,17 @@ def build_telegram_html(
         direction = (
             "ВВЕРХ" if payload.get("expected_direction") == "up" else "ВНИЗ"
         )
-        probability = _percent_ru(payload.get("model_probability"))
+        probability = _percent_ru(
+            payload.get("target_probability", payload.get("model_probability"))
+        )
+        non_loss_probability = _percent_ru(payload.get("non_loss_probability"))
         historical = _percent_ru(payload.get("historical_target_probability"))
+        historical_non_loss = _percent_ru(
+            payload.get("historical_non_loss_probability")
+        )
         lower = _percent_ru(payload.get("historical_target_probability_lower"))
+        target_fraction = float(payload.get("target_fraction") or 0.50)
+        target_label = f"R{round(target_fraction * 100)}"
         expected_at = _time_ru(payload.get("expected_hit_at"))
         expected_start = _time_ru(payload.get("expected_hit_window_start"))
         expected_end = _time_ru(payload.get("expected_hit_window_end"))
@@ -218,9 +226,12 @@ def build_telegram_html(
         return (
             f"<a href=\"{term_href}\"><b>{t_esc}</b></a> · "
             f"<b>ВОЗВРАТ {direction}</b>\n"
-            f"Вероятность текущего события: <b>{probability}</b>\n"
+            f"Вероятность цели {target_label}: <b>{probability}</b>\n"
+            f"Вероятность результата без убытка: "
+            f"<b>{non_loss_probability}</b>\n"
             f"Расчётный вход: {float(payload.get('entry_reference_price') or 0):g}\n"
-            f"Цель R50: <b>{float(payload.get('target_price') or 0):g}</b>\n"
+            f"Цель {target_label}: "
+            f"<b>{float(payload.get('target_price') or 0):g}</b>\n"
             f"Начальное ограничение убытка: "
             f"{float(payload.get('initial_stop_price') or 0):g}\n"
             f"Защита безубытка после: "
@@ -228,7 +239,8 @@ def build_telegram_html(
             f"Ожидаемое время: около {expected_at} "
             f"(обычно {expected_start}–{expected_end})\n"
             f"Предельный срок: {deadline}\n"
-            f"История правила: {historical} "
+            f"История правила: цель {historical}, "
+            f"без убытка {historical_non_loss} "
             f"(осторожная оценка {lower}, "
             f"{int(payload.get('evidence_sample_count') or 0)} случаев)\n"
             f"<a href=\"{inv_href}\">Открыть карточку инструмента</a>\n\n"

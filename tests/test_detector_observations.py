@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import replace
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+import zlib
 
 import pytest
 
@@ -163,6 +165,7 @@ def test_legacy_adapter_checkpoint_hydrates_restart_from_opaque_payload() -> Non
     checkpoint = first.detect_batch(event.to_dict()).checkpoint
 
     assert checkpoint is not None
+    assert checkpoint.state_schema_version == "detector-state-v2-zlib"
     restarted = LegacyDetectionAdapter(
         settings,
         delivered_count_since=lambda **kwargs: 0,
@@ -171,6 +174,40 @@ def test_legacy_adapter_checkpoint_hydrates_restart_from_opaque_payload() -> Non
     restored = restarted._detector._states[event.instrument_id]
     assert len(restored.trade_points) == 1
     assert restored.trade_points[0].quantity == 10.0
+
+
+def test_legacy_adapter_still_reads_v1_uncompressed_checkpoint() -> None:
+    settings = RuntimeSettings.from_env()
+    first = LegacyDetectionAdapter(
+        settings,
+        delivered_count_since=lambda **kwargs: 0,
+    )
+    event = replace(
+        _event(),
+        payload={
+            "quantity": 10,
+            "price": {"units": 100, "nano": 0},
+        },
+    )
+    checkpoint = first.detect_batch(event.to_dict()).checkpoint
+
+    assert checkpoint is not None
+    v1_payload = zlib.decompress(checkpoint.payload)
+    v1 = replace(
+        checkpoint,
+        state_schema_version="detector-state-v1",
+        payload=v1_payload,
+        payload_sha256=sha256(v1_payload).digest(),
+    )
+
+    restarted = LegacyDetectionAdapter(
+        settings,
+        delivered_count_since=lambda **kwargs: 0,
+        checkpoints=(v1,),
+    )
+
+    restored = restarted._detector._states[event.instrument_id]
+    assert len(restored.trade_points) == 1
 
 
 def test_legacy_adapter_acks_detector_config_on_startup() -> None:

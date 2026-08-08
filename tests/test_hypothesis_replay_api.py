@@ -346,6 +346,33 @@ def test_pending_result_returns_202_and_same_key_reuses_job(tmp_path: Path) -> N
     assert len(runner.calls) == 1
 
 
+def test_equivalent_active_request_is_single_flight_across_keys(
+    tmp_path: Path,
+) -> None:
+    blocker = Event()
+    runner = FakeReplayRunner(blocker=blocker)
+    client, _ = _client(tmp_path, runner)
+
+    with client:
+        first = client.post(
+            "/internal/v1/hypothesis-replays",
+            headers={"Idempotency-Key": "first-caller"},
+            json={"hypothesis_ids": ["H1"]},
+        ).json()
+        _wait_for_progress_phase(client, first["job_id"], "prospective_hypotheses")
+        second = client.post(
+            "/internal/v1/hypothesis-replays",
+            headers={"Idempotency-Key": "second-caller"},
+            json={"hypothesis_ids": ["H1"]},
+        ).json()
+        blocker.set()
+        _wait_for_status(client, first["job_id"], "completed")
+
+    assert second["reused"] is True
+    assert second["job_id"] == first["job_id"]
+    assert len(runner.calls) == 1
+
+
 def test_same_idempotency_key_rejects_different_input(tmp_path: Path) -> None:
     runner = FakeReplayRunner()
     client, _ = _client(tmp_path, runner)

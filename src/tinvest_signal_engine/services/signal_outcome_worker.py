@@ -10,6 +10,7 @@ from random import random
 from threading import Event
 import time
 from typing import Any, Callable
+from pathlib import Path
 
 from psycopg import connect
 
@@ -34,8 +35,14 @@ from tinvest_signal_engine.adapters.reliability_metrics import (
     PrometheusReliabilityMetrics,
     start_reliability_metrics_server,
 )
+from tinvest_signal_engine.adapters.worker_health_file import WorkerHealthFileSink
 from tinvest_signal_engine.application.signal_outcomes import (
     DirectionalSignalOutcomeBatchProcessor,
+)
+from tinvest_signal_engine.application.worker_health import (
+    NoopWorkerHealthReporter,
+    WorkerHealthReporter,
+    WorkerHealthTracker,
 )
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.signal_outcomes import DirectionalOutcomePolicy
@@ -83,6 +90,19 @@ def main() -> None:
     poll_seconds = _env_float("SIGNAL_OUTCOME_WORKER_POLL_SECONDS", 5.0)
     start_reliability_metrics_server(settings.metrics_listen_port)
     metrics = PrometheusReliabilityMetrics()
+    health = WorkerHealthTracker(
+        worker_id="signal_outcome_worker",
+        sink=WorkerHealthFileSink(
+            Path(
+                os.getenv("SIGNAL_OUTCOME_HEALTH_SNAPSHOT_PATH")
+                or "/tmp/signal-outcome-worker-health.json"
+            )
+        ),
+        stale_after_seconds=_env_int(
+            "SIGNAL_OUTCOME_HEALTH_STALE_AFTER_SECONDS",
+            180,
+        ),
+    )
 
     logger.info("Starting automatic signal outcome worker")
     with graceful_shutdown_event(
@@ -95,6 +115,7 @@ def main() -> None:
             poll_seconds=poll_seconds,
             stop_event=stop_event,
             metrics=metrics,
+            health=health,
         )
 
 
@@ -108,12 +129,15 @@ def run_worker_loop(
     backoff: BoundedExponentialBackoff = BoundedExponentialBackoff(),
     now: Callable[[], datetime] = lambda: datetime.now(tz=timezone.utc),
     random_value: Callable[[], float] = random,
+    health: WorkerHealthReporter | None = None,
 ) -> None:
     """Process due outcomes while ClickHouse recovers and shutdown stays responsive."""
 
     recovery_metrics = metrics or NoopDependencyRecoveryMetrics()
+    health_reporter = health or NoopWorkerHealthReporter()
     consecutive_failures = 0
     while not stop_event.is_set():
+        health_reporter.heartbeat()
         try:
             result = worker.process_due(
                 now=now(),
@@ -121,6 +145,7 @@ def run_worker_loop(
             )
         except TransientClickHouseError as error:
             consecutive_failures += 1
+            health_reporter.failed(error.reason_code)
             if wait_for_dependency(
                 worker="signal_outcome_worker",
                 error=error,
@@ -133,6 +158,9 @@ def run_worker_loop(
             ):
                 break
             continue
+        except Exception:
+            health_reporter.failed("worker_cycle_failed")
+            raise
         record_dependency_recovered(
             worker="signal_outcome_worker",
             operation="reference_tick_select",
@@ -141,6 +169,7 @@ def run_worker_loop(
             logger=logger,
         )
         consecutive_failures = 0
+        health_reporter.succeeded(force=bool(result.scanned))
         if result.scanned:
             logger.info(
                 "Processed signal outcome batch",

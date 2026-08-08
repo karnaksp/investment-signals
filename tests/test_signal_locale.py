@@ -203,8 +203,12 @@ def test_morning_retracement_telegram_shows_direction_probability_and_target() -
             "expected_hit_window_end": "2026-07-28T09:10:00+03:00",
             "deadline_at": "2026-07-28T11:00:00+03:00",
             "model_probability": 0.73,
+            "target_probability": 0.73,
+            "non_loss_probability": 0.81,
+            "target_fraction": 0.25,
             "historical_target_probability": 0.72,
             "historical_target_probability_lower": 0.58,
+            "historical_non_loss_probability": 0.78,
             "evidence_sample_count": 72,
         },
     )
@@ -222,7 +226,8 @@ def test_morning_retracement_telegram_shows_direction_probability_and_target() -
 
     assert "ВОЗВРАТ ВНИЗ" in html
     assert "73,0%" in html
-    assert "R50" in html
+    assert "81,0%" in html
+    assert "R25" in html
     assert "101" in html
     assert "не гарантирует" in html
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Mapping
 from uuid import UUID
@@ -91,12 +91,24 @@ LEFT ANTI JOIN
 (
     SELECT instrument_id, event_at, event_id
     FROM market_reference_ticks
+    PREWHERE instrument_id IN {batch_instruments:Array(String)}
+      AND toDate(event_at) = {batch_day:Date}
     WHERE event_at >= parseDateTime64BestEffort({batch_start:String}, 9, 'UTC')
       AND event_at <= parseDateTime64BestEffort({batch_end:String}, 9, 'UTC')
 ) AS stored
 ON stored.instrument_id = incoming.instrument_id
    AND stored.event_at = incoming.event_at
    AND stored.event_id = incoming.event_id
+SETTINGS
+    async_insert = 1,
+    wait_for_async_insert = 1,
+    async_insert_busy_timeout_ms = 2000,
+    async_insert_max_data_size = 10485760,
+    max_execution_time = 15,
+    timeout_before_checking_execution_speed = 0,
+    max_rows_to_read = 5000000,
+    max_bytes_to_read = 536870912,
+    max_memory_usage = 536870912
 FORMAT JSONEachRow
 """.strip()
 
@@ -183,7 +195,19 @@ class ClickHouseReferenceTickStore:
     def persist_many(self, ticks: tuple[ReferenceTick, ...]) -> None:
         if not ticks:
             return
-        ticks = _unique_ticks(ticks)
+        unique = _unique_ticks(ticks)
+        by_day: dict[date, list[ReferenceTick]] = {}
+        for tick in unique:
+            by_day.setdefault(tick.event_at.date(), []).append(tick)
+        for batch_day, day_ticks in sorted(by_day.items()):
+            self._persist_day(tuple(day_ticks), batch_day=batch_day)
+
+    def _persist_day(
+        self,
+        ticks: tuple[ReferenceTick, ...],
+        *,
+        batch_day: date,
+    ) -> None:
         rows = "\n".join(
             json.dumps(_json_row(tick), ensure_ascii=True, separators=(",", ":"))
             for tick in ticks
@@ -195,6 +219,10 @@ class ClickHouseReferenceTickStore:
             "date_time_input_format": "best_effort",
             "param_batch_start": batch_start,
             "param_batch_end": batch_end,
+            "param_batch_day": batch_day.isoformat(),
+            "param_batch_instruments": _clickhouse_string_array(
+                tuple(dict.fromkeys(tick.instrument_id for tick in ticks))
+            ),
         }
         request = Request(
             f"{self._base_url}/?{urlencode(query)}",
@@ -253,6 +281,14 @@ def _unique_ticks(
             raise ValueError("conflicting reference ticks share event_id")
         selected[tick.event_id] = tick
     return tuple(selected.values())
+
+
+def _clickhouse_string_array(values: tuple[str, ...]) -> str:
+    escaped = tuple(
+        "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        for value in values
+    )
+    return "[" + ",".join(escaped) + "]"
 
 
 def _json_row(tick: ReferenceTick) -> Mapping[str, object]:

@@ -787,6 +787,56 @@ def _read_parquet_records(files: Sequence[Path]) -> list[dict[str, Any]]:
         con.close()
 
 
+def _read_parquet_candles(files: Sequence[Path]) -> tuple[ResearchCandle, ...]:
+    if not files:
+        return ()
+    duckdb = require_duckdb()
+    con = duckdb.connect(database=":memory:")
+    result: list[ResearchCandle] = []
+    try:
+        cursor = con.execute(
+            "SELECT * FROM read_parquet(?, union_by_name = true)",
+            [[str(file) for file in files]],
+        )
+        columns = [item[0] for item in cursor.description]
+        positions = {name: columns.index(name) for name in columns}
+        while rows := cursor.fetchmany(100_000):
+            for row in rows:
+                raw_at = row[positions["at"]]
+                at = (
+                    raw_at
+                    if isinstance(raw_at, datetime)
+                    else datetime.fromisoformat(str(raw_at))
+                )
+                if at.tzinfo is None or at.utcoffset() is None:
+                    at = at.replace(tzinfo=UTC)
+                result.append(
+                    ResearchCandle(
+                        ticker=str(row[positions["ticker"]]),
+                        at=at.astimezone(UTC),
+                        open=float(row[positions["open"]]),
+                        high=float(row[positions["high"]]),
+                        low=float(row[positions["low"]]),
+                        close=float(row[positions["close"]]),
+                        volume=float(row[positions["volume"]]),
+                        complete=bool(row[positions["complete"]]),
+                        volume_buy=(
+                            float(row[positions["volume_buy"]] or 0.0)
+                            if "volume_buy" in positions
+                            else 0.0
+                        ),
+                        volume_sell=(
+                            float(row[positions["volume_sell"]] or 0.0)
+                            if "volume_sell" in positions
+                            else 0.0
+                        ),
+                    )
+                )
+        return tuple(result)
+    finally:
+        con.close()
+
+
 def _cache_partition_files(cache_dir: Path, tickers: Sequence[str] | None = None) -> list[Path]:
     if tickers:
         return [
@@ -797,12 +847,32 @@ def _cache_partition_files(cache_dir: Path, tickers: Sequence[str] | None = None
     return sorted(cache_dir.glob("ticker=*/date=*.parquet"))
 
 
-def read_cache(cache_dir: Path, tickers: Sequence[str] | None = None) -> tuple[ResearchCandle, ...]:
+def read_cache(
+    cache_dir: Path,
+    tickers: Sequence[str] | None = None,
+    *,
+    start_day: date | None = None,
+    end_day: date | None = None,
+) -> tuple[ResearchCandle, ...]:
     files = _cache_partition_files(cache_dir, tickers)
+    if start_day is not None or end_day is not None:
+        files = [
+            file
+            for file in files
+            if (
+                start_day is None
+                or date.fromisoformat(file.stem.removeprefix("date="))
+                >= start_day
+            )
+            and (
+                end_day is None
+                or date.fromisoformat(file.stem.removeprefix("date="))
+                <= end_day
+            )
+        ]
     if not files:
         raise RuntimeError(f"No candle partitions found in {cache_dir}")
-    records = _read_parquet_records(files)
-    return candles_from_records(records)
+    return _read_parquet_candles(files)
 
 
 def read_orderbook_cache(cache_dir: Path, tickers: Sequence[str] | None = None) -> tuple[ResearchOrderBookSnapshot, ...]:

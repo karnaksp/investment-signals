@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import zlib
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Callable, Sequence
@@ -36,13 +37,15 @@ from tinvest_signal_engine.domain.reliable_processing import (
     PreparedSignal,
     SignalRecord,
 )
+from tinvest_signal_engine.domain.market_schedule import MarketSchedule
 from tinvest_signal_engine.models import NormalizedEvent, TriggerSignal
 from tinvest_signal_engine.redis_detector_state import flush_detector_to_redis
 from tinvest_signal_engine.serialization import json_dumps_bytes
 from tinvest_signal_engine.signal_enrichment import enrich_signal_for_delivery
 
 logger = logging.getLogger(__name__)
-_STATE_SCHEMA_VERSION = "detector-state-v1"
+_STATE_SCHEMA_VERSION_V1 = "detector-state-v1"
+_STATE_SCHEMA_VERSION = "detector-state-v2-zlib"
 
 
 class LegacyDetectionAdapter:
@@ -60,6 +63,13 @@ class LegacyDetectionAdapter:
         self._config_ack_sink = config_ack_sink
         self._detector_instance_id = detector_instance_id or str(uuid4())
         self._delivery_recovery_guard = delivery_recovery_guard
+        self._market_schedule = MarketSchedule.from_strings(
+            timezone_name=settings.market_schedule_timezone,
+            collection_start=settings.market_collection_start,
+            collection_end=settings.market_collection_end,
+            signal_start=settings.market_signal_start,
+            signal_end=settings.market_signal_end,
+        )
         self._configured_instruments_count = 0
         self._detector = self._build_detector()
         self._ack_detector_config("loaded", self._detector_config_version())
@@ -84,7 +94,15 @@ class LegacyDetectionAdapter:
     def detect_batch(self, payload: dict[str, object]) -> DetectionBatch:
         self._maybe_reload()
         event = NormalizedEvent.from_dict(payload)
-        signals = self._detector.process(event)
+        signals = self._detector.process(
+            event,
+            emit_signals=(
+                self._market_schedule.is_signal_emission_active(
+                    event.source_time
+                )
+                and not bool(event.payload.get("recovery_backfill"))
+            ),
+        )
         observations = self._detector.drain_observations()
         signals = self._detector.enrich_signals_with_unary(signals)
         prepared: list[PreparedSignal] = []
@@ -102,8 +120,10 @@ class LegacyDetectionAdapter:
                     delivery_targets=targets,
                 )
             )
-        state_payload = json_dumps_bytes(
-            export_instrument_state(self._detector, event.instrument_id)
+        state_payload = _compress_state_payload(
+            json_dumps_bytes(
+                export_instrument_state(self._detector, event.instrument_id)
+            )
         )
         checkpoint = DetectorStateCheckpoint(
             instrument_id=event.instrument_id,
@@ -142,11 +162,20 @@ class LegacyDetectionAdapter:
     ) -> None:
         payloads: list[dict[str, object]] = []
         for checkpoint in checkpoints:
-            if checkpoint.state_schema_version != _STATE_SCHEMA_VERSION:
+            if checkpoint.state_schema_version not in {
+                _STATE_SCHEMA_VERSION_V1,
+                _STATE_SCHEMA_VERSION,
+            }:
                 raise ValueError("unsupported detector checkpoint schema")
             if sha256(checkpoint.payload).digest() != checkpoint.payload_sha256:
                 raise ValueError("detector checkpoint checksum mismatch")
-            decoded = json.loads(checkpoint.payload)
+            payload = checkpoint.payload
+            if checkpoint.state_schema_version == _STATE_SCHEMA_VERSION:
+                try:
+                    payload = zlib.decompress(payload)
+                except zlib.error as error:
+                    raise ValueError("detector checkpoint compression is invalid") from error
+            decoded = json.loads(payload)
             if not isinstance(decoded, dict):
                 raise ValueError("detector checkpoint must contain an object")
             if decoded.get("instrument_id") != checkpoint.instrument_id:
@@ -284,6 +313,12 @@ class LegacyDetectionAdapter:
                 )
             )
         return tuple(targets)
+
+
+def _compress_state_payload(payload: bytes) -> bytes:
+    """Reduce PostgreSQL TOAST churn while keeping checkpoint bytes opaque."""
+
+    return zlib.compress(payload, level=1)
 
 
 def _signal_record(signal: TriggerSignal) -> SignalRecord:

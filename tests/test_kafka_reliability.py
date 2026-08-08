@@ -302,3 +302,12 @@ def test_consumer_disables_auto_commit(monkeypatch) -> None:
 
     assert captured["enable_auto_commit"] is False
     assert captured["max_poll_records"] == 500
+    assert captured["auto_offset_reset"] == "latest"
+
+
+def test_first_boot_warmup_has_an_explicit_setting(monkeypatch) -> None:
+    monkeypatch.setenv("KAFKA_FIRST_BOOT_WARMUP_AGE_SECONDS", "123")
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.kafka_first_boot_warmup_age_seconds == 123

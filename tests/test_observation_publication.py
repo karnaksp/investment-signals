@@ -78,12 +78,17 @@ def test_clickhouse_sink_maps_0351_columns_and_seals_flags(monkeypatch) -> None:
     assert len(requests) == 1
     request = requests[0]
     query = parse_qs(urlparse(request.full_url).query)
-    assert query == {"database": ["signal_engine"]}
+    assert query == {
+        "async_insert": ["1"],
+        "database": ["signal_engine"],
+        "date_time_input_format": ["best_effort"],
+        "wait_for_async_insert": ["1"],
+    }
     lines = request.data.decode("utf-8").splitlines()
-    assert lines[0] == "INSERT INTO detector_observations FORMAT JSONEachRow"
+    assert lines[0] == "INSERT INTO detector_observations_v2 FORMAT JSONEachRow"
     row = json.loads(lines[1])
     assert row["session_date"] == "2026-07-15"
-    assert row["observed_at"] == "2026-07-14T21:59:58.000000Z"
+    assert row["observed_at"] == "2026-07-14 21:59:58.000000"
     assert len(row["payload_fingerprint"]) == 64
     fingerprint = row.pop("payload_fingerprint")
     canonical = json.dumps(

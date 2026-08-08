@@ -280,7 +280,7 @@
     const rt = state.runtime || {};
     const sha = String(rt.commit_sha || "unknown");
     const shortSha = sha === "unknown" ? sha : sha.slice(0, 12);
-    const version = rt.app_version || "0.1.0";
+    const version = rt.app_version || "0.2.0";
     const built = rt.build_time && rt.build_time !== "unknown" ? " / " + rt.build_time : "";
     return "v" + version + " / " + shortSha + built;
   }

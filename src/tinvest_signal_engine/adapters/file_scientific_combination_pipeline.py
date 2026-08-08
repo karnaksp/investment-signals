@@ -6,6 +6,7 @@ from dataclasses import asdict, fields
 from datetime import date, datetime
 from enum import Enum
 from hashlib import sha256
+import gzip
 import heapq
 from itertools import groupby
 import json
@@ -94,10 +95,10 @@ class FileProspectiveScientificPartitionStage:
                 }
                 for feature, outcome in rows
             ]
-            relative = f"partitions/{trading_day.isoformat()}.json"
+            relative = f"partitions/{trading_day.isoformat()}.json.gz"
             path = run_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            _write_once_or_verify(path, _json_bytes(payload))
+            _write_compressed_once_or_verify(path, _json_bytes(payload))
             partition_hashes[relative] = _file_hash(path)
         completion = {
             "schema": _SOURCE_SCHEMA,
@@ -150,9 +151,9 @@ class FileProspectiveScientificPartitionStage:
             if previous_day is not None and trading_day <= previous_day:
                 raise ValueError("staged report must be ordered by trading day")
             previous_day = trading_day
-            relative = f"partitions/{trading_day.isoformat()}.json"
+            relative = f"partitions/{trading_day.isoformat()}.json.gz"
             path = run_dir / relative
-            count = _write_row_array_once_or_verify(path, day_rows)
+            count = _write_compressed_row_array_once_or_verify(path, day_rows)
             observation_count += count
             partition_hashes[relative] = _file_hash(path)
         completion = {
@@ -210,12 +211,12 @@ class FileProspectiveScientificPartitionStage:
         for run_dir in self._references.values():
             completion = self._verify_source(run_dir)
             for relative in completion["partition_hashes"]:
-                trading_day = date.fromisoformat(Path(relative).stem)
+                trading_day = _partition_date(relative)
                 by_day.setdefault(trading_day, []).append(run_dir / relative)
         for trading_day in sorted(by_day):
             pairs: list[tuple[ProspectiveFeature, ProspectiveOutcome]] = []
             for path in sorted(by_day[trading_day]):
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload = _read_json(path)
                 pairs.extend(
                     (_feature_from_json(item["feature"]), _outcome_from_json(item["outcome"]))
                     for item in payload
@@ -455,9 +456,9 @@ class FileScientificCombinationStreamingArtifacts:
             "observations": [_json_value(item) for item in partition.observations],
             "outcomes": [_json_value(item) for item in partition.outcomes],
         }
-        path = run_dir / "partitions" / f"{partition.trading_day.isoformat()}.json"
+        path = run_dir / "partitions" / f"{partition.trading_day.isoformat()}.json.gz"
         path.parent.mkdir(parents=True, exist_ok=True)
-        _write_once_or_verify(path, _json_bytes(payload))
+        _write_compressed_once_or_verify(path, _json_bytes(payload))
 
     def complete(
         self,
@@ -471,7 +472,12 @@ class FileScientificCombinationStreamingArtifacts:
     ) -> ScientificCombinationStreamingCompletion:
         del descriptor
         run_dir = self._run_dir(run_id)
-        partition_paths = tuple(sorted((run_dir / "partitions").glob("*.json")))
+        partition_paths = tuple(
+            sorted(
+                tuple((run_dir / "partitions").glob("*.json"))
+                + tuple((run_dir / "partitions").glob("*.json.gz"))
+            )
+        )
         if len(partition_paths) != partition_count:
             raise ValueError("combination checkpoint partition count drifted")
         results_path = run_dir / "results.json"
@@ -682,6 +688,21 @@ def _json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _partition_date(relative: object) -> date:
+    name = Path(str(relative)).name
+    for suffix in (".json.gz", ".json"):
+        if name.endswith(suffix):
+            return date.fromisoformat(name.removesuffix(suffix))
+    raise ValueError("unsupported scientific partition filename")
+
+
+def _read_json(path: Path) -> Any:
+    if path.name.endswith(".json.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _prospective_row_key(
     row: tuple[ProspectiveFeature, ProspectiveOutcome],
 ) -> tuple[object, ...]:
@@ -734,6 +755,62 @@ def _write_row_array_once_or_verify(
         temporary.unlink(missing_ok=True)
         raise
     return count
+
+
+def _write_compressed_row_array_once_or_verify(
+    path: Path,
+    rows: Iterable[tuple[ProspectiveFeature, ProspectiveOutcome]],
+) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    count = 0
+    try:
+        with temporary.open("xb") as raw:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                compresslevel=1,
+                fileobj=raw,
+                mtime=0,
+            ) as handle:
+                handle.write(b"[")
+                for feature, outcome in rows:
+                    if feature.observation_id != outcome.observation_id:
+                        raise ValueError(
+                            "feature and outcome identities must remain aligned"
+                        )
+                    if count:
+                        handle.write(b",")
+                    handle.write(
+                        json.dumps(
+                            {
+                                "feature": _json_value(feature),
+                                "outcome": _json_value(outcome),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    )
+                    count += 1
+                handle.write(b"]\n")
+            raw.flush()
+            os.fsync(raw.fileno())
+        if path.exists():
+            if _file_hash(path) != _file_hash(temporary):
+                raise ValueError(f"immutable evidence artifact differs: {path.name}")
+            temporary.unlink()
+        else:
+            os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return count
+
+
+def _write_compressed_once_or_verify(path: Path, payload: bytes) -> None:
+    compressed = gzip.compress(payload, compresslevel=1, mtime=0)
+    _write_once_or_verify(path, compressed)
 
 
 def _write_once_or_verify(path: Path, payload: bytes) -> None:

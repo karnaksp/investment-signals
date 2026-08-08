@@ -21,6 +21,7 @@ from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
     _CANDLE_COLUMNS,
     _calendar_lookback_days,
     _compact_json_each_row,
+    _har_parameters,
     _series_point,
     ClickHouseProspectiveLiveOutcomeSource,
     ClickHouseProspectiveLiveSnapshotSource,
@@ -48,6 +49,7 @@ from tinvest_signal_engine.domain.prospective_live_shadow import (
     LIVE_SHADOW_RECORD_VERSION,
     build_live_outcome,
 )
+from tinvest_signal_engine.domain.market_schedule import MarketSchedule
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveHypothesis,
     ProspectiveScientificPolicy,
@@ -239,6 +241,101 @@ def test_live_runtime_accepts_application_owned_portfolio_cardinality() -> None:
     assert result.observations_stored == 8
     assert result.observations_replayed == 0
     assert result.events == ("portfolio-recorded", "outcomes-processed")
+
+
+def test_live_runtime_records_after_settlement_but_bounds_observed_candles() -> None:
+    calls: list[dict[str, object]] = []
+
+    class Recorder:
+        def execute(self, _snapshot):
+            return SimpleNamespace(
+                stored=0,
+                replayed=0,
+                observation_ids=(),
+                event="portfolio-recorded",
+            )
+
+    class SnapshotSource:
+        def load_snapshots(self, **kwargs):
+            calls.append(kwargs)
+            return ()
+
+    class OutcomeWorker:
+        def run_once(self, **_kwargs):
+            return SimpleNamespace(event="outcomes-processed")
+
+    runtime = ClickHouseProspectiveLiveShadowRuntime(
+        recorder=Recorder(),  # type: ignore[arg-type]
+        outcome_worker=OutcomeWorker(),  # type: ignore[arg-type]
+        snapshot_source=SnapshotSource(),  # type: ignore[arg-type]
+        store=object(),  # type: ignore[arg-type]
+        policy=PRODUCTION_LIVE_POLICY,
+        snapshot_schedule=ProspectiveSnapshotBatchSchedule(
+            instrument_ids=("SBER_TQBR",),
+            settlement_delay_minutes=2,
+        ),
+    )
+    recorded_at = OBSERVED_AT + timedelta(minutes=7)
+
+    runtime.run_once(
+        now=recorded_at,
+        snapshot_limit=1,
+        outcome_limit=1,
+    )
+
+    assert calls[0]["as_of"] == recorded_at
+    assert calls[0]["observed_until"] == OBSERVED_AT
+
+
+def test_production_schedule_does_not_scan_history_on_worker_start() -> None:
+    schedule = ProspectiveSnapshotBatchSchedule(
+        instrument_ids=("SBER_TQBR",),
+        run_on_start=False,
+    )
+
+    assert schedule.pending(now=OBSERVED_AT, limit=1) is None
+    due = schedule.pending(now=OBSERVED_AT + timedelta(minutes=31), limit=1)
+
+    assert due is not None
+    assert due.instrument_ids == ("SBER_TQBR",)
+
+
+def test_live_runtime_skips_snapshot_history_outside_collection_window() -> None:
+    calls: list[dict[str, object]] = []
+
+    class SnapshotSource:
+        def load_snapshots(self, **kwargs):
+            calls.append(kwargs)
+            return ()
+
+    class OutcomeWorker:
+        def run_once(self, **_kwargs):
+            return SimpleNamespace(
+                event="outcomes-processed",
+                stored=0,
+                replayed=0,
+                unavailable=0,
+            )
+
+    runtime = ClickHouseProspectiveLiveShadowRuntime(
+        recorder=object(),  # type: ignore[arg-type]
+        outcome_worker=OutcomeWorker(),  # type: ignore[arg-type]
+        snapshot_source=SnapshotSource(),  # type: ignore[arg-type]
+        store=object(),  # type: ignore[arg-type]
+        policy=PRODUCTION_LIVE_POLICY,
+        snapshot_schedule=ProspectiveSnapshotBatchSchedule(
+            instrument_ids=("SBER_TQBR",),
+        ),
+        market_schedule=MarketSchedule(),
+    )
+
+    runtime.run_once(
+        now=datetime(2026, 7, 20, 1, 0, tzinfo=UTC),
+        snapshot_limit=1,
+        outcome_limit=1,
+    )
+
+    assert calls == []
 
 
 def test_live_store_classifies_clickhouse_500_without_response_body(
@@ -558,6 +655,70 @@ def test_snapshot_source_accepts_clickhouse_decimal_storage_scale() -> None:
 
     assert len(snapshots) == 1
     assert snapshots[0].observed_at == OBSERVED_AT
+
+
+def test_snapshot_source_accepts_late_recovery_before_recording_cutoff() -> None:
+    first = OBSERVED_AT - timedelta(minutes=120)
+    candles = tuple(
+        _candle(first + timedelta(minutes=index), index) for index in range(120)
+    )
+    client = _CandleClient(tuple(_candle_row(item) for item in candles))
+    recorded_at = RECORDED_AT + timedelta(minutes=5)
+
+    snapshots = ClickHouseProspectiveLiveSnapshotSource(
+        client,
+        instrument_ids=("SBER_TQBR",),
+    ).load_snapshots(
+        as_of=recorded_at,
+        observed_until=OBSERVED_AT,
+        policy=PRODUCTION_LIVE_POLICY,
+        limit=1,
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].observed_at == OBSERVED_AT
+    assert snapshots[0].recorded_at == recorded_at
+    assert client.calls[0][1]["as_of"] == recorded_at.strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
+    assert client.calls[0][1]["candle_until"] == OBSERVED_AT.strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
+
+
+def test_har_training_excludes_target_known_at_observation_boundary() -> None:
+    first = OBSERVED_AT - timedelta(minutes=300)
+    candles = tuple(
+        _candle(first + timedelta(minutes=index), index) for index in range(300)
+    )
+    policy = replace(
+        PRODUCTION_LIVE_POLICY,
+        har_minimum_training_points=1,
+    )
+
+    parameters = _har_parameters(
+        candles,
+        len(candles) - 1,
+        policy=policy,
+    )
+
+    assert parameters is not None
+    assert parameters.trained_until < OBSERVED_AT
+
+
+def test_snapshot_source_rejects_observation_cutoff_after_recording_time() -> None:
+    source = ClickHouseProspectiveLiveSnapshotSource(
+        _CandleClient(()),
+        instrument_ids=("SBER_TQBR",),
+    )
+
+    with pytest.raises(ValueError, match="observed_until cannot be after as_of"):
+        source.load_snapshots(
+            as_of=RECORDED_AT,
+            observed_until=RECORDED_AT + timedelta(seconds=1),
+            policy=PRODUCTION_LIVE_POLICY,
+            limit=1,
+        )
 
 
 def test_snapshot_source_rejects_tampered_scaled_decimal() -> None:

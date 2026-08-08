@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
-from enum import Enum
-from hashlib import sha256
 import json
 import os
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass
+from datetime import UTC, date, datetime
+from enum import Enum
+from hashlib import sha256
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from tinvest_signal_engine.application.prospective_portfolio_extensions import (
     R2ExtensionReport,
+)
+from tinvest_signal_engine.application.r2_extension_evidence import (
+    R2_EVIDENCE_POLICY,
+    AssessR2ExtensionEvidence,
+    R2EvidenceCoverage,
+)
+from tinvest_signal_engine.domain.hypothesis_evidence import (
+    EvidenceBundle,
+    EvidenceDecision,
+    EvidenceDiagnosticsV2,
 )
 from tinvest_signal_engine.domain.prospective_portfolio_extensions import (
     R2Decision,
@@ -26,7 +36,7 @@ from tinvest_signal_engine.domain.scientific_replay_contract import (
     scientific_replay_definition,
 )
 
-R2_EXTENSION_EVIDENCE_SCHEMA_VERSION = 2
+R2_EXTENSION_EVIDENCE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,13 +47,7 @@ class R2ExtensionReplayArtifact:
 
 
 class R2ExtensionReplayArtifactAdapter:
-    """Persist causal observations while refusing to manufacture an evidence gate.
-
-    R2 currently has causal features and sealed outcomes, but no independently
-    assessed matched-control evidence bundle.  The adapter therefore exposes
-    exact registered horizons and diagnostics, while the claim remains
-    ``blocked_by_data`` until that gate is implemented.
-    """
+    """Persist causal observations and independently assess H10's holdout."""
 
     def __init__(self, root: str | Path) -> None:
         self._root = Path(root)
@@ -54,7 +58,9 @@ class R2ExtensionReplayArtifactAdapter:
         requested_hypotheses: Sequence[R2ExtensionHypothesis],
         *,
         cost_model_version: str,
-        blocking_reason_codes: Sequence[str],
+        blocking_reason_codes: Sequence[str] = (
+            "independent_evidence_gate_unavailable",
+        ),
     ) -> R2ExtensionReplayArtifact:
         selected = tuple(sorted(set(requested_hypotheses), key=lambda item: item.value))
         reasons = tuple(sorted(set(blocking_reason_codes)))
@@ -62,24 +68,56 @@ class R2ExtensionReplayArtifactAdapter:
             raise ValueError("at least one R2 hypothesis is required")
         if not cost_model_version.strip():
             raise ValueError("cost model version must not be empty")
-        if not reasons or any(not item.strip() for item in reasons):
+        if any(not item.strip() for item in reasons):
             raise ValueError("R2 replay must name its fail-closed reason")
+        h10_assessment = None
+        h10_days = {
+            item.trading_day
+            for item in report.features
+            if item.hypothesis is R2ExtensionHypothesis.OPENING_GAP_REVERSION
+        }
+        if (
+            R2ExtensionHypothesis.OPENING_GAP_REVERSION in selected
+            and len(h10_days) >= 5
+        ):
+            h10_assessment = AssessR2ExtensionEvidence().execute(
+                report,
+                (R2ExtensionHypothesis.OPENING_GAP_REVERSION,),
+                cost_model_version=cost_model_version,
+            )
         artifact_fingerprint = _fingerprint(
             {
                 "schema_version": R2_EXTENSION_EVIDENCE_SCHEMA_VERSION,
                 "blocking_reason_codes": reasons,
                 "cost_model_version": cost_model_version,
+                "evidence_policy": asdict(R2_EVIDENCE_POLICY),
                 "report_fingerprint": report.report_fingerprint,
                 "selected_hypotheses": tuple(item.value for item in selected),
             }
         )
         evidence = tuple(
-            _blocked_evidence(
+            _assessed_evidence(
+                report,
+                hypothesis,
+                bundle=h10_assessment.for_hypothesis(hypothesis),
+                coverage=h10_assessment.coverage_for(hypothesis),
+                artifact_fingerprint=artifact_fingerprint,
+                cost_model_version=cost_model_version,
+            )
+            if (
+                hypothesis is R2ExtensionHypothesis.OPENING_GAP_REVERSION
+                and h10_assessment is not None
+            )
+            else _blocked_evidence(
                 report,
                 hypothesis,
                 artifact_fingerprint=artifact_fingerprint,
                 cost_model_version=cost_model_version,
-                blocking_reason_codes=reasons,
+                blocking_reason_codes=(
+                    reasons
+                    if reasons
+                    else ("minimum_history_for_holdout_split_not_met",)
+                ),
             )
             for hypothesis in selected
         )
@@ -93,6 +131,7 @@ class R2ExtensionReplayArtifactAdapter:
             "report_fingerprint": report.report_fingerprint,
             "artifact_fingerprint": artifact_fingerprint,
             "cost_model_version": cost_model_version,
+            "evidence_policy": asdict(R2_EVIDENCE_POLICY),
             "blocking_reason_codes": reasons,
             "selected_hypotheses": tuple(item.value for item in selected),
             "feature_count": len(report.features),
@@ -111,6 +150,182 @@ class R2ExtensionReplayArtifactAdapter:
             artifact_fingerprint=artifact_fingerprint,
             evidence=evidence,
         )
+
+
+def _assessed_evidence(
+    report: R2ExtensionReport,
+    hypothesis: R2ExtensionHypothesis,
+    *,
+    bundle: EvidenceBundle,
+    coverage: R2EvidenceCoverage,
+    artifact_fingerprint: str,
+    cost_model_version: str,
+) -> Mapping[str, Any]:
+    definition = scientific_replay_definition(hypothesis.value)
+    features = tuple(item for item in report.features if item.hypothesis is hypothesis)
+    outcomes = tuple(
+        outcome
+        for feature, outcome in zip(report.features, report.outcomes, strict=True)
+        if feature.hypothesis is hypothesis
+    )
+    expected_horizons = _report_horizons(report, hypothesis)
+    diagnostics = bundle.diagnostics_v2
+    descriptive_interval = (
+        diagnostics.primary_effect_interval if diagnostics is not None else None
+    )
+    interval = bundle.lift_interval or descriptive_interval
+    primary = (
+        bundle.mean_lift_bps
+        if bundle.mean_lift_bps is not None
+        else (diagnostics.primary_effect_estimate if diagnostics is not None else None)
+    )
+    total_block_observations = sum(
+        item.observation_count for item in bundle.stability.blocks
+    )
+    maximum_period_share = (
+        max(
+            item.observation_count / total_block_observations
+            for item in bundle.stability.blocks
+        )
+        if total_block_observations
+        else None
+    )
+    horizons = tuple(
+        _horizon_summary(
+            features,
+            outcomes,
+            horizon=horizon,
+            primary_horizon=coverage.primary_horizon_seconds,
+            decision=bundle.decision.value,
+            source_data_state=(
+                "insufficient_history"
+                if bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
+                else "ready"
+            ),
+            primary_metric_value=primary,
+            primary_sample_count=bundle.matched_events,
+        )
+        for horizon in expected_horizons
+    )
+    return {
+        "hypothesis_id": hypothesis.value,
+        "catalog_hypothesis_id": definition.catalog_hypothesis_id,
+        "expected_direction": definition.expected_direction,
+        "market_phase": definition.market_phase,
+        "source_data_state": (
+            "insufficient_history"
+            if bundle.decision is EvidenceDecision.BLOCKED_BY_DATA
+            else "ready"
+        ),
+        "decision": bundle.decision.value,
+        "reason_codes": bundle.reason_codes,
+        "independent_validation": True,
+        "cost_adjusted": True,
+        "sample_count": bundle.matched_events,
+        "trading_days": bundle.trading_days,
+        "generated_at": _generated_at(features, outcomes),
+        "artifact_fingerprint": artifact_fingerprint,
+        "dataset_fingerprint": report.dataset_fingerprint,
+        "formula_fingerprint": _fingerprint(
+            {
+                "hypothesis_id": hypothesis.value,
+                "hypothesis_version": hypothesis.version,
+                "portfolio_version": report.portfolio_version,
+                "request_fingerprint": report.request_fingerprint,
+            }
+        ),
+        "cost_model_version": cost_model_version,
+        "primary_metric_value": primary,
+        "matched_control_lift_ci95_lower": interval.lower if interval else None,
+        "matched_control_lift_ci95_upper": interval.upper if interval else None,
+        "matched_controls": bundle.matched_controls,
+        "controls_per_event": R2_EVIDENCE_POLICY.controls_per_event,
+        "adjusted_p_value": bundle.adjusted_q_value,
+        "stable_blocks": bundle.stability.positive_blocks,
+        "total_blocks": len(bundle.stability.blocks),
+        "maximum_ticker_share": bundle.maximum_instrument_share,
+        "maximum_period_share": maximum_period_share,
+        "abstention_rate": (
+            1.0 - coverage.triggered_events / coverage.holdout_observations
+            if coverage.holdout_observations
+            else None
+        ),
+        "diagnostics_v2": _diagnostics_payload(diagnostics),
+        "horizons": horizons,
+    }
+
+
+def _horizon_summary(
+    features: Sequence[R2Feature],
+    outcomes: Sequence[R2Outcome],
+    *,
+    horizon: int,
+    primary_horizon: int,
+    decision: str,
+    source_data_state: str,
+    primary_metric_value: float | None,
+    primary_sample_count: int,
+) -> Mapping[str, Any]:
+    pairs = tuple(
+        (feature, outcome)
+        for feature, outcome in zip(features, outcomes, strict=True)
+        if feature.horizon_seconds == horizon
+    )
+    matched = tuple(
+        outcome.cost_adjusted_signed_return_bps
+        for feature, outcome in pairs
+        if feature.decision is R2Decision.MATCHED
+        and outcome.available
+        and outcome.cost_adjusted_signed_return_bps is not None
+    )
+    is_primary = horizon == primary_horizon
+    return {
+        "horizon_seconds": horizon,
+        "evidence_scope": (
+            "independent_gate" if is_primary else "secondary_descriptive"
+        ),
+        "source_data_state": source_data_state,
+        "decision": decision if is_primary else "inconclusive",
+        "sample_count": primary_sample_count if is_primary else len(matched),
+        "primary_metric_value": (
+            primary_metric_value
+            if is_primary
+            else (sum(matched) / len(matched) if matched else None)
+        ),
+    }
+
+
+def _diagnostics_payload(
+    diagnostics: EvidenceDiagnosticsV2 | None,
+) -> Mapping[str, Any] | None:
+    if diagnostics is None:
+        return None
+    interval = diagnostics.primary_effect_interval
+    return {
+        "version": diagnostics.version,
+        "event_prevalence": diagnostics.event_prevalence,
+        "eligible_event_count": diagnostics.eligible_event_count,
+        "matched_event_count": diagnostics.matched_event_count,
+        "match_coverage": diagnostics.match_coverage,
+        "data_coverage": diagnostics.data_coverage,
+        "reasons_histogram": tuple(
+            {"reason_code": item.reason_code, "count": item.count}
+            for item in diagnostics.reasons_histogram
+        ),
+        "primary_effect_estimate": diagnostics.primary_effect_estimate,
+        "primary_effect_interval": (
+            {
+                "lower": interval.lower,
+                "estimate": interval.estimate,
+                "upper": interval.upper,
+                "confidence_level": interval.confidence_level,
+            }
+            if interval is not None
+            else None
+        ),
+        "primary_p_value": diagnostics.primary_p_value,
+        "descriptive_only": diagnostics.descriptive_only,
+    }
 
 
 def _blocked_evidence(
@@ -239,9 +454,9 @@ def _generated_at(
     values = [item.available_at for item in outcomes]
     values.extend(item.available_at for item in features)
     return (
-        max(values).astimezone(timezone.utc).isoformat()
+        max(values).astimezone(UTC).isoformat()
         if values
-        else datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat()
+        else datetime(1970, 1, 1, tzinfo=UTC).isoformat()
     )
 
 

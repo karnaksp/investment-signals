@@ -1,0 +1,12 @@
+[Unit]
+Description=Open the Investment Signals bond orchestrator window
+
+[Timer]
+# The live bond schedule runs at 11:15 Europe/Moscow on trading weekdays.
+OnCalendar=Mon..Fri *-*-* 11:05:00 Europe/Moscow
+AccuracySec=30s
+Persistent=false
+Unit=investment-signals-bond-orchestrator-start.service
+
+[Install]
+WantedBy=timers.target

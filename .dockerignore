@@ -10,3 +10,7 @@ __pycache__
 .tmp_invest_python
 data
 var
+._*
+**/._*
+.DS_Store
+**/.DS_Store

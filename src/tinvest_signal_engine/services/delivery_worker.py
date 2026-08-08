@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-import time
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from tinvest_signal_engine.adapters.delivery_senders import (
     ConfiguredDeliverySender,
@@ -19,15 +20,18 @@ from tinvest_signal_engine.adapters.reliability_metrics import (
     PrometheusReliabilityMetrics,
     start_reliability_metrics_server,
 )
+from tinvest_signal_engine.adapters.worker_health_file import WorkerHealthFileSink
 from tinvest_signal_engine.application.delivery import DurableDeliveryWorker
 from tinvest_signal_engine.application.delivery_recovery import (
     DeliveryRecoveryGuard,
 )
+from tinvest_signal_engine.application.worker_health import WorkerHealthTracker
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.delivery_recovery import (
     DeliveryFreshnessPolicy,
 )
 from tinvest_signal_engine.logging_utils import configure_logging
+from tinvest_signal_engine.services.graceful_shutdown import graceful_shutdown_event
 
 
 logger = logging.getLogger(__name__)
@@ -67,13 +71,33 @@ def main() -> None:
         recovery_guard=recovery_guard,
     )
     logger.info("Starting durable delivery worker")
+    health = WorkerHealthTracker(
+        worker_id="delivery_worker",
+        sink=WorkerHealthFileSink(
+            Path(
+                os.getenv("DELIVERY_HEALTH_SNAPSHOT_PATH")
+                or "/tmp/delivery-worker-health.json"
+            )
+        ),
+        stale_after_seconds=int(
+            os.getenv("DELIVERY_HEALTH_STALE_AFTER_SECONDS") or "180"
+        ),
+    )
     try:
-        while True:
-            result = worker.run_once()
-            if result.outcome == "idle":
-                time.sleep(settings.delivery_worker_poll_seconds)
-    except KeyboardInterrupt:
-        logger.info("Delivery worker stopped by user")
+        with graceful_shutdown_event(
+            logger=logger,
+            worker="delivery_worker",
+        ) as stop_event:
+            while not stop_event.is_set():
+                health.heartbeat()
+                try:
+                    result = worker.run_once()
+                except Exception:
+                    health.failed("worker_cycle_failed")
+                    raise
+                health.succeeded(force=result.outcome != "idle")
+                if result.outcome == "idle":
+                    stop_event.wait(settings.delivery_worker_poll_seconds)
     finally:
         sender.close()
         queue.close()

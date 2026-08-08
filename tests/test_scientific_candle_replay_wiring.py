@@ -216,12 +216,12 @@ def test_internal_runner_routes_h10_h11_only_to_causal_r2(
     )
     assert request.policy.round_trip_cost_bps == 10.0
     assert request.policy.cost_model_version == "research-cost-v1.0.0"
+    assert request.observed_exchange_open_is_schedule_evidence is True
     assert request.target_universe == request.market_universe
     assert captured["artifact_report"] is report
     assert captured["artifact_requested"] == ("H10", "H11")
     assert captured["blocking_reason_codes"] == (
         "independent_evidence_gate_unavailable",
-        "r2_reference_data_unavailable",
     )
     assert tuple(item["hypothesis_id"] for item in result["evidence"]) == (
         "H10",

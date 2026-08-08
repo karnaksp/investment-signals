@@ -1,0 +1,9 @@
+[Unit]
+Description=Start Investment Signals bond orchestrator window
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/docker inspect investment-signals-pro-dagster-daemon-1
+ExecStart=/usr/bin/docker start investment-signals-pro-dagster-daemon-1

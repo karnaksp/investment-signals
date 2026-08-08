@@ -192,6 +192,42 @@ def test_break_even_trigger_produces_non_loss_after_modeled_costs() -> None:
     assert result.net_result_bps > 0.0
 
 
+def test_break_even_can_follow_remaining_entry_to_target_progress() -> None:
+    rows = _snapshot()
+    snapshot = build_snapshot(
+        ticker="SBER",
+        observed_at=rows[-1].at,
+        previous_close=100.0,
+        observed_candles=rows,
+        analytical_floor_bps=10.0,
+        tick_size=0.01,
+    )
+    assert snapshot is not None
+    future = (
+        _candle(
+            rows[-1].at + timedelta(minutes=1),
+            101.8,
+            high=101.9,
+            low=101.3,
+        ),
+    )
+    policy = TradePolicy(
+        target_fraction=0.5,
+        stop_extension_fraction=0.25,
+        break_even_trigger_fraction=0.25,
+        deadline_local_minute=11 * 60,
+        round_trip_cost_bps=10.0,
+        break_even_target_progress_fraction=0.5,
+    )
+
+    result = simulate_trade(snapshot, future, policy)
+
+    assert result.break_even_trigger_price == pytest.approx(101.4)
+    assert result.exit_reason is TradeExitReason.BREAK_EVEN
+    assert result.net_result_bps is not None
+    assert result.net_result_bps > 0.0
+
+
 def test_gap_through_target_is_not_counted_as_an_executable_trade() -> None:
     rows = _snapshot()
     snapshot = build_snapshot(

@@ -22,6 +22,7 @@ from tinvest_signal_engine.domain.ingestor_health import (
     INGESTOR_DNS_RESOLUTION_FAILED,
     INGESTOR_HEALTH_SCHEMA_VERSION,
     INGESTOR_RECONNECTING,
+    INGESTOR_SCHEDULED_SLEEP,
     INGESTOR_STREAMING,
     INGESTOR_STREAM_STALE,
     IngestorHealthSnapshot,
@@ -117,6 +118,22 @@ def test_streaming_snapshot_becomes_degraded_after_silence() -> None:
     assert stale.reason_code == INGESTOR_STREAM_STALE
     assert stale.consecutive_failures == 0
     assert store.items[-1] == stale
+
+
+def test_scheduled_sleep_is_a_non_failure_connecting_state() -> None:
+    clock = _Clock(STARTED_AT)
+    store = _MemoryStore()
+    tracker = IngestorHealthTracker(
+        store=store,
+        clock=clock,
+        stale_after_seconds=180,
+    )
+
+    sleeping = tracker.sleeping(configured_instruments=25)
+
+    assert sleeping.state is IngestorStreamState.CONNECTING
+    assert sleeping.reason_code == INGESTOR_SCHEDULED_SLEEP
+    assert sleeping.consecutive_failures == 0
 
 
 def test_atomic_snapshot_contains_only_allow_list_and_no_secrets(

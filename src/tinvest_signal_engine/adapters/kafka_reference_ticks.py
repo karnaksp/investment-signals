@@ -9,6 +9,7 @@ from threading import Event
 from typing import Any, Callable
 
 from kafka import KafkaConsumer
+from kafka.errors import CommitFailedError, KafkaTimeoutError
 from kafka.structs import OffsetAndMetadata, TopicPartition
 
 from tinvest_signal_engine.adapters.clickhouse_resilience import (
@@ -25,11 +26,19 @@ from tinvest_signal_engine.application.reference_ticks import (
     NormalizedMarketEvent,
     ReferenceTickProcessor,
 )
+from tinvest_signal_engine.application.worker_health import (
+    NoopWorkerHealthReporter,
+    WorkerHealthReporter,
+)
 from tinvest_signal_engine.data_quality import validate_normalized_event_dict
 from tinvest_signal_engine.kafka_proto import build_raw_value_deserializer
 
 
 logger = logging.getLogger(__name__)
+_REFERENCE_TICK_MAX_POLL_RECORDS = 10_000
+_REFERENCE_TICK_FETCH_MIN_BYTES = 512 * 1024
+_REFERENCE_TICK_FETCH_MAX_WAIT_MS = 2_000
+_MAX_POLL_INTERVAL_MS = 900_000
 
 
 def build_reference_tick_consumer(
@@ -46,6 +55,10 @@ def build_reference_tick_consumer(
         auto_offset_reset=auto_offset_reset,
         enable_auto_commit=False,
         group_id=group_id,
+        fetch_min_bytes=_REFERENCE_TICK_FETCH_MIN_BYTES,
+        fetch_max_wait_ms=_REFERENCE_TICK_FETCH_MAX_WAIT_MS,
+        max_poll_interval_ms=_MAX_POLL_INTERVAL_MS,
+        max_poll_records=_REFERENCE_TICK_MAX_POLL_RECORDS,
         value_deserializer=build_raw_value_deserializer(format_name=value_format),
     )
 
@@ -58,12 +71,14 @@ class ReferenceTickKafkaRuntime:
         processor: ReferenceTickProcessor,
         backoff: BoundedExponentialBackoff = BoundedExponentialBackoff(),
         metrics: DependencyRecoveryMetrics | None = None,
+        health: WorkerHealthReporter | None = None,
         random_value: Callable[[], float] = random,
     ) -> None:
         self._consumer = consumer
         self._processor = processor
         self._backoff = backoff
         self._metrics = metrics or NoopDependencyRecoveryMetrics()
+        self._health = health or NoopWorkerHealthReporter()
         self._random_value = random_value
 
     def run(self, *, stop_event: Event | None = None) -> None:
@@ -71,13 +86,18 @@ class ReferenceTickKafkaRuntime:
         consecutive_failures = 0
         try:
             while not stop.is_set():
-                polled = self._consumer.poll(timeout_ms=1_000, max_records=500)
+                self._health.heartbeat()
+                polled = self._consumer.poll(
+                    timeout_ms=1_000,
+                    max_records=_REFERENCE_TICK_MAX_POLL_RECORDS,
+                )
                 messages = tuple(
                     message
                     for partition_messages in polled.values()
                     for message in partition_messages
                 )
                 if not messages:
+                    self._health.succeeded()
                     continue
                 events: list[NormalizedMarketEvent] = []
                 for message in messages:
@@ -105,6 +125,7 @@ class ReferenceTickKafkaRuntime:
                     try:
                         self._processor.process_many(tuple(events))
                     except TransientClickHouseError as error:
+                        self._health.failed(error.reason_code)
                         consecutive_failures += 1
                         if wait_for_dependency(
                             worker="reference_tick_writer",
@@ -129,10 +150,22 @@ class ReferenceTickKafkaRuntime:
                     break
                 if stop.is_set():
                     break
-                self._commit_batch(messages)
+                try:
+                    self._commit_batch(messages)
+                except (CommitFailedError, KafkaTimeoutError):
+                    self._health.failed("kafka_commit_uncertain")
+                    logger.warning(
+                        "Reference tick Kafka commit became uncertain; "
+                        "rejoining before the next batch"
+                    )
+                    continue
+                self._health.succeeded(force=True)
         except KeyboardInterrupt:
             stop.set()
             logger.info("Reference tick writer stopped by user")
+        except Exception:
+            self._health.failed("worker_cycle_failed")
+            raise
         finally:
             self._consumer.close()
 

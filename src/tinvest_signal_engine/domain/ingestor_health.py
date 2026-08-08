@@ -13,6 +13,7 @@ INGESTOR_STARTING = "ingestor_starting"
 INGESTOR_CONNECTING = "ingestor_connecting"
 INGESTOR_RECONNECTING = "ingestor_reconnecting"
 INGESTOR_CONFIGURATION_RELOAD = "ingestor_configuration_reload"
+INGESTOR_SCHEDULED_SLEEP = "ingestor_scheduled_sleep"
 INGESTOR_STREAMING = "ingestor_streaming"
 INGESTOR_STREAM_STALE = "ingestor_stream_stale"
 INGESTOR_DNS_RESOLUTION_FAILED = "ingestor_dns_resolution_failed"
@@ -33,6 +34,7 @@ _CONNECTING_REASONS = frozenset(
         INGESTOR_CONNECTING,
         INGESTOR_RECONNECTING,
         INGESTOR_CONFIGURATION_RELOAD,
+        INGESTOR_SCHEDULED_SLEEP,
     }
 )
 _STREAMING_REASONS = frozenset({INGESTOR_STREAMING})

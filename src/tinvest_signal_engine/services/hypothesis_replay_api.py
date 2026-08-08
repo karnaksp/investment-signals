@@ -17,9 +17,10 @@ from datetime import datetime, timezone
 import gc
 from hashlib import sha256
 import json
+import logging
 import os
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Event, Lock, RLock, Thread
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 from uuid import uuid4
 
@@ -44,6 +45,7 @@ from tinvest_signal_engine.adapters.local_hypothesis_replay import (
 )
 from tinvest_signal_engine.adapters.replay_artifact_retention import (
     LocalReplayArtifactRetention,
+    ReplayArtifactRetentionResult,
 )
 from tinvest_signal_engine.adapters.scientific_candle_replay import (
     ScientificCandleReplayArtifactAdapter,
@@ -444,8 +446,13 @@ class ReplayEvidenceReader(Protocol):
     ) -> tuple[Mapping[str, Any], ...]: ...
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class ReplayArtifactRetentionCollector(Protocol):
-    def collect(self, *, safe_to_remove_working: bool) -> object: ...
+    def collect(
+        self, *, safe_to_remove_working: bool
+    ) -> ReplayArtifactRetentionResult: ...
 
 
 ReplayProgressReporter = Callable[
@@ -471,6 +478,13 @@ class LocalReplayJobStore:
         probe = self.root / ".write-probe"
         _atomic_json(probe, {"ready": True})
         probe.unlink(missing_ok=True)
+        for path in sorted(self.root.glob("*/state.json")):
+            try:
+                _read_object(path)
+            except PermissionError as exc:
+                raise RuntimeError(
+                    f"replay job state is unreadable: {path}"
+                ) from exc
 
     def records(self) -> tuple[dict[str, Any], ...]:
         if not self.root.is_dir():
@@ -517,6 +531,7 @@ class ReplayJobManager:
         store: LocalReplayJobStore,
         max_workers: int = 1,
         retention: ReplayArtifactRetentionCollector | None = None,
+        maintenance_interval_seconds: float | None = None,
     ) -> None:
         self._runner = runner
         self._store = store
@@ -528,6 +543,10 @@ class ReplayJobManager:
         self._futures: dict[str, Future[None]] = {}
         self._single_worker = max_workers == 1
         self._retention = retention
+        self._maintenance_interval_seconds = maintenance_interval_seconds
+        self._maintenance_stop = Event()
+        self._maintenance_thread: Thread | None = None
+        self._last_retention_result: dict[str, Any] | None = None
 
     def readiness(self) -> tuple[bool, str | None]:
         try:
@@ -537,12 +556,50 @@ class ReplayJobManager:
             return False, str(exc)
 
     def recover(self) -> int:
+        self._store.ensure_ready()
         self._collect_retention(safe_to_remove_working=True)
         recovered = 0
         with self._lock:
-            for record in self._store.records():
-                if record.get("status") not in {"queued", "running"}:
-                    continue
+            active_records = [
+                record
+                for record in self._store.records()
+                if record.get("status") in {"queued", "running"}
+            ]
+            retained: list[dict[str, Any]] = []
+            by_request: dict[str, list[dict[str, Any]]] = {}
+            for record in active_records:
+                key = _request_key(record.get("request"))
+                by_request.setdefault(key, []).append(record)
+            for duplicates in by_request.values():
+                ordered = sorted(
+                    duplicates,
+                    key=lambda item: (
+                        0 if item.get("status") == "running" else 1,
+                        str(item.get("created_at", "")),
+                        str(item.get("job_id", "")),
+                    ),
+                )
+                retained.append(ordered[0])
+                for duplicate in ordered[1:]:
+                    now = _now()
+                    duplicate["status"] = "failed"
+                    duplicate["finished_at"] = now
+                    duplicate["updated_at"] = now
+                    duplicate["error"] = {
+                        "code": "replay_superseded_by_active_equivalent",
+                        "message": "An equivalent active replay already owns this request.",
+                    }
+                    duplicate["progress"] = _progress_payload(
+                        "failed",
+                        completed_units=int(
+                            _record_progress_payload(duplicate)["completed_units"]
+                        ),
+                        total_units=int(
+                            _record_progress_payload(duplicate)["total_units"]
+                        ),
+                    )
+                    self._store.save(duplicate)
+            for record in retained:
                 record["status"] = "queued"
                 record["recovered_after_restart"] = True
                 record["updated_at"] = _now()
@@ -552,6 +609,7 @@ class ReplayJobManager:
                 self._store.save(record)
                 self._schedule(str(record["job_id"]))
                 recovered += 1
+        self._start_maintenance()
         return recovered
 
     def submit(self, request: StartReplayRequest, idempotency_key: str) -> _Submission:
@@ -561,7 +619,8 @@ class ReplayJobManager:
         key_hash = _fingerprint({"idempotency_key": key})
         request_payload = request.model_dump(mode="json")
         with self._lock:
-            for existing in self._store.records():
+            records = self._store.records()
+            for existing in records:
                 if existing.get("idempotency_key_hash") != key_hash:
                     continue
                 if existing.get("request") != request_payload:
@@ -575,6 +634,12 @@ class ReplayJobManager:
                     self._store.save(existing)
                     self._schedule(str(existing["job_id"]))
                 return _Submission(existing, reused=True)
+            for existing in records:
+                if (
+                    existing.get("status") in {"queued", "running"}
+                    and existing.get("request") == request_payload
+                ):
+                    return _Submission(existing, reused=True)
             dataset_as_of = datetime.now(timezone.utc)
             dataset_fingerprint = self._runner.dataset_fingerprint(as_of=dataset_as_of)
             run_fingerprint = _fingerprint(
@@ -619,6 +684,9 @@ class ReplayJobManager:
         return self._store.load_result(job_id)
 
     def close(self) -> None:
+        self._maintenance_stop.set()
+        if self._maintenance_thread is not None:
+            self._maintenance_thread.join(timeout=2)
         self._executor.shutdown(wait=True, cancel_futures=False)
 
     def _schedule(self, job_id: str) -> None:
@@ -630,7 +698,7 @@ class ReplayJobManager:
     def _run(self, job_id: str) -> None:
         with self._lock:
             record = self._store.load(job_id)
-            if record is None or record.get("status") == "completed":
+            if record is None or record.get("status") not in {"queued", "running"}:
                 return
             record["status"] = "running"
             record["started_at"] = _now()
@@ -728,17 +796,69 @@ class ReplayJobManager:
             record["updated_at"] = record["progress"]["updated_at"]
             self._store.save(record)
 
+    def retention_status(self) -> Mapping[str, Any]:
+        return dict(
+            self._last_retention_result
+            or {
+                "status": "not_run",
+                "budget_satisfied": False,
+            }
+        )
+
+    def run_retention(self) -> Mapping[str, Any]:
+        self._collect_retention(safe_to_remove_working=self._single_worker)
+        return self.retention_status()
+
     def _collect_retention(self, *, safe_to_remove_working: bool) -> None:
         if self._retention is None:
             return
         try:
-            self._retention.collect(
+            result = self._retention.collect(
                 safe_to_remove_working=safe_to_remove_working,
             )
-        except Exception:
+            payload = asdict(result)
+            payload["status"] = (
+                "ok"
+                if result.skipped_reason is None and result.budget_satisfied
+                else "attention_required"
+            )
+            payload["updated_at"] = _now()
+            self._last_retention_result = payload
+            if payload["status"] != "ok":
+                LOGGER.warning("replay artifact retention requires attention: %s", payload)
+        except Exception as exc:
             # Retention is a best-effort outer-layer maintenance action.  It
             # must never change an already sealed replay success/failure state.
+            self._last_retention_result = {
+                "status": "failed",
+                "budget_satisfied": False,
+                "error": type(exc).__name__,
+                "updated_at": _now(),
+            }
+            LOGGER.exception("replay artifact retention failed")
+
+    def _start_maintenance(self) -> None:
+        interval = self._maintenance_interval_seconds
+        if interval is None or interval <= 0 or self._maintenance_thread is not None:
             return
+        self._maintenance_thread = Thread(
+            target=self._maintenance_loop,
+            name="replay-retention-maintenance",
+            daemon=True,
+        )
+        self._maintenance_thread.start()
+
+    def _maintenance_loop(self) -> None:
+        interval = self._maintenance_interval_seconds
+        if interval is None:
+            return
+        while not self._maintenance_stop.wait(interval):
+            active = any(
+                record.get("status") in {"queued", "running"}
+                for record in self._store.records()
+            )
+            if not active:
+                self._collect_retention(safe_to_remove_working=True)
 
 
 class IdempotencyConflict(RuntimeError):
@@ -1022,6 +1142,7 @@ class LocalHypothesisPortfolioRunner:
                     selected_hypotheses=requested_r2,
                     market_universe=request.liquid_universe,
                     target_universe=request.tickers or request.liquid_universe,
+                    observed_exchange_open_is_schedule_evidence=True,
                     policy=R2ExtensionPolicy(
                         cost_model_version=request.cost_model.version,
                         round_trip_cost_bps=request.cost_model.round_trip_bps,
@@ -1032,10 +1153,7 @@ class LocalHypothesisPortfolioRunner:
                 r2_report,
                 requested_r2,
                 cost_model_version=request.cost_model.version,
-                blocking_reason_codes=(
-                    "independent_evidence_gate_unavailable",
-                    "r2_reference_data_unavailable",
-                ),
+                blocking_reason_codes=("independent_evidence_gate_unavailable",),
             )
             engines.append(
                 {
@@ -1045,7 +1163,15 @@ class LocalHypothesisPortfolioRunner:
                     "artifact_fingerprint": r2_artifact.artifact_fingerprint,
                     "artifact_uri": r2_artifact.artifact_uri,
                     "resumed": False,
-                    "evidence_state": "blocked_by_data",
+                    "evidence_state": next(
+                        (
+                            item.get("decision", "blocked_by_data")
+                            for item in r2_artifact.evidence
+                            if item["hypothesis_id"]
+                            == R2ExtensionHypothesis.OPENING_GAP_REVERSION.value
+                        ),
+                        "blocked_by_data",
+                    ),
                 }
             )
             evidence.extend(r2_artifact.evidence)
@@ -1493,6 +1619,20 @@ def create_app(
             return {"status": "not_ready", "reason": reason or "unknown"}
         return {"status": "ready"}
 
+    @app.get(
+        "/internal/v1/hypothesis-replays/retention",
+        include_in_schema=False,
+    )
+    def retention_status() -> Mapping[str, Any]:
+        return manager.retention_status()
+
+    @app.post(
+        "/internal/v1/hypothesis-replays/retention",
+        include_in_schema=False,
+    )
+    def run_retention() -> Mapping[str, Any]:
+        return manager.run_retention()
+
     @app.post(
         "/internal/v1/hypothesis-replays",
         response_model=ReplayAcceptedResponse,
@@ -1601,6 +1741,7 @@ def build_app(
             state_root=state_dir,
             artifact_root=artifact_dir,
         ),
+        maintenance_interval_seconds=900,
     )
     return create_app(manager=manager, close_manager=True)
 
@@ -1774,6 +1915,12 @@ def _fingerprint(value: object) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _request_key(value: object) -> str:
+    if not isinstance(value, Mapping):
+        raise ValueError("replay request must be an object")
+    return _fingerprint(value)
 
 
 def _read_object(path: Path) -> dict[str, Any]:

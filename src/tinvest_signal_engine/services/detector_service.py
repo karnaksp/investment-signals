@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
 from tinvest_signal_engine.adapters.kafka_reliability import (
     KafkaDlqPublisher,
@@ -10,6 +12,7 @@ from tinvest_signal_engine.adapters.kafka_reliability import (
     ReliableDetectorRuntime,
     build_raw_consumer,
 )
+from tinvest_signal_engine.adapters.kafka_startup import seek_consumer_to_recent
 from tinvest_signal_engine.adapters.legacy_detection import (
     LegacyDetectionAdapter,
 )
@@ -20,12 +23,14 @@ from tinvest_signal_engine.adapters.reliability_metrics import (
     PrometheusReliabilityMetrics,
     start_reliability_metrics_server,
 )
+from tinvest_signal_engine.adapters.worker_health_file import WorkerHealthFileSink
 from tinvest_signal_engine.application.delivery_recovery import (
     DeliveryRecoveryGuard,
 )
 from tinvest_signal_engine.application.reliable_processing import (
     ReliableEventProcessor,
 )
+from tinvest_signal_engine.application.worker_health import WorkerHealthTracker
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.delivery_recovery import (
     DeliveryFreshnessPolicy,
@@ -61,8 +66,13 @@ def main() -> None:
         delivery_recovery_guard=delivery_recovery_guard,
     )
     publisher = KafkaSignalPublisher(settings)
+    consumer = build_raw_consumer(settings)
+    seek_consumer_to_recent(
+        consumer,
+        maximum_age_seconds=settings.kafka_first_boot_warmup_age_seconds,
+    )
     runtime = ReliableDetectorRuntime(
-        consumer=build_raw_consumer(settings),
+        consumer=consumer,
         processor=ReliableEventProcessor(
             detector=detector,
             store=store,
@@ -73,6 +83,18 @@ def main() -> None:
         dlq_publisher=KafkaDlqPublisher(settings),
         metrics=metrics,
         checkpoint=detector.checkpoint,
+        health=WorkerHealthTracker(
+            worker_id="detector",
+            sink=WorkerHealthFileSink(
+                Path(
+                    os.getenv("DETECTOR_HEALTH_SNAPSHOT_PATH")
+                    or "/tmp/detector-health.json"
+                )
+            ),
+            stale_after_seconds=int(
+                os.getenv("DETECTOR_HEALTH_STALE_AFTER_SECONDS") or "180"
+            ),
+        ),
     )
     logger.info("Starting reliable detector service")
     try:

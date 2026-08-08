@@ -8,12 +8,17 @@ from time import monotonic
 from typing import Any, Callable, Sequence
 
 from kafka import KafkaConsumer, KafkaProducer
+from kafka.errors import CommitFailedError, KafkaTimeoutError
 from kafka.structs import OffsetAndMetadata, TopicPartition
 
 from tinvest_signal_engine.application.observability import ReliabilityMetrics
 from tinvest_signal_engine.application.reliable_processing import (
     BrokerEvent,
     ReliableEventProcessor,
+)
+from tinvest_signal_engine.application.worker_health import (
+    NoopWorkerHealthReporter,
+    WorkerHealthReporter,
 )
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.data_quality import (
@@ -44,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 _DETECTOR_MAX_POLL_RECORDS = 500
 _DETECTOR_POLL_TIMEOUT_MS = 1_000
+_DETECTOR_MAX_POLL_INTERVAL_MS = 900_000
 
 
 def build_raw_consumer(settings: RuntimeSettings) -> KafkaConsumer:
@@ -54,6 +60,7 @@ def build_raw_consumer(settings: RuntimeSettings) -> KafkaConsumer:
         enable_auto_commit=False,
         group_id=settings.kafka_consumer_group,
         max_poll_records=_DETECTOR_MAX_POLL_RECORDS,
+        max_poll_interval_ms=_DETECTOR_MAX_POLL_INTERVAL_MS,
         value_deserializer=build_raw_value_deserializer(
             format_name=settings.kafka_raw_value_format,
         ),
@@ -152,6 +159,7 @@ class ReliableDetectorRuntime:
         dlq_publisher: KafkaDlqPublisher,
         metrics: ReliabilityMetrics,
         checkpoint: Callable[[], None],
+        health: WorkerHealthReporter | None = None,
     ) -> None:
         self._consumer = consumer
         self._processor = processor
@@ -159,15 +167,29 @@ class ReliableDetectorRuntime:
         self._dlq_publisher = dlq_publisher
         self._metrics = metrics
         self._checkpoint = checkpoint
+        self._health = health or NoopWorkerHealthReporter()
 
     def run(self) -> None:
         clean_shutdown = False
         try:
             while True:
-                self.run_once()
+                self._health.heartbeat()
+                try:
+                    processed = self.run_once()
+                except (CommitFailedError, KafkaTimeoutError):
+                    self._health.failed("kafka_commit_uncertain")
+                    logger.warning(
+                        "Detector Kafka commit became uncertain; rejoining "
+                        "before the next batch"
+                    )
+                    continue
+                self._health.succeeded(force=processed > 0)
         except KeyboardInterrupt:
             clean_shutdown = True
             logger.info("Detector service stopped by user")
+        except Exception:
+            self._health.failed("worker_cycle_failed")
+            raise
         finally:
             if clean_shutdown:
                 self._checkpoint()

@@ -23,7 +23,7 @@ from tinvest_signal_engine.domain.detector_observations import DetectorObservati
 from tinvest_signal_engine.serialization import parse_timestamp
 
 _MOSCOW = ZoneInfo("Europe/Moscow")
-_INSERT_SQL = "INSERT INTO detector_observations FORMAT JSONEachRow\n"
+_INSERT_SQL = "INSERT INTO detector_observations_v2 FORMAT JSONEachRow\n"
 _FINGERPRINT_FIELDS = frozenset(
     {
         "signal_type",
@@ -83,8 +83,14 @@ class ClickHouseDetectorObservationSink:
             )
             for row in rows
         )
+        query = {
+            "database": self._database,
+            "async_insert": "1",
+            "wait_for_async_insert": "1",
+            "date_time_input_format": "best_effort",
+        }
         request = Request(
-            f"{self._base_url}/?{urlencode({'database': self._database})}",
+            f"{self._base_url}/?{urlencode(query)}",
             data=body.encode("utf-8"),
             headers={
                 "Content-Type": "text/plain; charset=utf-8",
@@ -199,6 +205,5 @@ def _canonical_utc_timestamp(value: object) -> str:
     return (
         parse_timestamp(value)
         .astimezone(timezone.utc)
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
+        .strftime("%Y-%m-%d %H:%M:%S.%f")
     )

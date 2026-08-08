@@ -69,6 +69,7 @@ class R2ExtensionRequest:
     shortened_session_days: tuple[date, ...] = ()
     corporate_action_ticker_days: tuple[tuple[str, date], ...] = ()
     trading_gap_ticker_days: tuple[tuple[str, date], ...] = ()
+    observed_exchange_open_is_schedule_evidence: bool = False
 
     def __post_init__(self) -> None:
         if not self.selected_hypotheses:
@@ -102,6 +103,9 @@ class R2ExtensionRequest:
                 item.isoformat() for item in sorted(self.exchange_schedule_known_days)
             ),
             "market_universe": self.market_universe,
+            "observed_exchange_open_is_schedule_evidence": (
+                self.observed_exchange_open_is_schedule_evidence
+            ),
             "policy_fingerprint": self.policy.fingerprint,
             "selected_hypotheses": tuple(
                 (item.value, item.version) for item in self.selected_hypotheses
@@ -530,9 +534,13 @@ def _opening_candidates_for_ticker(
                 candles=current,
             )
         )
+        schedule_known = (
+            trading_day in known_days
+            or request.observed_exchange_open_is_schedule_evidence
+        )
         if (
             gap_bps is not None
-            and trading_day in known_days
+            and schedule_known
             and trading_day not in shortened_days
             and (ticker, trading_day) not in corporate_actions
         ):
@@ -581,7 +589,11 @@ def _opening_decision(
     request: R2ExtensionRequest,
 ) -> tuple[R2Decision, R2Reason]:
     day_key = (candidate.ticker, candidate.trading_day)
-    if candidate.trading_day not in frozenset(request.exchange_schedule_known_days):
+    if (
+        candidate.trading_day
+        not in frozenset(request.exchange_schedule_known_days)
+        and not request.observed_exchange_open_is_schedule_evidence
+    ):
         return R2Decision.ABSTAIN, R2Reason.EXCHANGE_SCHEDULE_UNKNOWN
     if candidate.trading_day in frozenset(request.shortened_session_days):
         return R2Decision.ABSTAIN, R2Reason.SHORTENED_SESSION
@@ -948,7 +960,7 @@ def _directional_outcome(
     policy: R2ExtensionPolicy,
 ) -> R2Outcome:
     target_at = feature.available_at + timedelta(seconds=feature.horizon_seconds)
-    if feature.decision is not R2Decision.MATCHED:
+    if feature.decision is R2Decision.ABSTAIN:
         return R2Outcome(
             observation_id=feature.observation_id,
             target_at=target_at,
@@ -958,13 +970,18 @@ def _directional_outcome(
             forward_return_bps=None,
             cost_adjusted_signed_return_bps=None,
         )
-    target = next(
+    tolerance_end = target_at + timedelta(
+        seconds=policy.outcome_candle_tolerance_seconds
+    )
+    target = min(
         (
             item
             for item in candles
-            if _candle_available_at(item) == target_at and item.complete
+            if target_at <= _candle_available_at(item) <= tolerance_end
+            and item.complete
         ),
-        None,
+        key=_candle_available_at,
+        default=None,
     )
     if target is None:
         return R2Outcome(
@@ -986,6 +1003,8 @@ def _directional_outcome(
         forward_return_bps=gross,
         cost_adjusted_signed_return_bps=(
             gross * feature.expected_direction - policy.round_trip_cost_bps
+            if feature.decision is R2Decision.MATCHED
+            else None
         ),
     )
 

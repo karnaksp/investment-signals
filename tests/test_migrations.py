@@ -146,11 +146,43 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
     expected = {
         "postgresql": (
             root / "postgres" / "migrations",
-            (100, 101, 102, 103, 104, 105, 106, 107, 108),
+            (
+                100,
+                101,
+                102,
+                103,
+                104,
+                105,
+                106,
+                107,
+                108,
+                109,
+                110,
+                111,
+                112,
+                113,
+                114,
+            ),
         ),
         "clickhouse": (
             root / "clickhouse" / "migrations",
-            (100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111),
+            (
+                100,
+                101,
+                102,
+                103,
+                104,
+                105,
+                106,
+                107,
+                108,
+                109,
+                110,
+                111,
+                112,
+                113,
+                114,
+            ),
         ),
     }
     for engine, (directory, versions) in expected.items():
@@ -160,6 +192,44 @@ def test_core_migration_directories_are_utf8_and_sequential() -> None:
         ).load()
         assert tuple(item.version for item in migrations) == versions
         assert all(len(item.checksum_sha256) == 32 for item in migrations)
+
+
+def test_native_detector_observation_migration_is_retry_safe_and_non_destructive() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "clickhouse"
+        / "migrations"
+        / "0113_native_detector_observations.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS signal_engine.detector_observations_v2" in sql
+    assert "observed_at DateTime64(9, 'UTC')" in sql
+    assert "PARTITION BY toYYYYMM(observed_at)" in sql
+    assert "INTERVAL 35 DAY DELETE" in sql
+    assert "LEFT ANTI JOIN" in sql
+    assert "observation_id = source.observation_id" in sql
+    assert "DROP TABLE" not in sql
+    assert "RENAME TABLE" not in sql
+    assert "EXCHANGE TABLES" not in sql
+
+
+def test_market_raw_kafka_reconfiguration_preserves_durable_events() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "clickhouse"
+        / "migrations"
+        / "0114_reconfigure_market_raw_kafka_queue.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "kafka_flush_interval_ms = 30000" in sql
+    assert "DROP TABLE IF EXISTS signal_engine.market_raw_consumer" in sql
+    assert "DROP TABLE IF EXISTS signal_engine.market_raw_kafka_queue" in sql
+    assert "DROP TABLE IF EXISTS signal_engine.market_raw_events" not in sql
+    assert "CREATE MATERIALIZED VIEW IF NOT EXISTS" in sql
 
 
 def test_clickhouse_splitter_preserves_semicolons_in_literals() -> None:
@@ -223,6 +293,122 @@ def test_detector_state_snapshot_is_versioned_and_broker_monotonic() -> None:
     assert "NEW.offset_id <= OLD.offset_id" in sql
     assert "detector_state_snapshots_advance_guard" in sql
     assert "detector_state_snapshots_delete_guard" in sql
+
+
+def test_reliable_processing_storage_tuning_allows_hot_snapshot_updates() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0109_tune_reliable_processing_storage.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8")
+
+    assert "detector_state_snapshots_source_event_id_key" in sql
+    assert "detector_state_snapshots_topic_partition_id_offset_id_key" in sql
+    assert "DROP INDEX IF EXISTS processed_events_processed_at_idx" in sql
+    assert "fillfactor = 70" in sql
+    assert "toast.autovacuum_vacuum_scale_factor = 0.01" in sql
+
+
+def test_processed_event_retention_initially_uses_compact_brin_index() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0110_bound_processed_event_retention.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8").lower()
+
+    assert "using brin (processed_at)" in sql
+    assert "pages_per_range = 32" in sql
+    assert "detector_observation_outbox_source_event_idx" in sql
+
+
+def test_processed_event_retention_promotes_ordered_purge_to_btree() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0114_index_processed_event_retention.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8").lower()
+
+    create_position = sql.index("create index if not exists")
+    drop_position = sql.index("drop index if exists")
+    assert "processed_events_retention_idx" in sql
+    assert "on processed_events (processed_at)" in sql
+    assert "using brin" not in sql
+    assert "drop index if exists processed_events_processed_at_brin_idx" in sql
+    assert create_position < drop_position
+
+
+def test_live_retention_has_published_index_and_bounded_snapshot_vacuum() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0111_optimize_live_retention.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8").lower()
+
+    assert "detector_observation_outbox_published_retention_idx" in sql
+    assert "where status = 'published'" in sql
+    assert "interval '24 hours'" in sql
+    assert "autovacuum_vacuum_threshold = 10000" in sql
+    assert "autovacuum_analyze_threshold = 50000" in sql
+
+
+def test_detector_snapshot_vacuum_is_bounded_after_compression() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0112_bound_detector_snapshot_vacuum.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8").lower()
+
+    assert "autovacuum_vacuum_threshold = 1000" in sql
+    assert "toast.autovacuum_vacuum_threshold = 5000" in sql
+    assert "autovacuum_vacuum_cost_delay = 10" in sql
+    assert "autovacuum_vacuum_cost_limit = 500" in sql
+
+
+def test_detector_snapshot_toast_vacuum_has_its_own_cpu_budget() -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0113_throttle_snapshot_toast_vacuum.up.sql"
+    )
+    sql = path.read_text(encoding="utf-8").lower()
+
+    assert "toast.autovacuum_vacuum_cost_delay = 20" in sql
+    assert "toast.autovacuum_vacuum_cost_limit = 200" in sql
+
+
+def test_hot_snapshot_pointer_is_not_reindexed_by_later_migrations() -> None:
+    directory = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "postgres"
+        / "migrations"
+    )
+    later_sql = "\n".join(
+        path.read_text(encoding="utf-8").lower()
+        for path in sorted(directory.glob("01*.up.sql"))
+        if int(path.name[:4]) > 109
+    )
+
+    # source_event_id changes on every snapshot UPSERT. Indexing it disables
+    # HOT updates and recreates TOAST/index churn on the hottest table.
+    assert "on detector_state_snapshots (source_event_id)" not in later_sql
 
 
 def test_detector_config_acknowledgement_migration_is_runtime_proof() -> None:
@@ -352,3 +538,17 @@ def test_live_shadow_migration_adds_lossless_versioned_payload_fields() -> None:
     assert "measurements_json String DEFAULT '{}'" in migration
     assert "evidence_fingerprint String DEFAULT ''" in migration
     assert migration.count("ADD COLUMN IF NOT EXISTS") == 4
+
+
+def test_clickhouse_inactive_part_retention_is_bounded_for_live_tables() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "sql"
+        / "clickhouse"
+        / "migrations"
+        / "0112_bound_inactive_part_retention.up.sql"
+    ).read_text(encoding="utf-8")
+
+    assert migration.count("old_parts_lifetime = 60") == 10
+    assert "market_raw_events" in migration
+    assert "scientific_hypothesis_observations" in migration

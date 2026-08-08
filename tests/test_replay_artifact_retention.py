@@ -8,6 +8,9 @@ from pathlib import Path
 from tinvest_signal_engine.adapters.replay_artifact_retention import (
     LocalReplayArtifactRetention,
 )
+from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import (
+    FileScientificCombinationStreamingArtifacts,
+)
 from tinvest_signal_engine.application.replay_artifact_retention import (
     ReplayArtifactKind,
     ReplayRetentionArtifact,
@@ -32,14 +35,14 @@ def test_active_artifacts_are_preserved_while_terminal_raw_is_removed(
     active_raw = _raw(artifact_root, active, "scientific-combinations/source")
     completed_raw = _raw(artifact_root, completed, "scientific-combinations/source")
 
-    result = _collector(state_root, artifact_root).collect(
-        safe_to_remove_working=False
-    )
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
 
     assert active_raw.is_dir()
     assert not completed_raw.exists()
     assert result.skipped_reason is None
-    assert completed.job_id in (state_root / completed.job_id / "state.json").read_text()
+    assert (
+        completed.job_id in (state_root / completed.job_id / "state.json").read_text()
+    )
     assert (state_root / completed.job_id / "result.json").is_file()
 
 
@@ -55,9 +58,7 @@ def test_malformed_state_preserves_owned_artifacts_but_stale_working_is_always_c
     working = artifact_root / ".replay-working" / "candle-partitions-stale"
     _payload(working)
 
-    result = _collector(state_root, artifact_root).collect(
-        safe_to_remove_working=True
-    )
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=True)
 
     assert raw.is_dir()
     assert not working.exists()
@@ -70,9 +71,7 @@ def test_success_and_failure_cleanup_is_idempotent(tmp_path: Path) -> None:
     failed = _job(2, ReplayRetentionStatus.FAILED)
     _write_job(state_root, completed, engines=[])
     _write_job(state_root, failed)
-    completed_raw = _raw(
-        artifact_root, completed, "scientific-combinations/source"
-    )
+    completed_raw = _raw(artifact_root, completed, "scientific-combinations/source")
     failed_spool = _raw(artifact_root, failed, "prospective-spool")
 
     collector = _collector(state_root, artifact_root)
@@ -101,9 +100,7 @@ def test_only_two_newest_completed_sealed_sets_are_kept(tmp_path: Path) -> None:
             engines=[{"engine": "fixture", "artifact_uri": str(path.resolve())}],
         )
 
-    result = _collector(state_root, artifact_root).collect(
-        safe_to_remove_working=False
-    )
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
 
     assert not sealed[0].exists()
     assert sealed[1].is_dir()
@@ -209,9 +206,7 @@ def test_escaping_result_uri_fails_closed(tmp_path: Path) -> None:
         engines=[{"engine": "fixture", "artifact_uri": str(outside.resolve())}],
     )
 
-    result = _collector(state_root, artifact_root).collect(
-        safe_to_remove_working=False
-    )
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
 
     assert raw.is_dir()
     assert outside.is_dir()
@@ -229,9 +224,7 @@ def test_symlink_inside_candidate_is_never_followed_or_removed(
     raw = _raw(artifact_root, completed, "scientific-combinations/source")
     os.symlink(outside, raw / "unsafe-link")
 
-    result = _collector(state_root, artifact_root).collect(
-        safe_to_remove_working=False
-    )
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
 
     assert raw.is_dir()
     assert outside.read_text(encoding="utf-8") == "preserve"
@@ -245,12 +238,78 @@ def test_unknown_raw_ownership_is_preserved(tmp_path: Path) -> None:
     unknown = artifact_root / "scientific-combinations/source" / ("f" * 64)
     _payload(unknown)
 
-    result = _collector(state_root, artifact_root).collect(
-        safe_to_remove_working=False
-    )
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
 
     assert unknown.is_dir()
     assert result.deleted_paths == ()
+
+
+def test_expired_orphan_raw_is_removed_only_without_active_jobs(
+    tmp_path: Path,
+) -> None:
+    state_root, artifact_root = tmp_path / "jobs", tmp_path / "artifacts"
+    completed = _job(1, ReplayRetentionStatus.COMPLETED)
+    _write_job(state_root, completed, engines=[])
+    orphan = artifact_root / "scientific-combinations/source" / ("f" * 64)
+    _payload(orphan)
+    old = (NOW - timedelta(days=8)).timestamp()
+    for path in (orphan / "payload.bin", orphan):
+        os.utime(path, (old, old))
+
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
+
+    assert not orphan.exists()
+    assert result.deleted_paths == ("scientific-combinations/source/" + "f" * 64,)
+
+
+def test_expired_orphan_raw_is_preserved_during_active_replay(
+    tmp_path: Path,
+) -> None:
+    state_root, artifact_root = tmp_path / "jobs", tmp_path / "artifacts"
+    active = _job(1, ReplayRetentionStatus.RUNNING)
+    _write_job(state_root, active)
+    orphan = artifact_root / "scientific-combinations/source" / ("f" * 64)
+    _payload(orphan)
+    old = (NOW - timedelta(days=8)).timestamp()
+    for path in (orphan / "payload.bin", orphan):
+        os.utime(path, (old, old))
+
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
+
+    assert orphan.is_dir()
+    assert result.deleted_paths == ()
+
+
+def test_unreferenced_completed_combination_is_compacted_fail_safe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_root, artifact_root = tmp_path / "jobs", tmp_path / "artifacts"
+    completed = _job(1, ReplayRetentionStatus.COMPLETED)
+    _write_job(state_root, completed, engines=[])
+    orphan = artifact_root / "scientific-combinations/evidence" / ("f" * 64)
+    orphan.mkdir(parents=True)
+    (orphan / "completion.json").write_text("{}", encoding="utf-8")
+    compacted: list[Path] = []
+
+    def compact_once(
+        _self: FileScientificCombinationStreamingArtifacts,
+        path: str | Path,
+    ) -> bool:
+        compacted.append(Path(path))
+        return True
+
+    monkeypatch.setattr(
+        FileScientificCombinationStreamingArtifacts,
+        "compact_completed",
+        compact_once,
+    )
+
+    result = _collector(state_root, artifact_root).collect(safe_to_remove_working=False)
+
+    assert compacted == [orphan]
+    assert result.compacted_paths == ("scientific-combinations/evidence/" + "f" * 64,)
+    assert orphan.is_dir()
 
 
 def _collector(

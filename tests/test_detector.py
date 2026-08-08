@@ -144,14 +144,51 @@ class SignalDetectorTest(unittest.TestCase):
             signal for signal in emitted if signal.signal_type == "volume_spike"
         )
         self.assertIsNotNone(volume.payload["baseline_volatility_bps"])
-        self.assertEqual(volume.payload["baseline_volatility_horizon_seconds"], 60)
+        self.assertEqual(volume.payload["baseline_volatility_horizon_seconds"], 180)
         self.assertEqual(
             volume.payload["baseline_volatility_estimator"],
             "tick_realized_rv",
         )
         self.assertEqual(
             volume.payload["baseline_volatility_estimator_version"],
-            "1.0.0",
+            "2.0.0",
+        )
+
+    def test_suppressed_window_updates_history_without_consuming_cooldown(self) -> None:
+        detector = SignalDetector(
+            DetectorSettings(
+                sample_every_seconds=5,
+                min_baseline_points=5,
+                baseline_points=20,
+                trade_window_seconds=60,
+                price_window_seconds=60,
+                alert_cooldown_seconds=900,
+            )
+        )
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for index in range(6):
+            detector.process(
+                _trade_event(
+                    ts=start + timedelta(seconds=index * 5),
+                    quantity=100,
+                    price=100.0,
+                ),
+                emit_signals=False,
+            )
+
+        suppressed = detector.process(
+            _trade_event(
+                ts=start + timedelta(seconds=35),
+                quantity=3_000,
+                price=101.0,
+            ),
+            emit_signals=False,
+        )
+
+        self.assertEqual(suppressed, [])
+        self.assertEqual(
+            detector._states["SBER_TQBR"].last_alert_at,
+            {},
         )
 
     def test_activity_baseline_is_successive_return_volatility(self) -> None:
@@ -250,7 +287,7 @@ class SignalDetectorTest(unittest.TestCase):
         self.assertEqual(price_jump.payload["current_price"], 102.0)
         self.assertIsNotNone(price_jump.payload["baseline_volatility_bps"])
         self.assertEqual(
-            price_jump.payload["baseline_volatility_horizon_seconds"], 60
+            price_jump.payload["baseline_volatility_horizon_seconds"], 180
         )
         self.assertEqual(
             price_jump.payload["baseline_volatility_observed_until"],
@@ -262,7 +299,7 @@ class SignalDetectorTest(unittest.TestCase):
         )
         self.assertEqual(
             price_jump.payload["baseline_volatility_estimator_version"],
-            "1.0.0",
+            "2.0.0",
         )
 
     def test_min_relative_metric_excursion_blocks_flat_baseline_spike(self) -> None:
@@ -447,6 +484,19 @@ class SignalDetectorTest(unittest.TestCase):
         self.assertIn("points_awarded", detail)
         self.assertIn("flags", detail)
         self.assertEqual(detail.get("freshness_seconds"), 30)
+        self.assertGreater(combo.payload["baseline_volatility_bps"], 0)
+        self.assertEqual(
+            combo.payload["baseline_volatility_horizon_seconds"],
+            180,
+        )
+        self.assertEqual(
+            combo.payload["baseline_volatility_estimator"],
+            "tick_realized_rv",
+        )
+        self.assertEqual(
+            combo.payload["baseline_volatility_estimator_version"],
+            "2.0.0",
+        )
 
     def test_orderbook_spoofing_bid_pull_is_emitted(self) -> None:
         detector = SignalDetector(

@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-08-08
+
+- Теневое наблюдение переведено на решения и зрелые исходы реального времени;
+  исторический replay больше не определяет операционный статус живых правил.
+- Добавлены безопасная ежедневная адаптивная калибровка, отдельный утренний
+  retracement worker и восстановление Kafka consumer с зафиксированного offset.
+- Ограничено накопление `detector_observation_outbox`, `processed_events` и
+  snapshot-таблиц; добавлены индексированные batch-retention и настройки vacuum.
+- ClickHouse ingestion переведён на более крупные пачки, native observation
+  storage и ограниченное число фоновых merges без `OPTIMIZE FINAL`.
+- Delivery различает постоянные ошибки конфигурации и временные сетевые сбои;
+  рабочие процессы публикуют heartbeat для честного операционного статуса.
+- Добавлена tag-driven SemVer-публикация: каждый тег `vMAJOR.MINOR.PATCH`
+  проверяется полным CI до создания GitHub Release.
 
 - Admin Cockpit screenshot script синхронизирован с текущими routes: `triage`, `signals`, `delivery`, `calibration`, `instruments`, `accuracy` и `settings`.
 - Добавлена CI smoke validation для Docker/Compose production runtime image.

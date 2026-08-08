@@ -8,6 +8,7 @@ from typing import Callable, Protocol
 
 from tinvest_signal_engine.domain.ingestor_health import (
     INGESTOR_CONNECTING,
+    INGESTOR_SCHEDULED_SLEEP,
     IngestorHealthSnapshot,
 )
 
@@ -25,11 +26,12 @@ class IngestorHealthTracker:
         store: IngestorHealthSnapshotStore,
         clock: Callable[[], datetime],
         stale_after_seconds: int,
+        initial_snapshot: IngestorHealthSnapshot | None = None,
     ) -> None:
         self._store = store
         self._clock = clock
         self._lock = RLock()
-        self._snapshot = IngestorHealthSnapshot.starting(
+        self._snapshot = initial_snapshot or IngestorHealthSnapshot.starting(
             started_at=self._clock(),
             stale_after_seconds=stale_after_seconds,
         )
@@ -65,6 +67,16 @@ class IngestorHealthTracker:
                     market_event_at=market_event_at,
                 )
             )
+
+    def sleeping(
+        self,
+        *,
+        configured_instruments: int,
+    ) -> IngestorHealthSnapshot:
+        return self.connecting(
+            configured_instruments=configured_instruments,
+            reason_code=INGESTOR_SCHEDULED_SLEEP,
+        )
 
     def publish_succeeded(
         self,

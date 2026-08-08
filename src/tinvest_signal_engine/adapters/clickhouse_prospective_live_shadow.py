@@ -186,11 +186,19 @@ class ClickHouseProspectiveLiveSnapshotSource:
         self,
         *,
         as_of: datetime,
+        observed_until: datetime | None = None,
         policy: ProspectiveScientificPolicy,
         limit: int,
         instrument_ids: tuple[str, ...] | None = None,
     ) -> tuple[ProspectivePortfolioSnapshot, ...]:
         cutoff = _aware_utc(as_of, "as_of")
+        candle_until = (
+            cutoff
+            if observed_until is None
+            else _aware_utc(observed_until, "observed_until")
+        )
+        if candle_until > cutoff:
+            raise ValueError("observed_until cannot be after as_of")
         if limit <= 0:
             raise ValueError("snapshot limit must be positive")
         selected = (
@@ -212,7 +220,7 @@ class ClickHouseProspectiveLiveSnapshotSource:
                     self._client,
                     as_of=cutoff,
                     lookback_start=cutoff - timedelta(days=lookback_days),
-                    candle_until=cutoff,
+                    candle_until=candle_until,
                     instrument_id=instrument_id,
                     query_kind="history",
                 )
@@ -682,6 +690,7 @@ def _har_parameters(
     policy: ProspectiveScientificPolicy,
 ) -> HarV2Parameters | None:
     short, medium, long_window = policy.har_windows_minutes
+    current_observed_at = _observed_at(candles[current_index])
     training: list[HarV2TrainingPoint] = []
     for index, candle in enumerate(candles[:current_index]):
         if _observed_at(candle).minute % 30:
@@ -690,11 +699,15 @@ def _har_parameters(
         future = _future_window(candles, index, policy.har_horizon_seconds // 60)
         if window is None or future is None:
             continue
+        target_at = _observed_at(candle) + timedelta(
+            seconds=policy.har_horizon_seconds
+        )
+        if target_at >= current_observed_at:
+            continue
         training.append(
             HarV2TrainingPoint(
                 feature_at=_observed_at(candle),
-                target_at=_observed_at(candle)
-                + timedelta(seconds=policy.har_horizon_seconds),
+                target_at=target_at,
                 short_variance=_realized_variance(window[-short:]),
                 medium_variance=_realized_variance(window[-medium:]),
                 long_variance=_realized_variance(window),

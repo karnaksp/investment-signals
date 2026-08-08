@@ -20,6 +20,7 @@ from tinvest_signal_engine.application.reliable_processing import (
 from tinvest_signal_engine.application.observation_publication import (
     ObservationPublicationTask,
 )
+from tinvest_signal_engine.application.delivery import DeliveryLeaseLost
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.detector_observations import DetectorObservation
 from tinvest_signal_engine.domain.reliable_processing import (
@@ -548,6 +549,8 @@ class PostgresDeliveryQueue:
                 """,
                 (delivered_at, task.outbox_id, task.attempt_count),
             )
+            if cursor.rowcount != 1:
+                raise DeliveryLeaseLost("delivery claim was lost before completion")
 
     def mark_failed(
         self,
@@ -575,6 +578,8 @@ class PostgresDeliveryQueue:
                     task.attempt_count,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise DeliveryLeaseLost("delivery claim was lost before failure mark")
 
     def get_for_manual_retry(
         self, *, outbox_id: str
@@ -712,23 +717,61 @@ class PostgresObservationPublicationQueue:
         )
 
     def purge_published(self, *, before: datetime, limit: int) -> int:
-        if limit < 1 or limit > 10_000:
-            raise ValueError("observation purge limit must be between 1 and 10000")
+        if limit < 1 or limit > 100_000:
+            raise ValueError("observation purge limit must be between 1 and 100000")
         with self._connection.cursor() as cursor:
             cursor.execute(
                 """
-                WITH purgeable AS (
+                WITH purgeable AS MATERIALIZED (
                     SELECT observation_id
                     FROM detector_observation_outbox
                     WHERE status = 'published'
                       AND published_at < %s
-                      AND published_at < now() - INTERVAL '7 days'
+                      AND published_at < now() - INTERVAL '24 hours'
                     ORDER BY published_at, observation_id
                     LIMIT %s
                 )
                 DELETE FROM detector_observation_outbox AS target
                 USING purgeable
                 WHERE target.observation_id = purgeable.observation_id
+                """,
+                (before, limit),
+            )
+            return int(cursor.rowcount)
+
+    def purge_processed_events(self, *, before: datetime, limit: int) -> int:
+        """Bound the Kafka inbox without removing rows still used by state."""
+
+        if limit < 1 or limit > 100_000:
+            raise ValueError(
+                "processed event purge limit must be between 1 and 100000"
+            )
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH snapshot_events AS MATERIALIZED (
+                    SELECT source_event_id
+                    FROM detector_state_snapshots
+                    WHERE source_event_id IS NOT NULL
+                ),
+                purgeable AS MATERIALIZED (
+                    SELECT inbox.ctid
+                    FROM processed_events AS inbox
+                    LEFT JOIN snapshot_events AS snapshot
+                      ON snapshot.source_event_id = inbox.event_id
+                    WHERE inbox.processed_at < %s
+                      AND snapshot.source_event_id IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM detector_observation_outbox AS outbox
+                          WHERE outbox.source_event_id = inbox.event_id
+                      )
+                    ORDER BY inbox.processed_at
+                    LIMIT %s
+                )
+                DELETE FROM processed_events AS target
+                USING purgeable
+                WHERE target.ctid = purgeable.ctid
                 """,
                 (before, limit),
             )

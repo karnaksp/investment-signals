@@ -26,7 +26,8 @@ from tinvest_signal_engine.domain.morning_retracement_signal import (
 
 
 MOSCOW = ZoneInfo("Europe/Moscow")
-MAX_RECOMMENDATION_STALENESS = timedelta(minutes=2)
+COMPLETED_CANDLE_DURATION = timedelta(minutes=1)
+MAX_COMPLETED_CANDLE_DELAY = timedelta(minutes=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,16 +132,16 @@ class GenerateMorningRetracementRecommendations:
                     if formal_signal
                     else settings.monitor_until_local_minute
                 )
-                and (not formal_signal or _local_minute(row) % 5 == 0)
             )
         )
         if not decision_rows:
             return None
         latest = decision_rows[-1]
-        effective_as_of = as_of or series.current_session[-1].at
+        effective_as_of = as_of or _completed_at(series.current_session[-1])
+        latest_completed_at = _completed_at(latest)
         if (
-            effective_as_of < latest.at
-            or effective_as_of - latest.at > MAX_RECOMMENDATION_STALENESS
+            effective_as_of < latest_completed_at
+            or effective_as_of - latest_completed_at > MAX_COMPLETED_CANDLE_DELAY
         ):
             return None
         local_minute = _local_minute(latest)
@@ -171,12 +172,18 @@ class GenerateMorningRetracementRecommendations:
         )
         relative_volume = float(morning_features["morning_relative_volume"])
         active_ratio = float(morning_features["morning_active_minute_ratio"])
+        current_retracement_fraction = float(
+            morning_features["current_retracement_fraction"]
+        )
         features: dict[str, float | str] = {
             **causal_previous_session_feature_values(series.previous_session),
             **morning_features,
             "ticker": series.ticker,
         }
         probability = self._policy.model.probability(features)
+        non_loss_probability = (
+            self._policy.effective_non_loss_model.probability(features)
+        )
         target_price = snapshot.target_price(self._policy.target_fraction)
         remaining_move_bps = max(
             0.0,
@@ -190,18 +197,34 @@ class GenerateMorningRetracementRecommendations:
             relative_volume=relative_volume,
             active_minute_ratio=active_ratio,
             policy=self._policy,
+            non_loss_probability=non_loss_probability,
         )
         reasons: list[str] = []
         if snapshot.excursion_bps < settings.minimum_excursion_bps:
             reasons.append("excursion_below_minimum")
-        if self._policy.require_volume_baseline and not baseline_available:
+        if (
+            self._policy.require_volume_baseline
+            or settings.minimum_relative_volume > 0.0
+        ) and not baseline_available:
             reasons.append("volume_baseline_unavailable")
         if baseline_available and relative_volume > settings.maximum_relative_volume:
             reasons.append("relative_volume_above_maximum")
+        if baseline_available and relative_volume < settings.minimum_relative_volume:
+            reasons.append("relative_volume_below_minimum")
         if active_ratio < settings.minimum_active_minute_ratio:
             reasons.append("active_minute_ratio_below_minimum")
+        if (
+            current_retracement_fraction
+            < settings.minimum_current_retracement_fraction
+        ):
+            reasons.append("current_retracement_below_minimum")
         if probability < settings.probability_threshold:
             reasons.append("probability_below_threshold")
+        non_loss_threshold = (
+            settings.effective_non_loss_probability_threshold(self._policy)
+        )
+        if non_loss_probability < non_loss_threshold:
+            reasons.append("non_loss_probability_below_threshold")
         if remaining_move_bps < settings.minimum_remaining_move_bps:
             reasons.append("remaining_move_below_minimum")
         if local_minute > settings.last_decision_local_minute:
@@ -227,9 +250,25 @@ class GenerateMorningRetracementRecommendations:
             expected_hit_minutes_median=self._policy.expected_hit_minutes_median,
             expected_hit_minutes_p75=self._policy.expected_hit_minutes_p75,
             training_window_ended=local_minute > 10 * 60,
+            non_loss_probability_threshold=non_loss_threshold,
+            non_loss_model_fingerprint=(
+                self._policy.effective_non_loss_model.fingerprint
+            ),
+            target_fraction=self._policy.target_fraction,
+            current_retracement_fraction=current_retracement_fraction,
+            minimum_current_retracement_fraction=(
+                settings.minimum_current_retracement_fraction
+            ),
+            minimum_relative_volume=settings.minimum_relative_volume,
         )
 
 
 def _local_minute(candle: HistoricalCandle) -> int:
     local = candle.at.astimezone(MOSCOW)
     return local.hour * 60 + local.minute
+
+
+def _completed_at(candle: HistoricalCandle) -> datetime:
+    """Return when the complete one-minute candle first became observable."""
+
+    return candle.at + COMPLETED_CANDLE_DURATION

@@ -12,6 +12,7 @@ import ipaddress
 import json
 import socket
 import ssl
+import time
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -220,7 +221,14 @@ class TelegramMultiAddressHttpClient:
         path = parsed.path or "/"
         if parsed.query:
             path = f"{path}?{parsed.query}"
+        deadline = time.monotonic() + self._timeout_seconds
         for address in addresses:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise httpx.ConnectTimeout(
+                    "Telegram API address attempts exceeded total deadline",
+                    request=request,
+                )
             try:
                 raw = self._requester.post(
                     hostname=_TELEGRAM_API_HOST,
@@ -228,7 +236,7 @@ class TelegramMultiAddressHttpClient:
                     address=address,
                     path=path,
                     payload=json,
-                    timeout_seconds=self._timeout_seconds,
+                    timeout_seconds=remaining_seconds,
                 )
             except TelegramAddressConnectionError as error:
                 last_connect_error = error

@@ -23,6 +23,10 @@ class DeliveryFailure(RuntimeError):
         self.reason_code = reason_code
 
 
+class DeliveryLeaseLost(RuntimeError):
+    """The claimed outbox row no longer belongs to this attempt."""
+
+
 class DeliveryQueue(Protocol):
     def claim(
         self,

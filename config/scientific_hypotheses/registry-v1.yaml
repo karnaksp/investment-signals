@@ -415,6 +415,48 @@ hypotheses:
       data_split_policy: Chronological training and sequential calibration; later periods remain visible diagnostics and are not a prerequisite for an observed recommendation
       multiple_testing_policy: Fixed model, execution, probability, and operational-filter grids; selection on the calibration period; all failed candidates retained
 
+  - hypothesis_id: h1-morning-low-volume-reversion
+    version: "2.3.0"
+    title: Избирательный возврат четверти утреннего отклонения после начавшегося разворота
+    origin: research_extension
+    source_ids: [heston-korajczyk-sadka-2010, jegadeesh-titman-1995, kitapbayev-leung-2017, lipton-lopez-de-prado-2020]
+    testable_statement: Если с 07:00 до 10:00 акция существенно отклонилась от предыдущего закрытия, уже вернула не менее 10% известного отклонения, сохраняет достаточную минутную активность и две причинные модели оценивают достижение R25 и результат без чистого убытка выше зафиксированных порогов, система может показать исследовательскую рекомендацию против отклонения до 11:00.
+    economic_mechanism: Начавшийся разворот служит наблюдаемым подтверждением исчерпания временного утреннего давления; фильтр активности отсекает разрывы на единичных сделках, а отдельная модель неубытка ограничивает случаи, где вероятность касания цели скрывает неприемлемый путь цены.
+    market_phase: morning_0700_1000
+    trigger_conditions:
+      - running excursion is measured causally every five minutes without future extrema
+      - "analytical excursion >= max(10 bps, 2 ticks)"
+      - remaining gross move from snapshot price to R25 >= 2 x round trip cost
+      - current retracement from the running extreme >= 0.10
+      - historical cumulative volume baseline is available
+      - cumulative relative volume is between 0.50 and 10.00
+      - active minute ratio >= 0.50
+      - target logistic probability >= 0.82
+      - non-loss logistic probability >= 0.92
+    expected_direction: path_reversion_from_running_extreme
+    horizon_seconds: [360, 810, 1860, 13500]
+    abstention_conditions: [missing_previous_close, historical_volume_baseline_unavailable, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, remaining_target_move_below_twice_round_trip_cost, current_retracement_below_0_10, cumulative_relative_volume_below_0_50, cumulative_relative_volume_above_10_00, active_minute_ratio_below_0_50, target_probability_below_0_82, non_loss_probability_below_0_92]
+    falsification_criterion: В последовательном накоплении вероятность R25 или результата без чистого убытка опускается ниже отображаемой консервативной границы, медианный результат после удвоенного проскальзывания становится неположительным либо результат концентрируется в одном инструменте.
+    original_market_result: На полном доступном режиме утренней сессии высокоточный компактный вариант дал 48 достижений R25 и 48 результатов без чистого убытка в 50 независимых эпизодах по 19 инструментам. Те же частоты 96% сохранились при удвоенном проскальзывании, однако выборка охватывает только 21 день, а нижняя дневная граница 87,9%, поэтому версия остаётся исследовательской.
+    evidence_level: researching
+    lifecycle: evaluated
+    scientific_claim: true
+    preregistration:
+      registration_id: prereg-h1-v2-3-prospective
+      hypothesis_id: h1-morning-low-volume-reversion
+      hypothesis_version: "2.3.0"
+      sealed_at: "2026-07-29T12:30:00+03:00"
+      expected_direction: path_reversion_from_running_extreme
+      feature_definitions: [all morning features end at the decision snapshot, current retracement uses only the running extreme known at the snapshot, cumulative relative volume uses only prior trading days for the same instrument and minute, one earliest threshold crossing is allowed per ticker-day, target and non-loss probabilities use separately sealed logistic models, final morning extreme is label-only]
+      thresholds: {analytical_floor_bps: 10.0, tradable_excursion_multiple_of_round_trip_cost: 4.0, remaining_target_move_multiple_of_round_trip_cost: 2.0, target_fraction: 0.25, stop_extension_fraction: 0.40, break_even_trigger_fraction: 0.15, deadline_moscow: "11:00", minimum_current_retracement_fraction: 0.10, minimum_cumulative_relative_volume: 0.50, maximum_cumulative_relative_volume: 10.00, minimum_active_minute_ratio: 0.50, target_probability_min: 0.82, non_loss_probability_min: 0.92, minimum_validated_events: 300, minimum_validated_days: 30}
+      market_phase: morning_0700_1000
+      horizon_seconds: [360, 810, 1860, 13500]
+      success_criterion: An observed recommendation always shows current target and non-loss model probabilities, historical rates, conservative lower estimates, sample size and expected hit window; validated status additionally requires 300 independent ticker-days and 30 trading days, target rate >=0.90 with day-clustered lower >=0.80, non-loss rate >=0.95 with day-clustered lower >=0.90, and positive median net bps after doubled slippage.
+      abstention_conditions: [missing_previous_close, historical_volume_baseline_unavailable, incomplete_path_to_1100, no_next_minute_entry, target_already_crossed_before_entry, remaining_target_move_below_twice_round_trip_cost, current_retracement_below_0_10, relative_volume_outside_0_50_10_00, active_minute_ratio_below_0_50, target_probability_below_0_82, non_loss_probability_below_0_92]
+      cost_model_version: "1.0.0"
+      data_split_policy: First 60% chronological trading days train both models; the following 40% are sequential evaluation and threshold discovery for an explicitly research-only recommendation
+      multiple_testing_policy: Fixed execution and model grids; all frontier candidates are retained; version 2.3.0 is sealed before prospective use and any threshold change creates a new version
+
   - hypothesis_id: h2-morning-high-volume-continuation
     version: "1.0.0"
     title: Продолжение утреннего отклонения при подтверждающем объёме
@@ -1366,4 +1408,35 @@ replication_evidence:
     abstention_rate: null
     success_rate: 0.7222222222222222
     success_wilson_lower: 0.5774647887323944
+  - evidence_id: evidence-h1-v2-3-competing-outcomes-20260729
+    hypothesis_id: h1-morning-low-volume-reversion
+    hypothesis_version: "2.3.0"
+    market: Moscow Exchange TQBR
+    observed_at: "2026-07-29T12:30:00+03:00"
+    result: inconclusive
+    independent_validation: false
+    trading_days: 21
+    eligible_events: 50
+    cost_adjusted: true
+    matched_controls_applied: false
+    multiple_testing_applied: true
+    stability_checked: false
+    mean_net_bps: 30.70433032848141
+    result_summary: Компактная двойная логистическая модель после причинного подтверждения начавшегося разворота достигла R25 в 48 из 50 эпизодов и завершилась без чистого убытка в 48 из 50 эпизодов по 19 инструментам. При удвоенном проскальзывании обе частоты сохранились на уровне 96%, медианный результат снизился с +37,90 до +27,94 б. п. Ожидаемое окно достижения цели составило 6–31 минут с медианой 13,5 минуты. Нижняя дневная граница обеих частот равна 87,9%; 50 эпизодов и 21 день не проходят продуктовые границы 300/30 и 90% для нижней границы неубытка, поэтому версия включается только как исследовательская рекомендация с отображением текущих и исторических вероятностей.
+    artifact_uri: config/scientific_hypotheses/morning-retracement-runtime-v2.3.json
+    primary_metric: non_loss_rate_after_costs
+    controls_per_event: 0
+    lift_ci_lower: null
+    lift_ci_upper: null
+    adjusted_p_value: null
+    stable_blocks: 0
+    total_blocks: 0
+    max_ticker_share: 0.12
+    max_period_share: null
+    dataset_fingerprint: sha256:1dc8fb96fdd8ab15caf517eeff7bd72124efa48fe61d475fbd5fdce703e67013
+    formula_fingerprint: sha256:182b980d18598dab5724948a1380d1fabb115f5fa47229fd06a08db142cc86eb
+    cost_model_version: "1.0.0"
+    abstention_rate: 0.9592502037489813
+    success_rate: 0.96
+    success_wilson_lower: 0.8653990931249298
 applied_catalog: []

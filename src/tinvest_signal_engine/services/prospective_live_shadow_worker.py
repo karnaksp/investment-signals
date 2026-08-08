@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import logging
 import os
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from random import random
 from threading import Event
-import time
-from typing import Callable
+from zoneinfo import ZoneInfo
 
+from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
+    ClickHouseProspectiveLiveOutcomeSource,
+    ClickHouseProspectiveLiveSnapshotSource,
+)
+from tinvest_signal_engine.adapters.clickhouse_prospective_scientific_observations import (
+    ClickHouseProspectiveLiveShadowStore,
+)
+from tinvest_signal_engine.adapters.clickhouse_r2_live_shadow import (
+    ClickHouseR2LiveShadowStore,
+    ClickHouseR2OpeningGapSource,
+)
 from tinvest_signal_engine.adapters.clickhouse_resilience import (
     BoundedExponentialBackoff,
     TransientClickHouseError,
@@ -22,16 +34,15 @@ from tinvest_signal_engine.adapters.dependency_recovery import (
     record_dependency_recovered,
     wait_for_dependency,
 )
-from tinvest_signal_engine.adapters.clickhouse_prospective_live_shadow import (
-    ClickHouseProspectiveLiveOutcomeSource,
-    ClickHouseProspectiveLiveSnapshotSource,
-)
-from tinvest_signal_engine.adapters.clickhouse_prospective_scientific_observations import (
-    ClickHouseProspectiveLiveShadowStore,
-)
 from tinvest_signal_engine.adapters.reliability_metrics import (
     PrometheusReliabilityMetrics,
     start_reliability_metrics_server,
+)
+from tinvest_signal_engine.adapters.live_shadow_health_file import (
+    AtomicJsonLiveShadowHealthStore,
+)
+from tinvest_signal_engine.application.live_shadow_health import (
+    LiveShadowHealthTracker,
 )
 from tinvest_signal_engine.application.prospective_live_shadow import (
     DEFAULT_LIVE_OUTCOME_POLICY_VERSION,
@@ -41,17 +52,21 @@ from tinvest_signal_engine.application.prospective_live_shadow import (
     ProspectivePortfolioIngestResult,
     RecordProspectivePortfolioSnapshot,
 )
+from tinvest_signal_engine.application.r2_live_shadow import (
+    ProcessR2OpeningGapLiveShadow,
+)
 from tinvest_signal_engine.config import load_instrument_configs, load_secret
 from tinvest_signal_engine.domain.prospective_scientific_models import (
     ProspectiveScientificPolicy,
 )
+from tinvest_signal_engine.domain.market_schedule import MarketSchedule
 from tinvest_signal_engine.logging_utils import configure_logging
 from tinvest_signal_engine.services.graceful_shutdown import (
     graceful_shutdown_event,
 )
 
-
 logger = logging.getLogger(__name__)
+MOSCOW = ZoneInfo("Europe/Moscow")
 
 PRODUCTION_LIVE_POLICY = ProspectiveScientificPolicy(
     version="prospective-live-shadow-models-v1.0.0",
@@ -82,6 +97,7 @@ class ProspectiveSnapshotBatchSchedule:
     batch_size: int = 1
     slot_minutes: int = 30
     settlement_delay_minutes: int = 2
+    run_on_start: bool = True
     _slot_at: datetime | None = None
     _cursor: int = 0
 
@@ -111,6 +127,9 @@ class ProspectiveSnapshotBatchSchedule:
         )
         if self._slot_at is None:
             self._slot_at = current_slot
+            if not self.run_on_start:
+                self._cursor = len(self.instrument_ids)
+                return None
         elif self._cursor >= len(self.instrument_ids) and current_slot > self._slot_at:
             self._slot_at = current_slot
             self._cursor = 0
@@ -131,6 +150,43 @@ class ProspectiveSnapshotBatchSchedule:
         self._cursor += len(batch.instrument_ids)
 
 
+@dataclass(slots=True)
+class R2OpeningGapSchedule:
+    """Run H10 after the opening candle and after both delayed outcomes."""
+
+    observation_delay_minutes: int = 5
+    outcome_grace_minutes: int = 15
+    _completed: set[tuple[date, int]] = field(default_factory=set)
+
+    def due(self, *, now: datetime) -> bool:
+        local = _aware_utc(now).astimezone(MOSCOW)
+        return any(
+            local >= boundary and (local.date(), index) not in self._completed
+            for index, boundary in enumerate(self._boundaries(local))
+        )
+
+    def complete_due(self, *, now: datetime) -> None:
+        local = _aware_utc(now).astimezone(MOSCOW)
+        for index, boundary in enumerate(self._boundaries(local)):
+            if local >= boundary:
+                self._completed.add((local.date(), index))
+        stale = tuple(
+            item
+            for item in self._completed
+            if item[0] < local.date() - timedelta(days=2)
+        )
+        for item in stale:
+            self._completed.remove(item)
+
+    def _boundaries(self, local: datetime) -> tuple[datetime, ...]:
+        opening = local.replace(hour=10, minute=0, second=0, microsecond=0)
+        return (
+            opening + timedelta(minutes=self.observation_delay_minutes),
+            opening + timedelta(minutes=30 + self.outcome_grace_minutes),
+            opening + timedelta(minutes=60 + self.outcome_grace_minutes),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ClickHouseProspectiveLiveShadowRuntime:
     recorder: RecordProspectivePortfolioSnapshot
@@ -139,6 +195,9 @@ class ClickHouseProspectiveLiveShadowRuntime:
     store: ClickHouseProspectiveLiveShadowStore
     policy: ProspectiveScientificPolicy
     snapshot_schedule: ProspectiveSnapshotBatchSchedule
+    r2_worker: ProcessR2OpeningGapLiveShadow | None = None
+    r2_schedule: R2OpeningGapSchedule | None = None
+    market_schedule: MarketSchedule | None = None
 
     def run_once(
         self,
@@ -147,15 +206,23 @@ class ClickHouseProspectiveLiveShadowRuntime:
         snapshot_limit: int = 25,
         outcome_limit: int = 100,
     ) -> ProspectiveLiveShadowPassResult:
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise ValueError("now must be timezone-aware")
-        snapshot_batch = self.snapshot_schedule.pending(
-            now=now,
-            limit=snapshot_limit,
+        cutoff = _aware_utc(now)
+        market_active = (
+            self.market_schedule is None
+            or self.market_schedule.is_collection_active(cutoff)
+        )
+        snapshot_batch = (
+            self.snapshot_schedule.pending(
+                now=cutoff,
+                limit=snapshot_limit,
+            )
+            if market_active
+            else None
         )
         snapshots = (
             self.snapshot_source.load_snapshots(
-                as_of=snapshot_batch.slot_at,
+                as_of=cutoff,
+                observed_until=snapshot_batch.slot_at,
                 policy=self.policy,
                 limit=len(snapshot_batch.instrument_ids),
                 instrument_ids=snapshot_batch.instrument_ids,
@@ -169,11 +236,22 @@ class ClickHouseProspectiveLiveShadowRuntime:
             ingested.append(result)
         if snapshot_batch is not None:
             self.snapshot_schedule.complete(snapshot_batch)
+        r2_result = None
+        if (
+            self.r2_worker is not None
+            and self.r2_schedule is not None
+            and market_active
+            and self.r2_schedule.due(now=now)
+        ):
+            r2_result = self.r2_worker.run_once(now=now)
+            self.r2_schedule.complete_due(now=now)
         outcome_result = self.outcome_worker.run_once(now=now, limit=outcome_limit)
         return ProspectiveLiveShadowPassResult(
             snapshots=len(snapshots),
-            observations_stored=sum(item.stored for item in ingested),
-            observations_replayed=sum(item.replayed for item in ingested),
+            observations_stored=sum(item.stored for item in ingested)
+            + (r2_result.observations_stored if r2_result is not None else 0),
+            observations_replayed=sum(item.replayed for item in ingested)
+            + (r2_result.observations_replayed if r2_result is not None else 0),
             outcome_result=outcome_result,
             events=tuple(item.event for item in ingested) + (outcome_result.event,),
         )
@@ -188,6 +266,8 @@ def build_clickhouse_prospective_live_shadow_runtime(
     instrument_ids: tuple[str, ...],
     timeout_seconds: float = 15.0,
     snapshot_query_batch_size: int = 1,
+    run_snapshot_on_start: bool = False,
+    market_schedule: MarketSchedule | None = None,
     policy: ProspectiveScientificPolicy = PRODUCTION_LIVE_POLICY,
     outcome_policy_version: str = DEFAULT_LIVE_OUTCOME_POLICY_VERSION,
 ) -> ClickHouseProspectiveLiveShadowRuntime:
@@ -199,6 +279,13 @@ def build_clickhouse_prospective_live_shadow_runtime(
         username=username,
         password=password,
         instrument_ids=instrument_ids,
+        timeout_seconds=timeout_seconds,
+    )
+    r2_store = ClickHouseR2LiveShadowStore(
+        base_url=base_url,
+        database=database,
+        username=username,
+        password=password,
         timeout_seconds=timeout_seconds,
     )
     return ClickHouseProspectiveLiveShadowRuntime(
@@ -226,7 +313,17 @@ def build_clickhouse_prospective_live_shadow_runtime(
         snapshot_schedule=ProspectiveSnapshotBatchSchedule(
             instrument_ids=instrument_ids,
             batch_size=snapshot_query_batch_size,
+            run_on_start=run_snapshot_on_start,
         ),
+        r2_worker=ProcessR2OpeningGapLiveShadow(
+            source=ClickHouseR2OpeningGapSource(
+                r2_store,
+                instrument_ids=instrument_ids,
+            ),
+            store=r2_store,
+        ),
+        r2_schedule=R2OpeningGapSchedule(),
+        market_schedule=market_schedule or MarketSchedule(),
     )
 
 
@@ -248,6 +345,25 @@ def main() -> None:
         instrument_ids=_instrument_ids(snapshot_limit),
         timeout_seconds=_env_float("PROSPECTIVE_LIVE_CLICKHOUSE_TIMEOUT_SECONDS", 15.0),
         snapshot_query_batch_size=snapshot_query_batch_size,
+        run_snapshot_on_start=_env_bool("PROSPECTIVE_LIVE_RUN_ON_START", False),
+        market_schedule=MarketSchedule.from_strings(
+            timezone_name=(
+                os.getenv("MARKET_SCHEDULE_TIMEZONE", "Europe/Moscow").strip()
+                or "Europe/Moscow"
+            ),
+            collection_start=(
+                os.getenv("MARKET_COLLECTION_START", "07:00").strip() or "07:00"
+            ),
+            collection_end=(
+                os.getenv("MARKET_COLLECTION_END", "23:00").strip() or "23:00"
+            ),
+            signal_start=(
+                os.getenv("MARKET_SIGNAL_START", "07:15").strip() or "07:15"
+            ),
+            signal_end=(
+                os.getenv("MARKET_SIGNAL_END", "22:45").strip() or "22:45"
+            ),
+        ),
         outcome_policy_version=(
             os.getenv(
                 "PROSPECTIVE_LIVE_OUTCOME_POLICY_VERSION",
@@ -257,6 +373,16 @@ def main() -> None:
     )
     outcome_limit = _env_int("PROSPECTIVE_LIVE_OUTCOME_BATCH_SIZE", 100)
     poll_seconds = _env_float("PROSPECTIVE_LIVE_POLL_SECONDS", 60.0)
+    health = LiveShadowHealthTracker(
+        store=AtomicJsonLiveShadowHealthStore(
+            os.getenv(
+                "PROSPECTIVE_LIVE_HEALTH_SNAPSHOT_PATH",
+                "/var/lib/investment-signals-pro/runtime-health/live-shadow.json",
+            )
+        ),
+        clock=lambda: datetime.now(tz=UTC),
+        stale_after_seconds=max(60, round(poll_seconds * 3)),
+    )
     metrics_port = _env_optional_int("METRICS_LISTEN_PORT")
     start_reliability_metrics_server(metrics_port)
     logger.info("Starting prospective live-shadow ClickHouse worker")
@@ -271,6 +397,7 @@ def main() -> None:
             poll_seconds=poll_seconds,
             stop_event=stop_event,
             metrics=PrometheusReliabilityMetrics(),
+            health=health,
         )
 
 
@@ -283,9 +410,10 @@ def run_worker_loop(
     stop_event: Event | None = None,
     metrics: DependencyRecoveryMetrics | None = None,
     backoff: BoundedExponentialBackoff = BoundedExponentialBackoff(),
-    now: Callable[[], datetime] = lambda: datetime.now(tz=timezone.utc),
+    now: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     sleep: Callable[[float], None] = time.sleep,
     random_value: Callable[[], float] = random,
+    health: LiveShadowHealthTracker | None = None,
 ) -> None:
     """Keep the worker alive while its external data services recover."""
 
@@ -325,12 +453,24 @@ def run_worker_loop(
                 metrics=recovery_metrics,
                 logger=logger,
             )
+            if health is not None:
+                health.succeeded(
+                    observations_processed=(
+                        result.observations_stored + result.observations_replayed
+                    ),
+                    outcomes_processed=(
+                        result.outcome_result.stored + result.outcome_result.replayed
+                    ),
+                    outcomes_unavailable=result.outcome_result.unavailable,
+                )
             consecutive_failures = 0
         except KeyboardInterrupt:
             stop.set()
             raise
         except TransientClickHouseError as error:
             consecutive_failures += 1
+            if health is not None:
+                health.failed()
             if wait_for_dependency(
                 worker="prospective_live_shadow_worker",
                 error=error,
@@ -344,6 +484,8 @@ def run_worker_loop(
                 break
             continue
         except Exception:
+            if health is not None:
+                health.failed()
             logger.exception(
                 "Prospective live-shadow pass failed; retrying after dependency recovery"
             )
@@ -358,6 +500,13 @@ def _required_env(name: str) -> str:
     if not value:
         raise ValueError(f"{name} is required")
     return value
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _instrument_ids(limit: int) -> tuple[str, ...]:
@@ -426,7 +575,7 @@ def _env_optional_int(name: str) -> int | None:
 def _aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("snapshot schedule now must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from dagster import (
 
 from .logging_utils import configure_logging
 from .services.bond_convergence_emitter import run_once as run_bond_convergence_once
+from .services.daily_adaptive_calibration import run_once as run_adaptive_calibration_once
 from .services.threshold_cron import run_recalc_once
 
 
@@ -45,6 +46,22 @@ def threshold_recalc_op(context) -> None:
         settings.threshold_lookback_days,
     )
     run_recalc_once(settings)
+
+
+@op(name="daily_adaptive_calibration_op", tags={"component": "calibration"})
+def daily_adaptive_calibration_op(context) -> None:
+    """Adapt price-jump gates from mature local outcomes after the session."""
+    from .config import RuntimeSettings
+
+    settings = RuntimeSettings.from_env(service_name="dagster")
+    decision = run_adaptive_calibration_once(settings)
+    context.log.info(
+        "Daily adaptive calibration: status=%s reason=%s version=%s candidate=%s",
+        decision.status,
+        decision.reason_code,
+        decision.version,
+        decision.candidate,
+    )
 
 
 @op(name="unary_kafka_poll_once_op", tags={"component": "unary"})
@@ -93,6 +110,11 @@ def threshold_recalc_job() -> None:
     threshold_recalc_op()
 
 
+@job(name="daily_adaptive_calibration_job")
+def daily_adaptive_calibration_job() -> None:
+    daily_adaptive_calibration_op()
+
+
 @job(name="unary_kafka_poll_once_job")
 def unary_kafka_poll_once_job() -> None:
     unary_kafka_poll_once_op()
@@ -104,6 +126,7 @@ def bond_convergence_scan_job() -> None:
 
 
 _DEFAULT_THRESHOLD_CRON: Final[str] = "0 2 * * *"
+_DEFAULT_ADAPTIVE_CALIBRATION_CRON: Final[str] = "20 23 * * 1-5"
 _DEFAULT_UNARY_CRON: Final[str] = "*/15 * * * *"
 _DEFAULT_BOND_CONVERGENCE_CRON: Final[str] = "15 11 * * 1-5"
 
@@ -122,6 +145,19 @@ daily_threshold_schedule = ScheduleDefinition(
     name="daily_threshold_recalc",
     job=threshold_recalc_job,
     cron_schedule=_threshold_cron_schedule(),
+    # Historical threshold calibration is an explicit research/maintenance
+    # operation.  Starting the application must never trigger a replay.
+    default_status=DefaultScheduleStatus.STOPPED,
+)
+
+daily_adaptive_calibration_schedule = ScheduleDefinition(
+    name="daily_adaptive_calibration",
+    job=daily_adaptive_calibration_job,
+    cron_schedule=(
+        (os.getenv("DAGSTER_ADAPTIVE_CALIBRATION_CRON") or "").strip()
+        or _DEFAULT_ADAPTIVE_CALIBRATION_CRON
+    ),
+    execution_timezone="Europe/Moscow",
     default_status=DefaultScheduleStatus.RUNNING,
 )
 
@@ -129,7 +165,9 @@ quarter_hourly_unary_schedule = ScheduleDefinition(
     name="market_unary_poll_schedule",
     job=unary_kafka_poll_once_job,
     cron_schedule=_unary_cron_schedule(),
-    default_status=DefaultScheduleStatus.RUNNING,
+    # The streaming ingestor owns the live feed.  Keep this compatibility
+    # poller opt-in so it cannot duplicate traffic after an application start.
+    default_status=DefaultScheduleStatus.STOPPED,
 )
 
 daily_bond_convergence_schedule = ScheduleDefinition(
@@ -146,11 +184,13 @@ daily_bond_convergence_schedule = ScheduleDefinition(
 defs = Definitions(
     jobs=[
         threshold_recalc_job,
+        daily_adaptive_calibration_job,
         unary_kafka_poll_once_job,
         bond_convergence_scan_job,
     ],
     schedules=[
         daily_threshold_schedule,
+        daily_adaptive_calibration_schedule,
         quarter_hourly_unary_schedule,
         daily_bond_convergence_schedule,
     ],

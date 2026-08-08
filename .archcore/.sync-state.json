@@ -171,6 +171,51 @@
       "source": "productization/scientific-hypotheses/scientific-portfolio-evidence-decisions-ga.plan.md",
       "target": "productization/scientific-hypotheses/scientific-hypothesis-provenance.prd.md",
       "type": "implements"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-market-regimes-to-daily-decisions.plan.md",
+      "target": "architecture/clean-architecture.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-market-regimes-to-daily-decisions.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-portfolio-evidence-decisions-ga.plan.md",
+      "type": "extends"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-market-regimes-to-daily-decisions.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-literature-gate.rnd.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/scientific-market-regimes-to-daily-decisions.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-provenance.prd.md",
+      "type": "implements"
+    },
+    {
+      "source": "productization/scientific-hypotheses/selective-morning-retracement.prd.md",
+      "target": "productization/scientific-hypotheses/selective-morning-retracement.idea.md",
+      "type": "implements"
+    },
+    {
+      "source": "productization/scientific-hypotheses/selective-morning-retracement.plan.md",
+      "target": "productization/scientific-hypotheses/selective-morning-retracement.prd.md",
+      "type": "implements"
+    },
+    {
+      "source": "productization/scientific-hypotheses/selective-morning-retracement.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-market-regimes-to-daily-decisions.plan.md",
+      "type": "extends"
+    },
+    {
+      "source": "productization/scientific-hypotheses/selective-morning-retracement.plan.md",
+      "target": "productization/scientific-hypotheses/scientific-hypothesis-literature-gate.rnd.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "productization/scientific-hypotheses/selective-morning-retracement.plan.md",
+      "target": "architecture/clean-architecture.adr.md",
+      "type": "depends_on"
     }
   ]
 }

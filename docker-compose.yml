@@ -110,6 +110,7 @@ services:
 
   # Веб-консоль для просмотра топиков и сообщений (опционально).
   redpanda-console:
+    profiles: ["diagnostics"]
     image: ${REDPANDA_CONSOLE_IMAGE:-redpandadata/console:v2.8.4}
     depends_on:
       - redpanda
@@ -178,8 +179,10 @@ services:
     environment:
       METRICS_LISTEN_PORT: "${METRICS_LISTEN_PORT:-9108}"
       PROTO_DIR: /app/proto
+      DETECTOR_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/detector.json
     volumes:
       - ./conf:/app/conf:ro
+      - ./var/runtime-health:/app/var/runtime-health
       # Тот же пакет, что в образе — правки в ./src без пересборки detector.
       - ./src/tinvest_signal_engine:/usr/local/lib/python3.12/site-packages/tinvest_signal_engine:ro
     command: ["tinvest-detector"]
@@ -219,8 +222,13 @@ services:
 
   # Dagster: расписания пересчёта порогов и unary single-shot → те же entrypoints, что compose.
   dagster-webserver:
+    # UI нужен только для ручной диагностики. Расписания продолжает выполнять
+    # dagster-daemon, поэтому постоянный web-процесс не расходует память.
+    profiles: ["orchestration-ui"]
     build:
       context: .
+      args:
+        APP_EXTRAS: orchestration,replay
     depends_on:
       redpanda-init:
         condition: service_completed_successfully
@@ -248,18 +256,24 @@ services:
   dagster-daemon:
     build:
       context: .
+      args:
+        APP_EXTRAS: orchestration,replay
     depends_on:
       redpanda-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       DAGSTER_HOME: /opt/dagster/dagster_home
       PROTO_DIR: /app/proto
       MARKET_UNARY_POLL_SECONDS: "${MARKET_UNARY_POLL_SECONDS:-300}"
+      ADAPTIVE_CALIBRATION_STATE_DIR: /var/lib/investment-signals/adaptive-calibration
     volumes:
       - dagster_home:/opt/dagster/dagster_home
       - ./conf:/app/conf
+      - ./var/adaptive-calibration:/var/lib/investment-signals/adaptive-calibration
     command:
       - dagster-daemon
       - run
@@ -420,11 +434,13 @@ services:
       # Внутри сети compose (перекрывает localhost из .env для CH и JSON точности).
       CLICKHOUSE_HTTP_URL: http://clickhouse:8123
       SIGNAL_ACCURACY_JSON_PATH: /app/var/accuracy/signal_accuracy.json
+      DETECTOR_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/detector.json
       # Горячая перезагрузка Python при изменении смонтированного пакета.
       TINVEST_API_RELOAD: "1"
     volumes:
       - ./conf:/app/conf:ro
       - ./var/accuracy:/app/var/accuracy:ro
+      - ./var/runtime-health:/app/var/runtime-health:ro
       # Код и статика админки с хоста → без docker compose build после правок UI.
       - ./src/tinvest_signal_engine:/usr/local/lib/python3.12/site-packages/tinvest_signal_engine:ro
     command: ["tinvest-api"]

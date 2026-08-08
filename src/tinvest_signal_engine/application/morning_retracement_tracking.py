@@ -55,6 +55,15 @@ class MorningRetracementTrackingStore(Protocol):
     ) -> None: ...
 
 
+class MorningRetracementOutcomeMarketProvider(Protocol):
+    def load_for_assessments(
+        self,
+        assessments: Sequence[MorningRetracementLiveAssessment],
+        *,
+        as_of: datetime,
+    ) -> tuple[MorningRetracementMarketSeries, ...]: ...
+
+
 class RecordMorningRetracementAssessments:
     def __init__(self, store: MorningRetracementTrackingStore) -> None:
         self._store = store
@@ -87,12 +96,14 @@ class ProcessMorningRetracementOutcomes:
         *,
         store: MorningRetracementTrackingStore,
         policy: MorningRetracementRuntimePolicy,
+        market_provider: MorningRetracementOutcomeMarketProvider | None = None,
         grace_seconds: int = 90,
     ) -> None:
         if grace_seconds < 0:
             raise ValueError("outcome grace must not be negative")
         self._store = store
         self._policy = policy
+        self._market_provider = market_provider
         self._grace_seconds = grace_seconds
 
     def execute(
@@ -110,7 +121,36 @@ class ProcessMorningRetracementOutcomes:
             outcome_policy_version=OUTCOME_POLICY_VERSION,
             limit=limit,
         )
-        market_by_instrument = {item.instrument_id: item for item in market}
+        market_by_episode = {
+            (item.instrument_id, item.trading_day.isoformat()): item
+            for item in market
+        }
+        mature_missing = tuple(
+            row.assessment
+            for row in pending_rows
+            if now
+            >= _deadline(
+                row.assessment,
+                self._policy.deadline_local_minute,
+            )
+            + timedelta(seconds=self._grace_seconds)
+            and (
+                row.assessment.instrument_id,
+                row.assessment.trading_day,
+            )
+            not in market_by_episode
+        )
+        if mature_missing and self._market_provider is not None:
+            recovered = self._market_provider.load_for_assessments(
+                mature_missing,
+                as_of=now,
+            )
+            market_by_episode.update(
+                {
+                    (item.instrument_id, item.trading_day.isoformat()): item
+                    for item in recovered
+                }
+            )
         stored = pending = unavailable = 0
         for row in pending_rows:
             assessment = row.assessment
@@ -118,7 +158,9 @@ class ProcessMorningRetracementOutcomes:
             if now < deadline + timedelta(seconds=self._grace_seconds):
                 pending += 1
                 continue
-            series = market_by_instrument.get(assessment.instrument_id)
+            series = market_by_episode.get(
+                (assessment.instrument_id, assessment.trading_day)
+            )
             if series is None:
                 pending += 1
                 continue
@@ -136,6 +178,9 @@ class ProcessMorningRetracementOutcomes:
                     break_even_trigger_fraction=self._policy.break_even_trigger_fraction,
                     deadline_local_minute=self._policy.deadline_local_minute,
                     round_trip_cost_bps=self._policy.round_trip_cost_bps,
+                    break_even_target_progress_fraction=(
+                        self._policy.break_even_target_progress_fraction
+                    ),
                 ),
             )
             available = simulation.exit_reason is not TradeExitReason.UNAVAILABLE

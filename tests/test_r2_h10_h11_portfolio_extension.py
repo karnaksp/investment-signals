@@ -257,6 +257,72 @@ def test_explicit_refusals_are_sealed_in_features() -> None:
     )
 
 
+def test_observed_regular_open_resolves_schedule_without_future_data() -> None:
+    candles = _research_candles()
+    report = build_r2_extension_research(
+        candles,
+        dataset_fingerprint=DATASET,
+        request=R2ExtensionRequest(
+            selected_hypotheses=(
+                R2ExtensionHypothesis.OPENING_GAP_REVERSION,
+            ),
+            market_universe=("GAZP",),
+            observed_exchange_open_is_schedule_evidence=True,
+        ),
+    )
+
+    assert report.features
+    assert all(item.reason is not R2Reason.EXCHANGE_SCHEDULE_UNKNOWN for item in report.features)
+    assert any(item.decision is R2Decision.MATCHED for item in report.features)
+    assert any(
+        feature.decision is R2Decision.NOT_MATCHED and outcome.available
+        for feature, outcome in zip(report.features, report.outcomes, strict=True)
+    )
+
+
+def test_h10_uses_first_completed_candle_within_five_minutes_of_horizon() -> None:
+    candles = _research_candles()
+    latest_day = max(item.at.date() for item in candles)
+    with_missing_exact_targets = tuple(
+        item
+        for item in candles
+        if not (
+            item.at.date() == latest_day
+            and item.ticker == "SBER"
+            and (
+                item.at.astimezone(MOSCOW).hour,
+                item.at.astimezone(MOSCOW).minute,
+            )
+            in {(10, 30), (11, 0)}
+        )
+    )
+    report = build_r2_extension_research(
+        with_missing_exact_targets,
+        dataset_fingerprint=DATASET,
+        request=R2ExtensionRequest(
+            selected_hypotheses=(
+                R2ExtensionHypothesis.OPENING_GAP_REVERSION,
+            ),
+            market_universe=("GAZP",),
+            target_universe=("SBER",),
+            observed_exchange_open_is_schedule_evidence=True,
+        ),
+    )
+    latest = tuple(
+        (feature, outcome)
+        for feature, outcome in zip(report.features, report.outcomes, strict=True)
+        if feature.trading_day == latest_day
+        and feature.decision is not R2Decision.ABSTAIN
+    )
+
+    assert len(latest) == 2
+    assert all(outcome.available for _, outcome in latest)
+    assert all(
+        outcome.available_at == outcome.target_at + timedelta(minutes=1)
+        for _, outcome in latest
+    )
+
+
 def test_sealed_eleven_report_is_unchanged_by_opt_in_extension() -> None:
     candles = _research_candles()
     sealed = build_prospective_scientific_research(
@@ -270,7 +336,7 @@ def test_sealed_eleven_report_is_unchanged_by_opt_in_extension() -> None:
     assert combined.sealed_report == sealed
     assert combined.sealed_report.report_fingerprint == sealed.report_fingerprint
     assert len(combined.sealed_report.selected_hypotheses) == 11
-    assert combined.extension_report.portfolio_version == "r2-h10-h11-v1.0.0"
+    assert combined.extension_report.portfolio_version == "r2-h10-h11-v1.0.1"
 
 
 def test_r2_policy_matches_sealed_registry_contract() -> None:

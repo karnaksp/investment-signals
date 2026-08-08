@@ -7,6 +7,7 @@ from threading import Event
 from urllib.error import HTTPError
 
 import pytest
+from kafka.errors import CommitFailedError
 
 from tinvest_signal_engine.adapters.clickhouse_reference_ticks import (
     ClickHouseReferenceTickReader,
@@ -251,4 +252,24 @@ def test_scientific_candle_writer_recovers_without_duplicate_or_offset_recommit(
     assert store.calls == 2
     assert tuple(store.rows) == ("candle-event-1",)
     assert consumer.commits == 1
+    assert consumer.closed is True
+
+
+def test_scientific_candle_commit_rebalance_rejoins_without_reprocessing() -> None:
+    class _CommitLostConsumer(_Consumer):
+        def commit(self, **_kwargs):
+            raise CommitFailedError()
+
+    store = _RecoveringCandleStore()
+    store.calls = 1
+    consumer = _CommitLostConsumer(_Message(_raw_candle()))
+
+    ScientificCandleKafkaRuntime(
+        consumer=consumer,
+        processor=ScientificCandleJournalProcessor(store),
+    ).run()
+
+    assert store.calls == 2
+    assert tuple(store.rows) == ("candle-event-1",)
+    assert consumer.commits == 0
     assert consumer.closed is True

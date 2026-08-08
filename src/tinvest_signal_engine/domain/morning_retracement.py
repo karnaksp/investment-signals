@@ -89,6 +89,7 @@ class TradePolicy:
     deadline_local_minute: int
     round_trip_cost_bps: float
     doubled_slippage_bps: float = 0.0
+    break_even_target_progress_fraction: float | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -102,6 +103,12 @@ class TradePolicy:
             raise ValueError("deadline_local_minute is invalid")
         if min(self.round_trip_cost_bps, self.doubled_slippage_bps) < 0.0:
             raise ValueError("costs must not be negative")
+        if self.break_even_target_progress_fraction is not None and not (
+            0.0 < self.break_even_target_progress_fraction < 1.0
+        ):
+            raise ValueError(
+                "break_even_target_progress_fraction must be in (0, 1)"
+            )
 
     @property
     def effective_round_trip_cost_bps(self) -> float:
@@ -109,10 +116,16 @@ class TradePolicy:
 
     @property
     def key(self) -> str:
+        progress = (
+            ""
+            if self.break_even_target_progress_fraction is None
+            else f"-bep{int(self.break_even_target_progress_fraction * 100)}"
+        )
         return (
             f"r{int(self.target_fraction * 100)}"
             f"-s{int(self.stop_extension_fraction * 100)}"
             f"-be{int(self.break_even_trigger_fraction * 100)}"
+            f"{progress}"
             f"-d{self.deadline_local_minute}"
             f"-c{self.effective_round_trip_cost_bps:g}"
         )
@@ -305,11 +318,17 @@ def simulate_trade(
         )
     half_cost = policy.effective_round_trip_cost_bps / 2.0
     modeled_entry = market_entry * (1.0 + direction * half_cost / 10_000.0)
-    trigger = market_entry + (
-        direction
-        * snapshot.excursion_price
-        * policy.break_even_trigger_fraction
-    )
+    if policy.break_even_target_progress_fraction is None:
+        trigger = market_entry + (
+            direction
+            * snapshot.excursion_price
+            * policy.break_even_trigger_fraction
+        )
+    else:
+        trigger = market_entry + (
+            (target - market_entry)
+            * policy.break_even_target_progress_fraction
+        )
     break_even_stop = _break_even_market_price(
         modeled_entry=modeled_entry,
         direction=direction,

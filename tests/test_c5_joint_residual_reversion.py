@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
+import gzip
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -232,8 +233,12 @@ def test_materialized_and_partitioned_c5_replay_have_identical_payloads(
     )
     partitioned_observations: list[dict[str, object]] = []
     partitioned_outcomes: list[dict[str, object]] = []
-    for path in sorted(Path(completion.artifact.artifact_uri).glob("partitions/*.json")):
-        payload = json.loads(path.read_text(encoding="utf-8"))
+    for path in sorted(Path(completion.artifact.artifact_uri).glob("partitions/*.json*")):
+        if path.name.endswith(".gz"):
+            with gzip.open(path, "rt", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        else:
+            payload = json.loads(path.read_text(encoding="utf-8"))
         partitioned_observations.extend(payload["observations"])
         partitioned_outcomes.extend(payload["outcomes"])
 

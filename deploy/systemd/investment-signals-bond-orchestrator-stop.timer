@@ -1,0 +1,12 @@
+[Unit]
+Description=Close the Investment Signals bond orchestrator window
+
+[Timer]
+# One hour is ample for the live scan; no historical catch-up is performed.
+OnCalendar=Mon..Fri *-*-* 12:15:00 Europe/Moscow
+AccuracySec=30s
+Persistent=false
+Unit=investment-signals-bond-orchestrator-stop.service
+
+[Install]
+WantedBy=timers.target

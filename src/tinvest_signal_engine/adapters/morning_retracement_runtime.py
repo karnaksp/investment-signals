@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -19,6 +19,7 @@ from tinvest_signal_engine.application.morning_retracement_signals import (
     MorningRetracementMarketSeries,
 )
 from tinvest_signal_engine.application.morning_retracement_tracking import (
+    MorningRetracementOutcomeMarketProvider,
     MorningRetracementTrackingStore,
     StoredMorningRetracementAssessment,
 )
@@ -52,34 +53,23 @@ SELECT
     ticker,
     trading_day,
     candle_at,
-    argMax(open_price, record_version) AS open_price,
-    argMax(high_price, record_version) AS high_price,
-    argMax(low_price, record_version) AS low_price,
-    argMax(close_price, record_version) AS close_price,
-    argMax(volume, record_version) AS volume,
-    argMax(is_complete, record_version) AS is_complete
-FROM scientific_candles_1m
+    open_price,
+    high_price,
+    low_price,
+    close_price,
+    volume,
+    is_complete
+FROM scientific_candles_1m FINAL
 PREWHERE instrument_id IN {instrument_ids:Array(String)}
-WHERE trading_day >= today() - 10
-  AND candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
-  AND trading_day IN
-  (
-      SELECT trading_day
-      FROM scientific_candles_1m
-      PREWHERE instrument_id IN {instrument_ids:Array(String)}
-      WHERE trading_day >= today() - 10
-        AND candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
-      GROUP BY trading_day
-      ORDER BY trading_day DESC
-      LIMIT 2
-  )
-GROUP BY instrument_id, ticker, trading_day, candle_at
+  AND trading_day IN {session_days:Array(Date)}
+WHERE candle_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
+  AND is_complete = 1
 ORDER BY ticker, trading_day, candle_at
 LIMIT 100000
-SETTINGS max_execution_time = 10,
+SETTINGS max_execution_time = 15,
          timeout_before_checking_execution_speed = 0,
-         max_threads = 2,
-         max_rows_to_read = 2000000,
+         max_threads = 4,
+         max_rows_to_read = 750000,
          max_result_rows = 100000,
          result_overflow_mode = 'throw'
 FORMAT JSONEachRow
@@ -97,27 +87,32 @@ FROM
         argMax(is_complete, record_version) AS is_complete
     FROM scientific_candles_1m
     PREWHERE instrument_id IN {instrument_ids:Array(String)}
-    WHERE trading_day >= today() - 45
-      AND trading_day < toDate(parseDateTime64BestEffort({as_of:String}, 6, 'UTC'))
-      AND toHour(toTimeZone(candle_at, 'Europe/Moscow')) * 60
+      AND trading_day >= toDate({history_start:String})
+      AND trading_day < toDate({local_day:String})
+    WHERE toHour(toTimeZone(candle_at, 'Europe/Moscow')) * 60
           + toMinute(toTimeZone(candle_at, 'Europe/Moscow')) BETWEEN 420
           AND toUInt16({local_minute:UInt16})
     GROUP BY ticker, trading_day, candle_at
 )
 WHERE is_complete = 1
 GROUP BY ticker, trading_day
+HAVING min(
+    toHour(toTimeZone(candle_at, 'Europe/Moscow')) * 60
+    + toMinute(toTimeZone(candle_at, 'Europe/Moscow'))
+) <= least(toUInt16({local_minute:UInt16}), toUInt16(480))
 ORDER BY ticker, trading_day DESC
 LIMIT 2000
-SETTINGS max_execution_time = 10,
+SETTINGS max_execution_time = 20,
          timeout_before_checking_execution_speed = 0,
-         max_threads = 2,
-         max_rows_to_read = 3000000,
+         max_threads = 4,
+         max_rows_to_read = 4000000,
          max_result_rows = 2000,
          result_overflow_mode = 'throw'
 FORMAT JSONEachRow
 """.strip()
 
 MORNING_RETRACEMENT_LIVE_RECORD_VERSION = "morning-retracement-live-v1"
+MORNING_RETRACEMENT_HYPOTHESIS_ID = "h1-morning-low-volume-reversion"
 _MORNING_SOURCE_IDS = (
     "heston-korajczyk-sadka-2010",
     "jegadeesh-titman-1995",
@@ -129,13 +124,17 @@ SELECT
     observation_id,
     feature_values_json
 FROM scientific_hypothesis_observations FINAL
-WHERE record_schema_version = {record_schema_version:String}
-  AND observation_id NOT IN
+PREWHERE hypothesis_id = {hypothesis_id:String}
+  AND record_schema_version = {record_schema_version:String}
+  AND trading_day >= today() - 120
+WHERE observation_id NOT IN
   (
       SELECT observation_id
       FROM scientific_hypothesis_outcomes FINAL
-      WHERE record_schema_version = {record_schema_version:String}
-        AND outcome_policy_version = {outcome_policy_version:String}
+      PREWHERE hypothesis_id = {hypothesis_id:String}
+        AND record_schema_version = {record_schema_version:String}
+        AND trading_day >= today() - 120
+      WHERE outcome_policy_version = {outcome_policy_version:String}
   )
 ORDER BY target_at ASC, observed_at ASC
 LIMIT {limit:UInt32}
@@ -145,14 +144,20 @@ FORMAT JSONEachRow
 
 def load_morning_retracement_policy(path: Path) -> MorningRetracementRuntimePolicy:
     raw = json.loads(path.read_text(encoding="utf-8"))
-    model = raw["runtime_model"]
+    model = raw.get("runtime_target_model") or raw["runtime_model"]
+    non_loss_model = raw.get("runtime_non_loss_model")
     recommendation = raw["recommendation"]
     operational = raw["operational_filter"]
     window = raw["expected_hit_window"]
     return MorningRetracementRuntimePolicy(
-        policy_version=f"{raw['hypothesis_version']}:runtime-v1",
-        hypothesis_id="h1-selective-morning-retracement",
-        hypothesis_version="2.2.0",
+        policy_version=str(
+            raw.get(
+                "policy_version",
+                f"{raw['hypothesis_version']}:runtime-v1",
+            )
+        ),
+        hypothesis_id=MORNING_RETRACEMENT_HYPOTHESIS_ID,
+        hypothesis_version=str(raw.get("product_hypothesis_version", "2.2.0")),
         model=LinearProbabilityModel(
             feature_names=tuple(str(item) for item in model["feature_names"]),
             coefficients=tuple(float(item) for item in model["coefficients"]),
@@ -187,6 +192,33 @@ def load_morning_retracement_policy(path: Path) -> MorningRetracementRuntimePoli
         expected_hit_minutes_p25=round(float(window["p25_minutes"])),
         expected_hit_minutes_median=round(float(window["median_minutes"])),
         expected_hit_minutes_p75=round(float(window["p75_minutes"])),
+        non_loss_model=(
+            _linear_probability_model(non_loss_model)
+            if isinstance(non_loss_model, Mapping)
+            else None
+        ),
+        default_non_loss_probability_threshold=float(
+            raw.get(
+                "non_loss_probability_threshold",
+                raw["probability_threshold"],
+            )
+        ),
+        break_even_target_progress_fraction=(
+            float(raw["break_even_target_progress_fraction"])
+            if raw.get("break_even_target_progress_fraction") is not None
+            else None
+        ),
+        default_minimum_current_retracement_fraction=float(
+            operational.get("minimum_current_retracement_fraction", 0.0)
+        ),
+        default_minimum_relative_volume=float(
+            operational.get("minimum_relative_volume", 0.0)
+        ),
+        default_enabled_tickers=frozenset(
+            str(item).strip().upper()
+            for item in operational.get("enabled_tickers", ())
+            if str(item).strip()
+        ),
     )
 
 
@@ -211,6 +243,12 @@ def load_morning_retracement_settings(
             config.get(
                 "maximum_relative_volume",
                 policy.default_maximum_relative_volume,
+            )
+        ),
+        minimum_relative_volume=float(
+            config.get(
+                "minimum_relative_volume",
+                policy.default_minimum_relative_volume,
             )
         ),
         minimum_active_minute_ratio=float(
@@ -240,14 +278,37 @@ def load_morning_retracement_settings(
         ),
         enabled_tickers=frozenset(
             str(item).strip().upper()
-            for item in config.get("enabled_tickers", ())
+            for item in config.get(
+                "enabled_tickers",
+                policy.default_enabled_tickers,
+            )
             if str(item).strip()
         ),
         telegram_enabled=bool(config.get("telegram_enabled", False)),
+        non_loss_probability_threshold=(
+            float(config["non_loss_probability_threshold"])
+            if config.get("non_loss_probability_threshold") is not None
+            else None
+        ),
+        minimum_current_retracement_fraction=float(
+            config.get(
+                "minimum_current_retracement_fraction",
+                policy.default_minimum_current_retracement_fraction,
+            )
+        ),
     )
 
 
-class ClickHouseMorningRetracementSource:
+def _linear_probability_model(raw: Mapping[str, Any]) -> LinearProbabilityModel:
+    return LinearProbabilityModel(
+        feature_names=tuple(str(item) for item in raw["feature_names"]),
+        coefficients=tuple(float(item) for item in raw["coefficients"]),
+        intercept=float(raw["intercept"]),
+        fingerprint=str(raw["fingerprint"]),
+    )
+
+
+class ClickHouseMorningRetracementSource(MorningRetracementOutcomeMarketProvider):
     def __init__(
         self,
         *,
@@ -312,8 +373,33 @@ class ClickHouseMorningRetracementSource:
             "as_of": cutoff.strftime("%Y-%m-%d %H:%M:%S.%f"),
             "local_minute": str(effective_local_minute),
             "instrument_ids": _array_parameter(instrument_ids),
+            "local_day": local.date().isoformat(),
+            "history_start": (local.date() - timedelta(days=45)).isoformat(),
         }
+        previous_candidates = _previous_session_candidates(local.date())
+        session_days = (local.date(), previous_candidates[0])
+        parameters["session_days"] = _array_parameter(
+            tuple(item.isoformat() for item in session_days)
+        )
         candles = self._rows(_LATEST_SESSION_CANDLES_SQL, parameters)
+        observed_days = {
+            date.fromisoformat(str(row["trading_day"]))
+            for row in candles
+            if row.get("trading_day")
+        }
+        if local.date() in observed_days and session_days[1] not in observed_days:
+            for candidate in previous_candidates[1:]:
+                parameters["session_days"] = _array_parameter(
+                    (candidate.isoformat(),)
+                )
+                fallback = self._rows(_LATEST_SESSION_CANDLES_SQL, parameters)
+                if fallback:
+                    candles = (*candles, *fallback)
+                    session_days = (local.date(), candidate)
+                    break
+        parameters["session_days"] = _array_parameter(
+            tuple(item.isoformat() for item in session_days)
+        )
         volumes = self._volume_rows(
             parameters=parameters,
             local_day=local.date(),
@@ -399,6 +485,80 @@ class ClickHouseMorningRetracementSource:
             self._volume_cache_rows = rows
         return rows
 
+    def load_for_assessments(
+        self,
+        assessments: Sequence[MorningRetracementLiveAssessment],
+        *,
+        as_of: datetime,
+    ) -> tuple[MorningRetracementMarketSeries, ...]:
+        """Recover the sealed candle path for pending observations from prior days."""
+
+        unique = {
+            (item.instrument_id, item.ticker, item.trading_day)
+            for item in assessments
+        }
+        if not unique:
+            return ()
+        instrument_ids = tuple(sorted({item[0] for item in unique}))
+        trading_days = tuple(sorted({item[2] for item in unique}))
+        rows = tuple(
+            row
+            for day_chunk in _chunks(trading_days, size=10)
+            for row in self._rows(
+                _LATEST_SESSION_CANDLES_SQL,
+                {
+                    "as_of": as_of.astimezone(timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M:%S.%f"
+                    ),
+                    "instrument_ids": _array_parameter(instrument_ids),
+                    "session_days": _array_parameter(day_chunk),
+                },
+            )
+        )
+        candles_by_episode: defaultdict[
+            tuple[str, str, date], list[HistoricalCandle]
+        ] = defaultdict(list)
+        requested = {
+            (instrument_id, ticker.upper(), date.fromisoformat(trading_day))
+            for instrument_id, ticker, trading_day in unique
+        }
+        for row in rows:
+            if not bool(int(row["is_complete"])):
+                continue
+            key = (
+                str(row["instrument_id"]),
+                str(row["ticker"]).upper(),
+                date.fromisoformat(str(row["trading_day"])),
+            )
+            if key not in requested:
+                continue
+            candles_by_episode[key].append(
+                HistoricalCandle(
+                    ticker=key[1],
+                    at=_timestamp(row["candle_at"]),
+                    open=float(row["open_price"]),
+                    high=float(row["high_price"]),
+                    low=float(row["low_price"]),
+                    close=float(row["close_price"]),
+                    volume=float(row["volume"]),
+                    complete=True,
+                )
+            )
+        return tuple(
+            MorningRetracementMarketSeries(
+                instrument_id=instrument_id,
+                ticker=ticker,
+                class_code="",
+                alias=ticker,
+                trading_day=trading_day,
+                previous_session=(),
+                current_session=tuple(sorted(candles, key=lambda item: item.at)),
+                historical_cumulative_volume=None,
+            )
+            for (instrument_id, ticker, trading_day), candles in sorted(
+                candles_by_episode.items()
+            )
+        )
     def _rows(
         self,
         sql: str,
@@ -429,12 +589,31 @@ class ClickHouseMorningRetracementSource:
             )
 
 
+def _chunks(values: Sequence[Any], *, size: int) -> tuple[tuple[Any, ...], ...]:
+    if size <= 0:
+        raise ValueError("chunk size must be positive")
+    return tuple(
+        tuple(values[index : index + size])
+        for index in range(0, len(values), size)
+    )
+
+
 def _array_parameter(values: Sequence[str]) -> str:
     escaped = (
         "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
         for value in values
     )
     return "[" + ",".join(escaped) + "]"
+
+
+def _previous_session_candidates(local_day: date) -> tuple[date, ...]:
+    candidates: list[date] = []
+    candidate = local_day - timedelta(days=1)
+    while len(candidates) < 5:
+        if candidate.weekday() < 5:
+            candidates.append(candidate)
+        candidate -= timedelta(days=1)
+    return tuple(candidates)
 
 
 class ClickHouseMorningRetracementTrackingStore(
@@ -473,6 +652,7 @@ class ClickHouseMorningRetracementTrackingStore(
         payload = self._request(
             _PENDING_ASSESSMENTS_SQL,
             parameters={
+                "hypothesis_id": MORNING_RETRACEMENT_HYPOTHESIS_ID,
                 "record_schema_version": MORNING_RETRACEMENT_LIVE_RECORD_VERSION,
                 "outcome_policy_version": outcome_policy_version,
                 "limit": str(limit),
@@ -516,6 +696,13 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _target_metric(target_fraction: float) -> str:
+    target_percent = round(target_fraction * 100)
+    if not 1 <= target_percent <= 100:
+        raise ValueError("target_fraction must map to R1..R100")
+    return f"r{target_percent}_hit"
+
+
 def _assessment_id(assessment: MorningRetracementLiveAssessment) -> str:
     return "morning-retracement:" + sha256(
         assessment.observation_key.encode("utf-8")
@@ -540,6 +727,7 @@ def _assessment_payload(
         "excursion_bps": snapshot.excursion_bps,
         "tick_size": snapshot.tick_size,
         "model_probability": recommendation.model_probability,
+        "non_loss_probability": recommendation.effective_non_loss_probability,
         "target_price": recommendation.target_price,
         "initial_stop_price": recommendation.initial_stop_price,
         "break_even_trigger_price": recommendation.break_even_trigger_price,
@@ -553,6 +741,9 @@ def _assessment_payload(
         "hypothesis_version": assessment.hypothesis_version,
         "model_fingerprint": assessment.model_fingerprint,
         "probability_threshold": assessment.probability_threshold,
+        "non_loss_probability_threshold": (
+            assessment.non_loss_probability_threshold
+        ),
         "maximum_relative_volume": assessment.maximum_relative_volume,
         "minimum_excursion_bps": assessment.minimum_excursion_bps,
         "minimum_remaining_move_bps": assessment.minimum_remaining_move_bps,
@@ -562,6 +753,15 @@ def _assessment_payload(
         "expected_hit_minutes_median": assessment.expected_hit_minutes_median,
         "expected_hit_minutes_p75": assessment.expected_hit_minutes_p75,
         "training_window_ended": assessment.training_window_ended,
+        "non_loss_model_fingerprint": assessment.non_loss_model_fingerprint,
+        "target_fraction": assessment.target_fraction,
+        "current_retracement_fraction": (
+            assessment.current_retracement_fraction
+        ),
+        "minimum_current_retracement_fraction": (
+            assessment.minimum_current_retracement_fraction
+        ),
+        "minimum_relative_volume": assessment.minimum_relative_volume,
     }
 
 
@@ -583,7 +783,7 @@ def _assessment_row(
     input_fingerprint = _fingerprint(payload)
     row: dict[str, object] = {
         "observation_id": observation_id,
-        "hypothesis_id": "h1-morning-low-volume-reversion",
+        "hypothesis_id": MORNING_RETRACEMENT_HYPOTHESIS_ID,
         "hypothesis_version": assessment.hypothesis_version,
         "policy_version": assessment.policy_version,
         "formula_version": f"morning-retracement-logit-{assessment.hypothesis_version}",
@@ -592,8 +792,8 @@ def _assessment_row(
         "instrument_id": assessment.instrument_id,
         "ticker": assessment.ticker,
         "trading_day": assessment.trading_day,
-        "observed_at": observed.isoformat(),
-        "feature_max_observed_at": observed.isoformat(),
+        "observed_at": _clickhouse_datetime(observed),
+        "feature_max_observed_at": _clickhouse_datetime(observed),
         "model_trained_until": None,
         "market_phase": "morning_live_monitoring",
         "phase_bucket": local.strftime("%H:%M"),
@@ -607,11 +807,11 @@ def _assessment_row(
             1 if assessment.recommendation.expected_direction == "up" else -1
         ),
         "forecast_value": assessment.recommendation.model_probability,
-        "target_metric": "r50_hit",
+        "target_metric": _target_metric(assessment.target_fraction),
         "effect_unit": "probability",
         "claim_scope": "research_recommendation",
         "horizon_seconds": max(1, int((deadline - observed).total_seconds())),
-        "target_at": deadline.isoformat(),
+        "target_at": _clickhouse_datetime(deadline),
         "feature_values_json": json.dumps(
             payload, allow_nan=False, ensure_ascii=True, sort_keys=True
         ),
@@ -626,12 +826,12 @@ def _assessment_row(
             ensure_ascii=True,
             sort_keys=True,
         ),
-        "input_window_start": local.replace(
-            hour=7, minute=0, second=0, microsecond=0
-        ).isoformat(),
-        "input_window_end": observed.isoformat(),
+        "input_window_start": _clickhouse_datetime(
+            local.replace(hour=7, minute=0, second=0, microsecond=0)
+        ),
+        "input_window_end": _clickhouse_datetime(observed),
         "source_kind": "stream",
-        "source_max_observed_at": observed.isoformat(),
+        "source_max_observed_at": _clickhouse_datetime(observed),
         "has_gap": 0,
         "source_event_ids": [
             "scientific-candle:" + sha256(
@@ -652,7 +852,7 @@ def _assessment_row(
             }
         ),
         "payload_fingerprint": "",
-        "recorded_at": recorded_at.isoformat(),
+        "recorded_at": _clickhouse_datetime(recorded_at),
         "record_version": int(recorded_at.timestamp() * 1_000_000),
         "record_schema_version": MORNING_RETRACEMENT_LIVE_RECORD_VERSION,
     }
@@ -695,6 +895,11 @@ def _assessment_from_payload(payload: Mapping[str, Any]) -> MorningRetracementLi
         relative_volume=float(payload["relative_volume"]),
         active_minute_ratio=float(payload["active_minute_ratio"]),
         observed_at=observed_at,
+        non_loss_probability=(
+            float(payload["non_loss_probability"])
+            if payload.get("non_loss_probability") is not None
+            else None
+        ),
     )
     return MorningRetracementLiveAssessment(
         instrument_id=str(payload["instrument_id"]),
@@ -717,6 +922,26 @@ def _assessment_from_payload(payload: Mapping[str, Any]) -> MorningRetracementLi
         expected_hit_minutes_median=int(payload["expected_hit_minutes_median"]),
         expected_hit_minutes_p75=int(payload["expected_hit_minutes_p75"]),
         training_window_ended=bool(payload["training_window_ended"]),
+        non_loss_probability_threshold=(
+            float(payload["non_loss_probability_threshold"])
+            if payload.get("non_loss_probability_threshold") is not None
+            else None
+        ),
+        non_loss_model_fingerprint=(
+            str(payload["non_loss_model_fingerprint"])
+            if payload.get("non_loss_model_fingerprint") is not None
+            else None
+        ),
+        target_fraction=float(payload.get("target_fraction", 0.50)),
+        current_retracement_fraction=float(
+            payload.get("current_retracement_fraction", 0.0)
+        ),
+        minimum_current_retracement_fraction=float(
+            payload.get("minimum_current_retracement_fraction", 0.0)
+        ),
+        minimum_relative_volume=float(
+            payload.get("minimum_relative_volume", 0.0)
+        ),
     )
 
 
@@ -742,6 +967,9 @@ def _outcome_row(
             + assessment.observed_at.astimezone(MOSCOW).minute
         ),
         "model_probability": probability,
+        "non_loss_probability": (
+            assessment.recommendation.effective_non_loss_probability
+        ),
         "eligible_for_signal": assessment.eligible_for_signal,
         "target_hit": outcome.target_hit,
         "non_loss": outcome.non_loss,
@@ -760,13 +988,13 @@ def _outcome_row(
     row: dict[str, object] = {
         "outcome_id": outcome_id,
         "observation_id": outcome.observation_id,
-        "hypothesis_id": "h1-morning-low-volume-reversion",
+        "hypothesis_id": MORNING_RETRACEMENT_HYPOTHESIS_ID,
         "hypothesis_version": assessment.hypothesis_version,
         "instrument_id": assessment.instrument_id,
         "trading_day": assessment.trading_day,
-        "target_at": deadline.isoformat(),
-        "observed_range_start": assessment.observed_at.isoformat(),
-        "observed_range_end": deadline.isoformat(),
+        "target_at": _clickhouse_datetime(deadline),
+        "observed_range_start": _clickhouse_datetime(assessment.observed_at),
+        "observed_range_end": _clickhouse_datetime(deadline),
         "available": int(outcome.target_hit is not None),
         "reason_code": outcome.exit_reason,
         "actual_value": actual,
@@ -776,15 +1004,15 @@ def _outcome_row(
         ),
         "benchmark_loss": None,
         "supported": None if actual is None else int(bool(outcome.target_hit)),
-        "target_metric": "r50_hit",
+        "target_metric": _target_metric(assessment.target_fraction),
         "effect_unit": "probability",
         "outcome_policy_version": outcome.outcome_policy_version,
         "source_event_ids": [],
-        "source_window_start": assessment.observed_at.isoformat(),
-        "source_window_end": deadline.isoformat(),
-        "source_max_observed_at": deadline.isoformat(),
+        "source_window_start": _clickhouse_datetime(assessment.observed_at),
+        "source_window_end": _clickhouse_datetime(deadline),
+        "source_max_observed_at": _clickhouse_datetime(deadline),
         "input_fingerprint": evidence_fingerprint,
-        "evaluated_at": outcome.evaluated_at.isoformat(),
+        "evaluated_at": _clickhouse_datetime(outcome.evaluated_at),
         "payload_fingerprint": "",
         "record_version": int(outcome.evaluated_at.timestamp() * 1_000_000),
         "record_schema_version": MORNING_RETRACEMENT_LIVE_RECORD_VERSION,
@@ -812,3 +1040,11 @@ def _fingerprint(payload: Mapping[str, object]) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _clickhouse_datetime(value: datetime) -> str:
+    """Serialize a timezone-aware value for a ClickHouse DateTime64 column."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("ClickHouse timestamps must be timezone-aware")
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")

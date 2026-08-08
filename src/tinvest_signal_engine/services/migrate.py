@@ -95,7 +95,9 @@ def _run(
                 with httpx.Client(
                     base_url=settings.clickhouse_http_url,
                     auth=auth,
-                    timeout=60.0,
+                    # Large, one-time native-type backfills can legitimately
+                    # outlive an ordinary request timeout on local installs.
+                    timeout=600.0,
                 ) as client:
                     result = MigrationRunner(
                         source=source,

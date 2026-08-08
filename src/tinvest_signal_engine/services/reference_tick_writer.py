@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from tinvest_signal_engine.adapters.clickhouse_reference_ticks import (
     ClickHouseReferenceTickStore,
@@ -12,11 +13,13 @@ from tinvest_signal_engine.adapters.kafka_reference_ticks import (
     ReferenceTickKafkaRuntime,
     build_reference_tick_consumer,
 )
+from tinvest_signal_engine.adapters.worker_health_file import WorkerHealthFileSink
 from tinvest_signal_engine.adapters.reliability_metrics import (
     PrometheusReliabilityMetrics,
     start_reliability_metrics_server,
 )
 from tinvest_signal_engine.application.reference_ticks import ReferenceTickProcessor
+from tinvest_signal_engine.application.worker_health import WorkerHealthTracker
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.kafka_wire_config import validate_kafka_wire_settings
 from tinvest_signal_engine.logging_utils import configure_logging
@@ -47,19 +50,33 @@ def main() -> None:
         username=settings.clickhouse_http_username,
         password=settings.clickhouse_http_password,
     )
-    runtime = ReferenceTickKafkaRuntime(
-        consumer=build_reference_tick_consumer(
-            topic=settings.kafka_raw_topic,
-            bootstrap_servers=settings.kafka_bootstrap_servers,
-            group_id=(
-                os.getenv("REFERENCE_TICK_CONSUMER_GROUP")
-                or "reference-tick-writer-v1"
-            ).strip(),
-            auto_offset_reset=settings.kafka_auto_offset_reset,
-            value_format=settings.kafka_raw_value_format,
+    consumer = build_reference_tick_consumer(
+        topic=settings.kafka_raw_topic,
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        group_id=(
+            os.getenv("REFERENCE_TICK_CONSUMER_GROUP")
+            or "reference-tick-writer-v1"
+        ).strip(),
+        auto_offset_reset=settings.kafka_auto_offset_reset,
+        value_format=settings.kafka_raw_value_format,
+    )
+    health = WorkerHealthTracker(
+        worker_id="reference_tick_writer",
+        sink=WorkerHealthFileSink(
+            Path(
+                os.getenv("REFERENCE_TICK_HEALTH_SNAPSHOT_PATH")
+                or "/tmp/reference-tick-writer-health.json"
+            )
         ),
+        stale_after_seconds=int(
+            os.getenv("REFERENCE_TICK_HEALTH_STALE_AFTER_SECONDS") or "180"
+        ),
+    )
+    runtime = ReferenceTickKafkaRuntime(
+        consumer=consumer,
         processor=ReferenceTickProcessor(store),
         metrics=metrics,
+        health=health,
     )
     logger.info("Starting reference tick writer")
     with graceful_shutdown_event(
