@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import csv
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
+import io
 import json
 import os
 from pathlib import Path
+import re
 import ssl
 import time as clock
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+import zipfile
 
 import httpx
 
@@ -27,6 +30,12 @@ from tinvest_signal_engine.domain.candle_cache import (
 
 _API_ROOT = "https://invest-public-api.tbank.ru/rest/"
 _API_SERVICE = "tinkoff.public.invest.api.contract.v1"
+_HISTORY_ARCHIVE_URL = "https://invest-public-api.tbank.ru/history-data"
+_MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
+_MAX_ARCHIVE_MEMBERS = 370
+_MAX_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024
+_MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+_ARCHIVE_MEMBER_PATTERN = re.compile(r"^[^/\\]+_(\d{8})\.csv$")
 _MOSCOW = ZoneInfo("Europe/Moscow")
 _FIELDS = (
     "ticker",
@@ -54,8 +63,236 @@ def _trusted_ssl_context(ca_bundle_path: str | Path | None) -> ssl.SSLContext:
         raise ValueError(f"Trusted CA bundle could not be loaded: {path}") from error
 
 
+class TInvestArchiveCandleHistorySource:
+    """Read official yearly candle archives without persisting broker identifiers."""
+
+    def __init__(
+        self,
+        *,
+        token: str,
+        timeout_seconds: float = 30.0,
+        attempts: int = 5,
+        request_interval_seconds: float = 2.1,
+        ca_bundle_path: str | Path | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+        client: httpx.Client | None = None,
+        sleep: Callable[[float], None] = clock.sleep,
+    ) -> None:
+        if not token.strip():
+            raise ValueError("T-Invest token must not be empty")
+        if attempts < 1:
+            raise ValueError("attempts must be positive")
+        if ca_bundle_path is not None and ssl_context is not None:
+            raise ValueError("Set only one of ca_bundle_path and ssl_context")
+        self._attempts = attempts
+        self._request_interval_seconds = max(0.0, request_interval_seconds)
+        self._sleep = sleep
+        self._instrument_ids: dict[str, tuple[str, str]] = {}
+        self._archives: dict[tuple[str, int], _OpenCandleArchive | None] = {}
+        self._owns_client = client is None
+        verify = (
+            ssl_context
+            if ssl_context is not None
+            else _trusted_ssl_context(ca_bundle_path)
+        )
+        self._client = client or httpx.Client(
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "x-app-name": "investment-signals-candle-cache",
+            },
+            timeout=httpx.Timeout(timeout_seconds),
+            verify=verify,
+        )
+
+    def close(self) -> None:
+        for archive in self._archives.values():
+            if archive is not None:
+                archive.close()
+        self._archives.clear()
+        if self._owns_client:
+            self._client.close()
+
+    def fetch(self, key: CandlePartitionKey) -> tuple[CachedCandle, ...]:
+        instrument_uid, figi = self._instrument_identity(key.ticker)
+        archive_key = (key.ticker, key.trading_day.year)
+        if archive_key not in self._archives:
+            self._archives[archive_key] = self._download_archive(
+                figi=figi,
+                instrument_uid=instrument_uid,
+                year=key.trading_day.year,
+            )
+        archive = self._archives[archive_key]
+        if archive is None:
+            return ()
+        return archive.candles(key)
+
+    def _instrument_identity(self, ticker: str) -> tuple[str, str]:
+        known = self._instrument_ids.get(ticker)
+        if known is not None:
+            return known
+        payload = self._post(
+            "InstrumentsService/FindInstrument",
+            {
+                "query": ticker,
+                "instrumentKind": "INSTRUMENT_TYPE_SHARE",
+                "apiTradeAvailableFlag": True,
+            },
+        )
+        matches = [
+            item
+            for item in payload.get("instruments", ())
+            if isinstance(item, Mapping)
+            and item.get("ticker") == ticker
+            and item.get("classCode") == "TQBR"
+            and item.get("uid")
+            and item.get("figi")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("canonical TQBR instrument was not resolved")
+        resolved = (str(matches[0]["uid"]), str(matches[0]["figi"]))
+        self._instrument_ids[ticker] = resolved
+        return resolved
+
+    def _download_archive(
+        self,
+        *,
+        figi: str,
+        instrument_uid: str,
+        year: int,
+    ) -> _OpenCandleArchive | None:
+        for attempt in range(self._attempts):
+            try:
+                response = self._client.get(
+                    _HISTORY_ARCHIVE_URL,
+                    params={"figi": figi, "year": year},
+                )
+                if response.status_code == 200:
+                    if len(response.content) > _MAX_ARCHIVE_BYTES:
+                        raise RuntimeError("T-Invest history archive is too large")
+                    archive = _OpenCandleArchive(
+                        payload=response.content,
+                        instrument_uid=instrument_uid,
+                    )
+                    self._pace_archive_requests()
+                    return archive
+                if response.status_code == 404:
+                    self._pace_archive_requests()
+                    return None
+                if response.status_code not in {429, 500, 502, 503, 504}:
+                    raise RuntimeError(
+                        "T-Invest history archive request failed with HTTP "
+                        f"{response.status_code}"
+                    )
+            except (httpx.HTTPError, zipfile.BadZipFile):
+                pass
+            if attempt + 1 < self._attempts:
+                self._sleep(min(20.0, 0.75 * (2**attempt)))
+        raise RuntimeError("T-Invest history archive request failed after retries")
+
+    def _pace_archive_requests(self) -> None:
+        if self._request_interval_seconds:
+            self._sleep(self._request_interval_seconds)
+
+    def _post(self, method: str, payload: Mapping[str, object]) -> Mapping[str, Any]:
+        url = f"{_API_ROOT}{_API_SERVICE}.{method}"
+        for attempt in range(self._attempts):
+            try:
+                response = self._client.post(url, json=payload)
+                if response.status_code == 200:
+                    body = response.json()
+                    if not isinstance(body, Mapping):
+                        raise RuntimeError("T-Invest response is not an object")
+                    return body
+                if response.status_code not in {429, 500, 502, 503, 504}:
+                    raise RuntimeError(
+                        f"T-Invest request failed with HTTP {response.status_code}"
+                    )
+            except httpx.HTTPError:
+                pass
+            if attempt + 1 < self._attempts:
+                self._sleep(min(20.0, 0.75 * (2**attempt)))
+        raise RuntimeError("T-Invest request failed after retries")
+
+
+class _OpenCandleArchive:
+    """Keep one bounded official ZIP open and decode only the requested day."""
+
+    def __init__(self, *, payload: bytes, instrument_uid: str) -> None:
+        self._buffer = io.BytesIO(payload)
+        self._archive = zipfile.ZipFile(self._buffer)
+        self._instrument_uid = instrument_uid
+        self._members = self._validated_members()
+
+    def close(self) -> None:
+        self._archive.close()
+        self._buffer.close()
+
+    def candles(self, key: CandlePartitionKey) -> tuple[CachedCandle, ...]:
+        member = self._members.get(key.trading_day)
+        if member is None:
+            return ()
+        rows: list[CachedCandle] = []
+        with self._archive.open(member) as raw:
+            stream = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+            for fields in csv.reader(stream, delimiter=";"):
+                if fields and fields[-1] == "":
+                    fields.pop()
+                if len(fields) != 7:
+                    raise ValueError("T-Invest history archive row is malformed")
+                uid, raw_at, raw_open, raw_close, raw_high, raw_low, raw_volume = (
+                    fields
+                )
+                if uid != self._instrument_uid:
+                    raise ValueError("T-Invest history archive instrument mismatch")
+                at = datetime.fromisoformat(raw_at.replace("Z", "+00:00"))
+                local = at.astimezone(_MOSCOW)
+                if local.date() != key.trading_day:
+                    continue
+                if local.hour * 60 + local.minute < 6 * 60 + 50:
+                    continue
+                rows.append(
+                    CachedCandle(
+                        ticker=key.ticker,
+                        at=at,
+                        open=float(raw_open),
+                        high=float(raw_high),
+                        low=float(raw_low),
+                        close=float(raw_close),
+                        volume=float(raw_volume),
+                        volume_buy=0.0,
+                        volume_sell=0.0,
+                        complete=True,
+                    )
+                )
+        return tuple(rows)
+
+    def _validated_members(self) -> dict[date, zipfile.ZipInfo]:
+        members = self._archive.infolist()
+        if len(members) > _MAX_ARCHIVE_MEMBERS:
+            raise ValueError("T-Invest history archive has too many members")
+        total_uncompressed = 0
+        selected: dict[date, zipfile.ZipInfo] = {}
+        for member in members:
+            match = _ARCHIVE_MEMBER_PATTERN.fullmatch(member.filename)
+            if (
+                member.is_dir()
+                or match is None
+                or member.file_size > _MAX_ARCHIVE_MEMBER_BYTES
+            ):
+                raise ValueError("T-Invest history archive member is unsafe")
+            total_uncompressed += member.file_size
+            if total_uncompressed > _MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                raise ValueError("T-Invest history archive expands beyond its limit")
+            day = datetime.strptime(match.group(1), "%Y%m%d").date()
+            if day in selected:
+                raise ValueError("T-Invest history archive contains duplicate days")
+            selected[day] = member
+        return selected
+
+
 class TInvestRestCandleHistorySource:
-    """Read exchange candles without exposing broker identifiers to the cache."""
+    """Read daily exchange candles including classified buy/sell volume."""
 
     def __init__(
         self,
@@ -587,8 +824,14 @@ class ParquetCandlePartitionRepository:
 class JsonCandleCacheManifest:
     """Publish the compatibility manifest and a redacted failure summary atomically."""
 
-    def __init__(self, cache_dir: str | Path) -> None:
+    def __init__(
+        self,
+        cache_dir: str | Path,
+        *,
+        aggressor_volume_available: bool = True,
+    ) -> None:
         self._cache_dir = Path(cache_dir)
+        self._aggressor_volume_available = aggressor_volume_available
 
     def publish(self, receipt: CandleCacheReceipt) -> None:
         failures = [
@@ -614,7 +857,11 @@ class JsonCandleCacheManifest:
                 "interval": "1m",
                 "source_type": "CANDLE_SOURCE_EXCHANGE",
                 "session_window": "06:50-24:00 Europe/Moscow",
-                "aggressor_volume_fields": ["volume_buy", "volume_sell"],
+                "aggressor_volume_fields": (
+                    ["volume_buy", "volume_sell"]
+                    if self._aggressor_volume_available
+                    else []
+                ),
             },
             "privacy": {
                 "tokens_persisted": False,

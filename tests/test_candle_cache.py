@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+import io
 import json
 from pathlib import Path
 import ssl
+import zipfile
 
 import httpx
 import pytest
@@ -12,6 +14,7 @@ import tinvest_signal_engine.adapters.candle_cache as candle_cache_adapter
 from tinvest_signal_engine.adapters.candle_cache import (
     JsonCandleCacheManifest,
     ParquetCandlePartitionRepository,
+    TInvestArchiveCandleHistorySource,
     TInvestRestCandleHistorySource,
 )
 from tinvest_signal_engine.adapters.local_hypothesis_replay import LocalCandleCache
@@ -208,6 +211,28 @@ def test_manifest_distinguishes_empty_day_and_records_actual_morning_rows(
     }
 
 
+def test_manifest_marks_archive_aggressor_volume_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    day = date(2026, 7, 18)
+    source = _Source({"SBER/2026-07-18": (_candle("SBER", day),)})
+    repository = ParquetCandlePartitionRepository(tmp_path)
+    try:
+        BuildReusableCandleCache(
+            source=source,
+            repository=repository,
+            manifest=JsonCandleCacheManifest(
+                tmp_path,
+                aggressor_volume_available=False,
+            ),
+        ).execute(CandleCacheScope(("SBER",), day, day))
+    finally:
+        repository.close()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["scope"]["aggressor_volume_fields"] == []
+
+
 def test_large_inventory_releases_each_partition_before_reading_next(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -338,10 +363,22 @@ def test_failed_fetch_does_not_change_existing_valid_partition_or_leak_secrets(
     assert manifest["quality"]["rows_by_partition"] == {"SBER/2026-07-15": 1}
 
 
-def test_rest_source_keeps_uid_out_of_returned_candles_and_requests_full_session() -> (
+def _history_archive(*, uid: str, day: date) -> bytes:
+    payload = (
+        f"{uid};{day.isoformat()}T04:00:00Z;100;100.5;101;99;10;\n"
+    ).encode()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{uid}_{day.strftime('%Y%m%d')}.csv", payload)
+    return buffer.getvalue()
+
+
+def test_rest_source_reuses_official_year_archive_and_keeps_uid_out_of_candles() -> (
     None
 ):
     uid = "raw-instrument-uid"
+    figi = "raw-figi"
+    day = date(2026, 7, 15)
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -355,7 +392,55 @@ def test_rest_source_keeps_uid_out_of_returned_candles_and_requests_full_session
                             "ticker": "SBER",
                             "classCode": "TQBR",
                             "uid": uid,
+                            "figi": figi,
                         }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            content=_history_archive(uid=uid, day=day),
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    source = TInvestArchiveCandleHistorySource(
+        token="token-value",
+        client=client,
+        request_interval_seconds=0,
+    )
+    try:
+        candles = source.fetch(CandlePartitionKey("SBER", day))
+        missing = source.fetch(CandlePartitionKey("SBER", day + timedelta(days=1)))
+    finally:
+        source.close()
+        client.close()
+
+    assert len(candles) == 1
+    assert candles[0].ticker == "SBER"
+    assert candles[0].close == 100.5
+    assert candles[0].volume == 10.0
+    assert candles[0].volume_buy == 0.0
+    assert candles[0].volume_sell == 0.0
+    assert missing == ()
+    assert uid not in repr(candles)
+    assert len(requests) == 2
+    assert requests[1].method == "GET"
+    assert requests[1].url.params["figi"] == figi
+    assert requests[1].url.params["year"] == "2026"
+
+
+def test_daily_rest_source_preserves_classified_volume_and_session_bounds() -> None:
+    uid = "raw-instrument-uid"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "FindInstrument" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "instruments": [
+                        {"ticker": "SBER", "classCode": "TQBR", "uid": uid}
                     ]
                 },
             )
@@ -389,13 +474,49 @@ def test_rest_source_keeps_uid_out_of_returned_candles_and_requests_full_session
     finally:
         client.close()
 
-    assert len(candles) == 1
-    assert candles[0].ticker == "SBER"
-    assert uid not in repr(candles)
+    assert candles[0].volume_buy == 6.0
+    assert candles[0].volume_sell == 4.0
     candle_request = json.loads(requests[1].content)
     assert candle_request["instrumentId"] == uid
     assert candle_request["from"] == "2026-07-15T03:50:00Z"
     assert candle_request["to"] == "2026-07-15T21:00:00Z"
+
+
+def test_archive_source_rejects_unsafe_history_archive_member() -> None:
+    uid = "raw-instrument-uid"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("../unsafe.csv", b"unsafe")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "FindInstrument" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "instruments": [
+                        {
+                            "ticker": "SBER",
+                            "classCode": "TQBR",
+                            "uid": uid,
+                            "figi": "raw-figi",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, content=buffer.getvalue())
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    source = TInvestArchiveCandleHistorySource(
+        token="token-value",
+        client=client,
+        request_interval_seconds=0,
+    )
+    try:
+        with pytest.raises(ValueError, match="member is unsafe"):
+            source.fetch(CandlePartitionKey("SBER", date(2026, 7, 15)))
+    finally:
+        source.close()
+        client.close()
 
 
 def test_rest_source_builds_ssl_context_from_trusted_ca_bundle(

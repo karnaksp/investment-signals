@@ -17,6 +17,8 @@ def test_ca_cert_uses_public_environment_setting(
     args = candle_cache.parse_args([])
 
     assert args.ca_cert == bundle
+    assert args.source == "daily"
+    assert args.request_interval is None
 
 
 def test_ca_cert_cli_option_overrides_public_environment_setting(
@@ -30,6 +32,12 @@ def test_ca_cert_cli_option_overrides_public_environment_setting(
     args = candle_cache.parse_args(["--ca-cert", str(cli_bundle)])
 
     assert args.ca_cert == cli_bundle
+
+
+def test_archive_source_can_be_selected_for_bounded_setup_backfill() -> None:
+    args = candle_cache.parse_args(["--source", "archive"])
+
+    assert args.source == "archive"
 
 
 def test_command_fails_clearly_when_trusted_ca_bundle_is_missing(

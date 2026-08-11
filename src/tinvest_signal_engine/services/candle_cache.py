@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from tinvest_signal_engine.adapters.candle_cache import (
     JsonCandleCacheManifest,
     ParquetCandlePartitionRepository,
+    TInvestArchiveCandleHistorySource,
     TInvestRestCandleHistorySource,
 )
 from tinvest_signal_engine.application.candle_cache import BuildReusableCandleCache
@@ -68,7 +69,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--end-day", type=date.fromisoformat)
     parser.add_argument("--request-timeout", type=float, default=30.0)
     parser.add_argument("--request-attempts", type=int, default=5)
-    parser.add_argument("--request-interval", type=float, default=0.05)
+    parser.add_argument("--request-interval", type=float)
+    parser.add_argument(
+        "--source",
+        choices=("daily", "archive"),
+        default="daily",
+        help=(
+            "daily preserves classified buy/sell volume; archive uses the "
+            "official yearly ZIP feed for bounded installation backfill"
+        ),
+    )
     parser.add_argument(
         "--ca-cert",
         type=Path,
@@ -106,19 +116,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         end_day=end_day,
     )
     token = load_secret("TINVEST_TOKEN", service_name="candle_cache") or ""
-    source = TInvestRestCandleHistorySource(
-        token=token,
-        timeout_seconds=args.request_timeout,
-        attempts=args.request_attempts,
-        request_interval_seconds=args.request_interval,
-        ca_bundle_path=ca_bundle_path,
+    source_type = (
+        TInvestArchiveCandleHistorySource
+        if args.source == "archive"
+        else TInvestRestCandleHistorySource
+    )
+    source_options: dict[str, object] = {
+        "token": token,
+        "timeout_seconds": args.request_timeout,
+        "attempts": args.request_attempts,
+        "ca_bundle_path": ca_bundle_path,
+    }
+    if args.request_interval is not None:
+        source_options["request_interval_seconds"] = args.request_interval
+    source = source_type(
+        **source_options,
     )
     repository = ParquetCandlePartitionRepository(args.cache_dir)
     try:
         receipt = BuildReusableCandleCache(
             source=source,
             repository=repository,
-            manifest=JsonCandleCacheManifest(args.cache_dir),
+            manifest=JsonCandleCacheManifest(
+                args.cache_dir,
+                aggressor_volume_available=args.source == "daily",
+            ),
         ).execute(scope)
     finally:
         repository.close()
