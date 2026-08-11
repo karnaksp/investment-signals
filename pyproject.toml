@@ -71,6 +71,7 @@ orchestration = [
 ]
 replay = [
   "duckdb==1.5.4",
+  "pytz>=2024.1",
 ]
 dev = [
   "pytest>=8",

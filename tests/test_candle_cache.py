@@ -484,11 +484,13 @@ def test_daily_rest_source_preserves_classified_volume_and_session_bounds() -> N
 
 def test_archive_source_rejects_unsafe_history_archive_member() -> None:
     uid = "raw-instrument-uid"
+    requests: list[httpx.Request] = []
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("../unsafe.csv", b"unsafe")
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
         if "FindInstrument" in str(request.url):
             return httpx.Response(
                 200,
@@ -514,9 +516,23 @@ def test_archive_source_rejects_unsafe_history_archive_member() -> None:
     try:
         with pytest.raises(ValueError, match="member is unsafe"):
             source.fetch(CandlePartitionKey("SBER", date(2026, 7, 15)))
+        with pytest.raises(ValueError, match="member is unsafe"):
+            source.fetch(CandlePartitionKey("SBER", date(2026, 7, 16)))
     finally:
         source.close()
         client.close()
+
+    assert len(requests) == 2
+
+
+def test_replay_extra_includes_duckdb_timezone_runtime() -> None:
+    import tomllib
+
+    project = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+
+    assert "pytz>=2024.1" in project["project"]["optional-dependencies"]["replay"]
 
 
 def test_rest_source_builds_ssl_context_from_trusted_ca_bundle(

@@ -89,6 +89,7 @@ class TInvestArchiveCandleHistorySource:
         self._sleep = sleep
         self._instrument_ids: dict[str, tuple[str, str]] = {}
         self._archives: dict[tuple[str, int], _OpenCandleArchive | None] = {}
+        self._invalid_archives: dict[tuple[str, int], str] = {}
         self._owns_client = client is None
         verify = (
             ssl_context
@@ -110,18 +111,27 @@ class TInvestArchiveCandleHistorySource:
             if archive is not None:
                 archive.close()
         self._archives.clear()
+        self._invalid_archives.clear()
         if self._owns_client:
             self._client.close()
 
     def fetch(self, key: CandlePartitionKey) -> tuple[CachedCandle, ...]:
         instrument_uid, figi = self._instrument_identity(key.ticker)
         archive_key = (key.ticker, key.trading_day.year)
+        invalid_reason = self._invalid_archives.get(archive_key)
+        if invalid_reason is not None:
+            raise ValueError(invalid_reason)
         if archive_key not in self._archives:
-            self._archives[archive_key] = self._download_archive(
-                figi=figi,
-                instrument_uid=instrument_uid,
-                year=key.trading_day.year,
-            )
+            try:
+                self._archives[archive_key] = self._download_archive(
+                    figi=figi,
+                    instrument_uid=instrument_uid,
+                    year=key.trading_day.year,
+                )
+            except ValueError as error:
+                reason = str(error)
+                self._invalid_archives[archive_key] = reason
+                raise
         archive = self._archives[archive_key]
         if archive is None:
             return ()
