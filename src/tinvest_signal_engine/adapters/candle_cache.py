@@ -49,6 +49,7 @@ _FIELDS = (
     "volume_sell",
     "complete",
 )
+_PARQUET_SCAN_BATCH_SIZE = 128
 
 
 def _trusted_ssl_context(ca_bundle_path: str | Path | None) -> ssl.SSLContext:
@@ -458,12 +459,16 @@ class ParquetCandlePartitionRepository:
         self,
         keys: tuple[CandlePartitionKey, ...],
     ) -> tuple[CandlePartitionState, ...]:
-        try:
-            summaries = self._inspect_many_batch(keys)
-        except Exception:
-            # A corrupt footer can fail the multi-file table function before
-            # it identifies the offending path.  Isolate it on the slow path.
-            return tuple(self.inspect(key) for key in keys)
+        summaries: dict[CandlePartitionKey, CandlePartitionState] = {}
+        for offset in range(0, len(keys), _PARQUET_SCAN_BATCH_SIZE):
+            batch = keys[offset : offset + _PARQUET_SCAN_BATCH_SIZE]
+            try:
+                summaries.update(self._inspect_many_batch(batch))
+            except Exception:
+                # A corrupt footer can fail the multi-file table function before
+                # it identifies the offending path. Isolate only this bounded
+                # batch on the slow path and preserve the valid batch results.
+                summaries.update((key, self.inspect(key)) for key in batch)
         return tuple(
             summaries.get(key, CandlePartitionState(key, False)) for key in keys
         )
@@ -631,7 +636,14 @@ class ParquetCandlePartitionRepository:
         if not key_by_path:
             return {}, sha256().hexdigest()
         try:
-            return self._scan_many_batch(key_by_path)
+            digest = sha256()
+            summaries: dict[CandlePartitionKey, tuple[int, int]] = {}
+            paths = tuple(sorted(key_by_path))
+            for offset in range(0, len(paths), _PARQUET_SCAN_BATCH_SIZE):
+                batch_paths = paths[offset : offset + _PARQUET_SCAN_BATCH_SIZE]
+                batch = {path: key_by_path[path] for path in batch_paths}
+                summaries.update(self._scan_many_batch(batch, digest))
+            return summaries, digest.hexdigest()
         except Exception:
             # A corrupt Parquet footer can make a multi-file scan fail as a
             # whole.  The slow path isolates that file so every other valid
@@ -641,7 +653,8 @@ class ParquetCandlePartitionRepository:
     def _scan_many_batch(
         self,
         key_by_path: Mapping[str, CandlePartitionKey],
-    ) -> tuple[dict[CandlePartitionKey, tuple[int, int]], str]:
+        digest: Any,
+    ) -> dict[CandlePartitionKey, tuple[int, int]]:
         database = self._database_connection()
         paths = tuple(sorted(key_by_path))
         schema_rows = database.execute(
@@ -659,7 +672,7 @@ class ParquetCandlePartitionRepository:
             if set(_FIELDS).issubset(fields_by_path.get(path, set()))
         )
         if not valid_paths:
-            return {}, sha256().hexdigest()
+            return {}
 
         metadata_rows = database.execute(
             "SELECT file_name, MAX(num_rows) "
@@ -672,7 +685,7 @@ class ParquetCandlePartitionRepository:
         }
         valid_paths = tuple(path for path in valid_paths if path in expected_rows)
         if not valid_paths:
-            return {}, sha256().hexdigest()
+            return {}
 
         quoted_fields = ", ".join(f'"{field}"' for field in _FIELDS)
         cursor = database.execute(
@@ -685,7 +698,6 @@ class ParquetCandlePartitionRepository:
         if not {"filename", *_FIELDS}.issubset(columns):
             raise ValueError("candle partition schema is incomplete")
 
-        digest = sha256()
         summaries: dict[CandlePartitionKey, tuple[int, int]] = {}
         current_path: str | None = None
         current_records: list[dict[str, object]] = []
@@ -725,7 +737,7 @@ class ParquetCandlePartitionRepository:
                 summaries[key] = (0, 0)
             elif key_by_path[path] not in summaries:
                 raise ValueError("non-empty candle partition was absent from scan")
-        return summaries, digest.hexdigest()
+        return summaries
 
     def _scan_many_fallback(
         self,

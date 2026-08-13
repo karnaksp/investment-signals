@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 import io
 import json
 from pathlib import Path
@@ -295,6 +296,54 @@ def test_large_inventory_releases_each_partition_before_reading_next(
     assert len(inventory.rows_by_partition) == partition_count
     assert TrackedRecord.peak <= rows_per_partition
     assert TrackedRecord.active == 0
+
+
+def test_large_inventory_scans_parquet_in_bounded_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partition_count = candle_cache_adapter._PARQUET_SCAN_BATCH_SIZE * 2 + 1
+    first_day = date(2025, 1, 1)
+    keys = tuple(
+        CandlePartitionKey("SBER", first_day + timedelta(days=offset))
+        for offset in range(partition_count)
+    )
+    path_by_key: dict[CandlePartitionKey, Path] = {}
+    for key in keys:
+        path = tmp_path / f"{key.trading_day.isoformat()}.parquet"
+        path.write_bytes(b"present")
+        path_by_key[key] = path
+
+    batch_sizes: list[int] = []
+
+    def scan_batch(
+        key_by_path: dict[str, CandlePartitionKey],
+        digest: object,
+    ) -> dict[CandlePartitionKey, tuple[int, int]]:
+        batch_sizes.append(len(key_by_path))
+        result: dict[CandlePartitionKey, tuple[int, int]] = {}
+        for path in sorted(key_by_path):
+            key = key_by_path[path]
+            digest.update(key.manifest_key.encode())
+            result[key] = (1, 0)
+        return result
+
+    repository = ParquetCandlePartitionRepository(tmp_path)
+    monkeypatch.setattr(repository, "_path", path_by_key.__getitem__)
+    monkeypatch.setattr(repository, "_scan_many_batch", scan_batch)
+
+    summaries, observed = repository._scan_many(keys)
+
+    expected = sha256()
+    for key in sorted(keys, key=path_by_key.__getitem__):
+        expected.update(key.manifest_key.encode())
+    assert batch_sizes == [
+        candle_cache_adapter._PARQUET_SCAN_BATCH_SIZE,
+        candle_cache_adapter._PARQUET_SCAN_BATCH_SIZE,
+        1,
+    ]
+    assert len(summaries) == partition_count
+    assert observed == expected.hexdigest()
 
 
 def test_incomplete_candle_never_replaces_a_valid_historical_partition(
