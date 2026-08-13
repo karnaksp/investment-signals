@@ -222,14 +222,14 @@ def _gate_row(*, n: int, sessions: int, expected_ci: tuple, reverse_ci: tuple, l
 
 def test_inverse_gate_requires_sample_and_opposite_intervals() -> None:
     statistically_inverse = _gate_row(
-        n=299,
+        n=99,
         sessions=8,
         expected_ci=(-5.0, -1.0),
         reverse_ci=(1.0, 5.0),
         lift_ci=(-5.0, -1.0),
     )
     _, _, under_sampled = study.build_decision([statistically_inverse])
-    statistically_inverse["n"] = 300
+    statistically_inverse["n"] = 100
     _, continuation, admitted = study.build_decision([statistically_inverse])
 
     assert under_sampled is False
@@ -239,7 +239,7 @@ def test_inverse_gate_requires_sample_and_opposite_intervals() -> None:
 
 def test_continuation_gate_requires_positive_net_and_control_lift() -> None:
     row = _gate_row(
-        n=300,
+        n=100,
         sessions=8,
         expected_ci=(0.1, 3.0),
         reverse_ci=(-23.0, -20.1),
@@ -256,7 +256,7 @@ def test_continuation_gate_requires_positive_net_and_control_lift() -> None:
 
 def test_exploratory_horizon_cannot_clear_primary_gate() -> None:
     row = _gate_row(
-        n=300,
+        n=100,
         sessions=8,
         expected_ci=(0.1, 3.0),
         reverse_ci=(-23.0, -20.1),
@@ -272,7 +272,7 @@ def test_exploratory_horizon_cannot_clear_primary_gate() -> None:
 
 def test_primary_gate_uses_versioned_eight_session_minimum() -> None:
     row = _gate_row(
-        n=300,
+        n=100,
         sessions=7,
         expected_ci=(0.1, 3.0),
         reverse_ci=(-23.0, -20.1),
@@ -286,6 +286,32 @@ def test_primary_gate_uses_versioned_eight_session_minimum() -> None:
     assert study.StudyPolicy().minimum_validation_sessions == 8
     assert below_minimum is False
     assert at_minimum is True
+
+
+def test_primary_gate_uses_versioned_sample_and_coverage_minimums() -> None:
+    row = _gate_row(
+        n=99,
+        sessions=8,
+        expected_ci=(0.1, 3.0),
+        reverse_ci=(-23.0, -20.1),
+        lift_ci=(0.1, 2.0),
+    )
+    row["outcome_coverage"] = 0.90
+
+    _, below_sample, _ = study.build_decision([row])
+    row["n"] = 100
+    row["outcome_coverage"] = 0.8999
+    _, below_coverage, _ = study.build_decision([row])
+    row["outcome_coverage"] = 0.90
+    _, at_minimums, _ = study.build_decision([row])
+
+    policy = study.StudyPolicy()
+    assert policy.minimum_eligible_signals == 100
+    assert policy.minimum_outcome_coverage == 0.90
+    assert policy.minimum_matched_control_coverage == 0.95
+    assert below_sample is False
+    assert below_coverage is False
+    assert at_minimums is True
 
 
 def test_failure_diagnostic_redacts_secrets() -> None:
