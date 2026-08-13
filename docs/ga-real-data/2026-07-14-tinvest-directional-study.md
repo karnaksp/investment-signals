@@ -51,7 +51,7 @@ This is still useful product evidence:
 This study validates automatic labels and evidence governance, not profitability.
 A signal family can support a product claim only after production tick/L2
 outcomes use actual half-spreads, exact detector/catalog/cost versions, at least
-30 validation sessions, at least 300 eligible signals, and matched controls whose
+8 validation sessions, at least 300 eligible signals, and matched controls whose
 95% confidence interval is above zero.
 
 One-minute candles cannot reconstruct intraminute ordering, midpoint, spread,

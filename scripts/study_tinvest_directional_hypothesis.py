@@ -60,7 +60,7 @@ SECRET_VALUE_PATTERN = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class StudyPolicy:
-    version: str = "candle-continuation-study-v1.0.0"
+    version: str = "candle-continuation-study-v1.1.0"
     detector_window_minutes: int = 3
     # Production keeps 160 samples at 15 seconds (~40 minutes) and requires
     # 24 (~6 minutes). One-minute replay preserves duration, not point count.
@@ -83,6 +83,10 @@ class StudyPolicy:
     controls_per_event: int = 5
     bootstrap_samples: int = 4_000
     seed: int = 20_260_713
+    # The product owner accepts the currently available independent cohort.
+    # Keep this gate explicit and fingerprinted instead of hiding it in the
+    # decision code so every evidence artifact records the applied threshold.
+    minimum_validation_sessions: int = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -1072,7 +1076,8 @@ def render_report(payload: dict) -> str:
             "",
             "This study validates automatic labels and evidence governance, not profitability. "
             "A family may be enabled in GA only after production tick/L2 outcomes use actual half-spreads, "
-            "the exact detector/catalog/cost versions, at least 30 validation sessions and 300 eligible signals.",
+            "the exact detector/catalog/cost versions, at least "
+            f"{payload['policy']['minimum_validation_sessions']} validation sessions and 300 eligible signals.",
             "",
             "One-minute OHLCV cannot reconstruct intraminute ordering, midpoint, spread, order-book depth, "
             "latency or fills. Any inverse result remains a shadow candidate and is never applied silently.",
@@ -1096,7 +1101,7 @@ def build_decision(
     ]
     inverse_supported = any(
         row["n"] >= 300
-        and row["sessions"] >= 30
+        and row["sessions"] >= effective_policy.minimum_validation_sessions
         and row["outcome_coverage"] is not None
         and row["outcome_coverage"] >= 0.95
         and row["matched_control_coverage"] is not None
@@ -1109,7 +1114,7 @@ def build_decision(
     )
     continuation_supported = any(
         row["n"] >= 300
-        and row["sessions"] >= 30
+        and row["sessions"] >= effective_policy.minimum_validation_sessions
         and row["outcome_coverage"] is not None
         and row["outcome_coverage"] >= 0.95
         and row["matched_control_coverage"] is not None

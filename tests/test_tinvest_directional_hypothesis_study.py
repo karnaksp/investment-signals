@@ -223,7 +223,7 @@ def _gate_row(*, n: int, sessions: int, expected_ci: tuple, reverse_ci: tuple, l
 def test_inverse_gate_requires_sample_and_opposite_intervals() -> None:
     statistically_inverse = _gate_row(
         n=299,
-        sessions=30,
+        sessions=8,
         expected_ci=(-5.0, -1.0),
         reverse_ci=(1.0, 5.0),
         lift_ci=(-5.0, -1.0),
@@ -240,7 +240,7 @@ def test_inverse_gate_requires_sample_and_opposite_intervals() -> None:
 def test_continuation_gate_requires_positive_net_and_control_lift() -> None:
     row = _gate_row(
         n=300,
-        sessions=30,
+        sessions=8,
         expected_ci=(0.1, 3.0),
         reverse_ci=(-23.0, -20.1),
         lift_ci=(-0.1, 2.0),
@@ -257,7 +257,7 @@ def test_continuation_gate_requires_positive_net_and_control_lift() -> None:
 def test_exploratory_horizon_cannot_clear_primary_gate() -> None:
     row = _gate_row(
         n=300,
-        sessions=30,
+        sessions=8,
         expected_ci=(0.1, 3.0),
         reverse_ci=(-23.0, -20.1),
         lift_ci=(0.1, 2.0),
@@ -268,6 +268,24 @@ def test_exploratory_horizon_cannot_clear_primary_gate() -> None:
 
     assert continuation is False
     assert inverse is False
+
+
+def test_primary_gate_uses_versioned_eight_session_minimum() -> None:
+    row = _gate_row(
+        n=300,
+        sessions=7,
+        expected_ci=(0.1, 3.0),
+        reverse_ci=(-23.0, -20.1),
+        lift_ci=(0.1, 2.0),
+    )
+
+    _, below_minimum, _ = study.build_decision([row])
+    row["sessions"] = 8
+    _, at_minimum, _ = study.build_decision([row])
+
+    assert study.StudyPolicy().minimum_validation_sessions == 8
+    assert below_minimum is False
+    assert at_minimum is True
 
 
 def test_failure_diagnostic_redacts_secrets() -> None:
