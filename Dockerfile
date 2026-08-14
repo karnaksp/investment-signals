@@ -55,11 +55,15 @@ ENV PROTO_DIR=/app/proto
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# Ubuntu's base image includes Pebble, but this application neither starts nor
+# manages services through it. Removing the unused Go binary prevents its
+# network-facing code from expanding the runtime attack surface.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         passwd \
         python3 \
+    && rm -f /usr/bin/pebble \
     && groupadd --gid 10001 tinvest \
     && useradd --uid 10001 --gid tinvest --no-create-home \
         --home-dir /nonexistent --shell /usr/sbin/nologin tinvest \

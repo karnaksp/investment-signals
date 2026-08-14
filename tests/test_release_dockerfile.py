@@ -30,6 +30,7 @@ def test_release_dockerfile_keeps_build_tools_out_of_runtime() -> None:
     assert "git" not in runtime
     assert "pip install" not in runtime
     assert "setuptools" not in runtime
+    assert "rm -f /usr/bin/pebble" in runtime
 
 
 def test_release_dockerfile_runs_as_the_dedicated_unprivileged_user() -> None:
