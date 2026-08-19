@@ -600,7 +600,9 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_ten() -> N
     assert "row_number() OVER" in sql
     assert "PARTITION BY instrument_id, candle_at" in sql
     assert "uniqExact(payload_fingerprint) OVER" in sql
+    assert "dense_rank() OVER" in sql
     assert "WHERE physical_rank = 1" in sql
+    assert "trading_day_rank <= {history_trading_days:UInt32}" in sql
     assert "ORDER BY trading_day DESC, candle_at DESC" in sql
     assert "LIMIT 75001" in sql
     assert "max_rows_to_read = 200000" in sql
@@ -619,6 +621,7 @@ def test_snapshot_source_uses_only_causal_completed_candles_and_seals_ten() -> N
     )
     assert parameters["lookback_start"] < parameters["as_of"]
     assert parameters["instrument_id"] == "SBER_TQBR"
+    assert parameters["history_trading_days"] == "60"
     store = InMemoryProspectiveLiveShadowStore()
     result = RecordProspectivePortfolioSnapshot(
         store=store,
@@ -880,9 +883,22 @@ def test_policy_seals_sufficient_history_for_every_supported_hypothesis() -> Non
 
 def test_history_query_span_follows_policy_instead_of_fixed_snapshot_age() -> None:
     policy = ProspectiveScientificPolicy(jump_variance_history_days=75)
+    client = _CandleClient(())
 
     assert policy.required_history_trading_days == 75
     assert _calendar_lookback_days(policy) == 119
+    assert (
+        ClickHouseProspectiveLiveSnapshotSource(
+            client,
+            instrument_ids=("SBER_TQBR",),
+        ).load_snapshots(
+            as_of=RECORDED_AT,
+            policy=policy,
+            limit=1,
+        )
+        == ()
+    )
+    assert client.calls[0][1]["history_trading_days"] == "75"
 
 
 def test_compact_candle_decoder_enforces_byte_row_and_shape_bounds() -> None:

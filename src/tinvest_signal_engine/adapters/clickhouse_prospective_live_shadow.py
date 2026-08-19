@@ -122,7 +122,11 @@ FROM
         uniqExact(payload_fingerprint) OVER
         (
             PARTITION BY instrument_id, candle_at, record_version
-        ) AS same_version_fingerprint_count
+        ) AS same_version_fingerprint_count,
+        dense_rank() OVER
+        (
+            ORDER BY trading_day DESC
+        ) AS trading_day_rank
     FROM scientific_candles_1m
     PREWHERE instrument_id = {instrument_id:String}
       AND trading_day >= toDate(parseDateTime64BestEffort({lookback_start:String}, 6, 'UTC'))
@@ -132,6 +136,7 @@ FROM
       AND received_at <= parseDateTime64BestEffort({as_of:String}, 6, 'UTC')
 )
 WHERE physical_rank = 1
+  AND trading_day_rank <= {history_trading_days:UInt32}
 ORDER BY trading_day DESC, candle_at DESC, record_version DESC
 LIMIT 75001
 SETTINGS max_execution_time = 30,
@@ -222,6 +227,7 @@ class ClickHouseProspectiveLiveSnapshotSource:
                     lookback_start=cutoff - timedelta(days=lookback_days),
                     candle_until=candle_until,
                     instrument_id=instrument_id,
+                    history_trading_days=policy.required_history_trading_days,
                     query_kind="history",
                 )
                 if item.complete
@@ -256,9 +262,9 @@ class ClickHouseProspectiveLiveOutcomeSource:
             raise ValueError("ewma_alpha must be in (0, 1)")
         self._client = client
         self._ewma_alpha = ewma_alpha
-        self._history_lookback_days = _calendar_lookback_days(
-            policy or ProspectiveScientificPolicy()
-        )
+        resolved_policy = policy or ProspectiveScientificPolicy()
+        self._history_lookback_days = _calendar_lookback_days(resolved_policy)
+        self._history_trading_days = resolved_policy.required_history_trading_days
 
     def load(
         self,
@@ -285,6 +291,12 @@ class ClickHouseProspectiveLiveOutcomeSource:
                 ),
                 candle_until=observation.target_at,
                 instrument_id=observation.instrument_id,
+                history_trading_days=(
+                    self._history_trading_days
+                    if observation.feature.target
+                    is TargetMetric.FUTURE_REALIZED_VARIANCE
+                    else 1
+                ),
                 query_kind=(
                     "history"
                     if observation.feature.target
@@ -328,15 +340,19 @@ def _load_candles(
     lookback_start: datetime,
     candle_until: datetime,
     instrument_id: str,
+    history_trading_days: int,
     query_kind: Literal["history", "short_outcome"],
 ) -> tuple[ScientificCandle, ...]:
     if not instrument_id.strip():
         raise ValueError("instrument_id must not be empty")
+    if history_trading_days <= 0:
+        raise ValueError("history_trading_days must be positive")
     parameters = {
         "as_of": _clickhouse_datetime(as_of),
         "candle_until": _clickhouse_datetime(candle_until),
         "lookback_start": _clickhouse_datetime(lookback_start),
         "instrument_id": instrument_id,
+        "history_trading_days": str(history_trading_days),
     }
     sql = (
         _INSTRUMENT_CANDLES_SQL
