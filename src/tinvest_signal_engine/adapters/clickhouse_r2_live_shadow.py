@@ -71,6 +71,7 @@ class ClickHouseR2OpeningGapSource:
                     lookback_start=cutoff - timedelta(days=_LOOKBACK_DAYS),
                     candle_until=cutoff,
                     instrument_id=instrument_id,
+                    history_trading_days=self._policy.opening_gap_history_days,
                     query_kind="history",
                 )
                 if candle.complete

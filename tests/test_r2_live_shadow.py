@@ -6,11 +6,13 @@ from tinvest_signal_engine.application.r2_live_shadow import (
     ProcessR2OpeningGapLiveShadow,
 )
 from tinvest_signal_engine.adapters.clickhouse_r2_live_shadow import (
+    ClickHouseR2OpeningGapSource,
     ClickHouseR2LiveShadowStore,
 )
 from tinvest_signal_engine.domain.prospective_portfolio_extensions import (
     R2Decision,
     R2ExtensionHypothesis,
+    R2ExtensionPolicy,
     R2Feature,
     R2Metric,
     R2Outcome,
@@ -25,6 +27,26 @@ from tinvest_signal_engine.services.prospective_live_shadow_worker import (
 )
 
 UTC = UTC
+
+
+def test_h10_source_bounds_history_with_policy_trading_days() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, str]]] = []
+
+        def _request(self, sql: str, *, parameters: dict[str, str]) -> bytes:
+            self.calls.append((sql, parameters))
+            return b""
+
+    client = Client()
+    source = ClickHouseR2OpeningGapSource(
+        client,
+        instrument_ids=("SBER_TQBR",),
+        policy=R2ExtensionPolicy(opening_gap_history_days=37),
+    )
+
+    assert source.load(as_of=datetime(2026, 7, 30, 8, 0, tzinfo=UTC)) == ()
+    assert client.calls[0][1]["history_trading_days"] == "37"
 
 
 def _item(*, target_at: datetime) -> R2LiveShadowInput:
