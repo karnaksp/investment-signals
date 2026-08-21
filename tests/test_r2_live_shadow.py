@@ -123,7 +123,7 @@ def test_live_shadow_records_observation_before_maturity_and_outcome_after() -> 
 
 
 def test_h10_schedule_allows_five_minutes_for_open_and_fifteen_for_outcomes() -> None:
-    schedule = R2OpeningGapSchedule()
+    schedule = R2OpeningGapSchedule(run_on_start=True)
     before = datetime(2026, 7, 30, 7, 4, tzinfo=UTC)
     opening_ready = datetime(2026, 7, 30, 7, 5, tzinfo=UTC)
     first_outcome_ready = datetime(2026, 7, 30, 7, 45, tzinfo=UTC)
@@ -133,6 +133,17 @@ def test_h10_schedule_allows_five_minutes_for_open_and_fifteen_for_outcomes() ->
     schedule.complete_due(now=opening_ready)
     assert schedule.due(now=opening_ready) is False
     assert schedule.due(now=first_outcome_ready) is True
+
+
+def test_h10_schedule_does_not_replay_elapsed_boundaries_on_start() -> None:
+    schedule = R2OpeningGapSchedule()
+    after_all_boundaries = datetime(2026, 7, 30, 9, 0, tzinfo=UTC)
+
+    assert schedule.due(now=after_all_boundaries) is False
+    assert schedule.due(now=after_all_boundaries) is False
+
+    next_day_opening_ready = datetime(2026, 7, 31, 7, 5, tzinfo=UTC)
+    assert schedule.due(now=next_day_opening_ready) is True
 
 
 def test_h10_store_preserves_first_real_time_decision_after_restart() -> None:

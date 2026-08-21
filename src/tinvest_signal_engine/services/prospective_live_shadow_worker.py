@@ -156,10 +156,17 @@ class R2OpeningGapSchedule:
 
     observation_delay_minutes: int = 5
     outcome_grace_minutes: int = 15
+    run_on_start: bool = False
     _completed: set[tuple[date, int]] = field(default_factory=set)
+    _initialized: bool = False
 
     def due(self, *, now: datetime) -> bool:
         local = _aware_utc(now).astimezone(MOSCOW)
+        if not self._initialized:
+            self._initialized = True
+            if not self.run_on_start:
+                self.complete_due(now=now)
+                return False
         return any(
             local >= boundary and (local.date(), index) not in self._completed
             for index, boundary in enumerate(self._boundaries(local))
@@ -267,6 +274,7 @@ def build_clickhouse_prospective_live_shadow_runtime(
     timeout_seconds: float = 15.0,
     snapshot_query_batch_size: int = 1,
     run_snapshot_on_start: bool = False,
+    run_r2_on_start: bool = False,
     market_schedule: MarketSchedule | None = None,
     policy: ProspectiveScientificPolicy = PRODUCTION_LIVE_POLICY,
     outcome_policy_version: str = DEFAULT_LIVE_OUTCOME_POLICY_VERSION,
@@ -322,7 +330,7 @@ def build_clickhouse_prospective_live_shadow_runtime(
             ),
             store=r2_store,
         ),
-        r2_schedule=R2OpeningGapSchedule(),
+        r2_schedule=R2OpeningGapSchedule(run_on_start=run_r2_on_start),
         market_schedule=market_schedule or MarketSchedule(),
     )
 
@@ -346,6 +354,7 @@ def main() -> None:
         timeout_seconds=_env_float("PROSPECTIVE_LIVE_CLICKHOUSE_TIMEOUT_SECONDS", 15.0),
         snapshot_query_batch_size=snapshot_query_batch_size,
         run_snapshot_on_start=_env_bool("PROSPECTIVE_LIVE_RUN_ON_START", False),
+        run_r2_on_start=_env_bool("PROSPECTIVE_LIVE_R2_RUN_ON_START", False),
         market_schedule=MarketSchedule.from_strings(
             timezone_name=(
                 os.getenv("MARKET_SCHEDULE_TIMEZONE", "Europe/Moscow").strip()
