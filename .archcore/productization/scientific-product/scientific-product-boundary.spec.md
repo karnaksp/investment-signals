@@ -29,14 +29,20 @@ This spec governs the deployment and data boundary of Signal Research Lab. Opera
 5. The working product MUST NOT mount laboratory data volumes.
 6. The laboratory MUST NOT mount working-product data volumes.
 7. WHEN either product stops, its lifecycle command MUST NOT stop the sibling product.
+8. WHEN the laboratory shadow profile is enabled, it MUST use its own T-Invest ingestion, broker, scientific-candle worker, ClickHouse, and runtime-health storage.
+9. WHILE the shadow profile is disabled, the laboratory admin MUST remain available and MUST NOT collect or process live market data.
+10. The only product-to-product transfer MUST be an explicitly exported, signed, evidence-bounded tool package that the working product verifies before import.
 
 ## Constraints & Invariants
 
 - The laboratory port MUST bind only to loopback, preventing LAN exposure.
 - Product database credentials MUST differ, limiting a compromised service to one data plane.
-- Docker data networks MUST remain distinct, preventing direct cross-product database access.
+- Product database networks MUST remain distinct, preventing direct cross-product database access.
+- The laboratory MUST NOT join a working-product broker network or consume a working-product Kafka topic.
+- Laboratory T-Invest ingestion MUST have a dedicated credential mount and an egress network that is not attached to laboratory databases.
 - Scientific source data MUST remain under the laboratory backup boundary.
 - Working backups MUST exclude scientific source data and run artifacts.
+- The working product MUST receive no scientific raw data, feature tables, run logs, or model artifacts through tool import.
 
 ## Failure Behavior
 
@@ -44,8 +50,9 @@ This spec governs the deployment and data boundary of Signal Research Lab. Opera
 2. IF a laboratory store is unavailable, THEN laboratory health MUST report the failed dependency.
 3. IF the laboratory fails, THEN working-product health MUST remain independent.
 4. IF legacy scientific data exists, THEN setup MUST preserve it for the migration procedure.
-5. IF cross-product volume mounts appear, THEN composition validation MUST fail.
+5. IF cross-product database, state-volume, broker-network, or credential mounts appear, THEN composition validation MUST fail.
+6. IF the laboratory T-Invest stream or broker is unavailable, THEN only the optional laboratory shadow profile MUST stop making progress.
 
 ## Conformance
 
-An implementation conforms when lifecycle tests isolate start, stop, health, networks, credentials, volumes, and backups for both products.
+An implementation conforms when lifecycle tests isolate start, stop, health, networks, credentials, volumes, backups, and the signed tool-transfer boundary for both products.

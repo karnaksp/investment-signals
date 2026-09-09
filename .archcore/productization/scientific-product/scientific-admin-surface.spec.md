@@ -31,23 +31,28 @@ This spec governs the Signal Research Lab administrative UI and API. The product
 7. The UI MUST show rejected and inconclusive versions alongside passed versions.
 8. The UI MUST show the last manifest exchange without reading working-product storage.
 9. The API process on port 18444 MUST expose only laboratory resources under `/api/v1`; the same paths on the working process MUST remain unavailable.
+10. WHEN the owner opens the laboratory System page, the UI MUST show the laboratory-owned live-shadow runtime status without starting any worker.
+11. WHEN the owner signs into either local admin, that session MUST NOT replace or invalidate the sibling product's browser session.
 
 ## Constraints & Invariants
 
 - Publication actions MUST require owner reauthentication, preventing stale-session approval.
+- Working and laboratory surfaces on the same hostname MUST use distinct cookie names because browser cookies are not isolated by port.
 - The UI MUST preserve Russian and English labels for provenance summaries.
 - A lifecycle stage MUST derive from stored evidence, not client-side inference.
 - The web build MUST remain deployable without the working-product frontend.
 - Source data and feature rows MUST NOT appear in working-product connection responses.
+- Opening a laboratory status page MUST remain a read-only operation and MUST NOT activate compute or shadow profiles.
 
 ## Failure Behavior
 
 1. IF a dependency is unavailable, THEN the UI MUST identify the failed laboratory dependency.
 2. IF a run status is stale, THEN the UI MUST show its last recorded checkpoint.
 3. IF publication becomes ineligible, THEN the API MUST reject preparation with current gate reasons.
-4. IF the working product is offline, THEN laboratory research MUST remain available.
+4. IF the working product is offline, THEN laboratory research administration MUST remain available.
 5. IF authentication expires, THEN mutation endpoints MUST return an authentication challenge.
+6. IF no live-shadow health snapshot exists, THEN the System page MUST identify the profile as not yet started or awaiting its first pass.
 
 ## Conformance
 
-An implementation conforms when API contract tests and browser tests cover portfolio, detail, runs, publication, errors, localization, and responsive layouts.
+An implementation conforms when API contract tests and browser tests cover portfolio, detail, runs, publication, independent sessions, runtime status, errors, localization, and responsive layouts.
