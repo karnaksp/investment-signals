@@ -55,7 +55,7 @@ def _signal(*, source_event_at: datetime) -> TriggerSignal:
         z_score=6.5,
         window_seconds=60,
         summary="volume",
-        payload={"quality_score": 95},
+        payload={"quality_score": 95, "window_notional": 40_000_001.0},
         source_event_id="event-1",
         source_event_at=source_event_at,
     )

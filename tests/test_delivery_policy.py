@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.delivery_policy import DeliveryPolicy
 from tinvest_signal_engine.models import TriggerSignal
@@ -25,6 +27,11 @@ def _settings(monkeypatch, **env: str) -> RuntimeSettings:
 
 
 def _signal(**kwargs) -> TriggerSignal:
+    payload = {
+        "quality_score": 70,
+        "window_notional": 40_000_001.0,
+    }
+    payload.update(kwargs.pop("payload", {}))
     defaults = {
         "signal_id": "00000000-0000-4000-8000-000000000001",
         "detected_at": datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
@@ -40,7 +47,7 @@ def _signal(**kwargs) -> TriggerSignal:
         "z_score": 4.0,
         "window_seconds": 60,
         "summary": "x",
-        "payload": {"quality_score": 70},
+        "payload": payload,
     }
     defaults.update(kwargs)
     return TriggerSignal(**defaults)
@@ -58,7 +65,7 @@ def test_combo_score_six_is_delivered(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "combo_score_ge_6"
-    assert out.payload["delivery_policy_version"] == "delivery_v3"
+    assert out.payload["delivery_policy_version"] == "delivery_v4"
     assert out.payload["delivery_priority"] == "high"
     assert out.payload["delivery_channel"] == "realtime"
     assert out.payload["delivery_explanation_ru"]
@@ -341,3 +348,82 @@ def test_custom_rule_can_force_admin_only(monkeypatch) -> None:
     assert out.payload["delivery_status"] == "suppressed"
     assert out.payload["delivery_reason"] == "type_rule_admin_only"
     assert out.payload["delivery_channel"] == "admin_only"
+
+
+@pytest.mark.parametrize(
+    "window_notional",
+    [None, float("nan"), 39_999_999.0, 40_000_000.0],
+)
+def test_volume_spike_at_or_below_notional_floor_is_not_delivered(
+    monkeypatch,
+    window_notional: float | None,
+) -> None:
+    policy = DeliveryPolicy(_settings(monkeypatch))
+    payload = {"quality_score": 99, "window_notional": window_notional}
+
+    out = policy.apply(_signal(payload=payload, z_score=20.0))
+
+    assert out.payload["delivery_status"] == "suppressed"
+    assert (
+        out.payload["delivery_reason"]
+        == "volume_spike_notional_below_delivery_floor"
+    )
+    assert out.payload["delivery_rule"] == "volume_spike_window_notional_gt_40m"
+    assert "40 млн" in out.payload["delivery_explanation_ru"]
+
+
+def test_volume_spike_above_notional_floor_can_be_delivered(monkeypatch) -> None:
+    policy = DeliveryPolicy(_settings(monkeypatch))
+
+    out = policy.apply(
+        _signal(
+            payload={"quality_score": 99, "window_notional": 40_000_000.01},
+            z_score=20.0,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "delivered"
+    assert out.payload["delivery_reason"] == "momentum_quality_and_z"
+
+
+def test_volume_spike_notional_floor_cannot_be_bypassed_by_custom_rule(
+    monkeypatch,
+) -> None:
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_TYPE_RULES_JSON=json.dumps(
+                {"volume_spike": {"always": True}}
+            ),
+        )
+    )
+
+    out = policy.apply(
+        _signal(
+            payload={"quality_score": 99, "window_notional": 39_999_999.0},
+            z_score=20.0,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "suppressed"
+    assert (
+        out.payload["delivery_reason"]
+        == "volume_spike_notional_below_delivery_floor"
+    )
+
+
+def test_volume_spike_notional_floor_does_not_affect_other_signal_types(
+    monkeypatch,
+) -> None:
+    policy = DeliveryPolicy(_settings(monkeypatch))
+
+    out = policy.apply(
+        _signal(
+            signal_type="trade_rate_spike",
+            payload={"quality_score": 99},
+            z_score=20.0,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "delivered"
+    assert out.payload["delivery_reason"] == "momentum_quality_and_z"

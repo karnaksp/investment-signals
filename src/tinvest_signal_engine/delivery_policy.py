@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from dataclasses import replace
@@ -14,10 +15,13 @@ from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
 
-POLICY_VERSION = "delivery_v3"
+POLICY_VERSION = "delivery_v4"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
+
+_VOLUME_SPIKE_MIN_DELIVERY_NOTIONAL_RUB = 40_000_000.0
+_VOLUME_SPIKE_NOTIONAL_DELIVERY_RULE = "volume_spike_window_notional_gt_40m"
 
 _ALWAYS_TYPES = {"trading_status_changed", "market_access_changed"}
 _COMBO_TYPES = {"microstructure_combo_long", "microstructure_combo_short"}
@@ -173,13 +177,26 @@ class DeliveryPolicy:
     def _candidate_decision(
         self, signal: TriggerSignal, now: datetime
     ) -> DeliveryDecision:
+        st = signal.signal_type
+        if st == "volume_spike":
+            window_notional = _payload_number(signal, "window_notional")
+            below_delivery_floor = (
+                not math.isfinite(window_notional)
+                or window_notional <= _VOLUME_SPIKE_MIN_DELIVERY_NOTIONAL_RUB
+            )
+            if below_delivery_floor:
+                return DeliveryDecision(
+                    status=DELIVERY_SUPPRESSED,
+                    reason="volume_spike_notional_below_delivery_floor",
+                    rule=_VOLUME_SPIKE_NOTIONAL_DELIVERY_RULE,
+                )
+
         custom = self._custom_decision(signal, now)
         if custom is not None:
             return custom
 
         quality = _quality(signal)
         abs_z = abs(float(signal.z_score))
-        st = signal.signal_type
 
         if st in _ALWAYS_TYPES:
             key = (signal.instrument_id, st)
@@ -534,6 +551,9 @@ _REASON_RU: dict[str, str] = {
     "price_near_activity": "Движение цены подтверждено недавней активностью по тому же инструменту.",
     "momentum_quality_and_z": "Momentum-сигнал прошёл одновременно порог качества и |z|.",
     "momentum_extreme_z": "Momentum-сигнал прошёл как экстремальный |z|.",
+    "volume_spike_notional_below_delivery_floor": (
+        "Всплеск объёма сохранён, но оборот за окно не превышает 40 млн ₽."
+    ),
     "large_trade_high_quality_or_z": "Крупный принт прошёл высокий quality или экстремальный |z|.",
     "liquidity_near_activity": "Liquidity-сигнал подтверждён недавней активностью.",
     "quality_floor": "Сигнал прошёл общий высокий порог качества.",
