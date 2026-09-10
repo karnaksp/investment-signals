@@ -318,6 +318,10 @@ class RuntimeSettings:
     signal_delivery_max_per_hour: int
     signal_delivery_instrument_cooldown_seconds: int
     signal_delivery_type_rules_json: str
+    # Minimum rolling turnover required for external delivery. Per-type
+    # overrides are hot-reloaded from the runtime policy file.
+    signal_delivery_default_min_notional_rub: float
+    signal_delivery_notional_policy_path: Path
     # Replayed events remain local evidence but never become realtime alerts
     # after this wall-clock age.
     signal_delivery_max_event_age_seconds: int
@@ -616,6 +620,18 @@ class RuntimeSettings:
             signal_delivery_type_rules_json=(
                 os.getenv("SIGNAL_DELIVERY_TYPE_RULES_JSON", "").strip()
             ),
+            signal_delivery_default_min_notional_rub=float(
+                os.getenv(
+                    "SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "40000000"
+                )
+            ),
+            signal_delivery_notional_policy_path=Path(
+                os.getenv(
+                    "SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE",
+                    "/var/lib/investment-signals-pro/signalctl/runtime-secrets/"
+                    "detector/delivery-notional-policy.json",
+                )
+            ).expanduser(),
             signal_delivery_max_event_age_seconds=int(
                 os.getenv("SIGNAL_DELIVERY_MAX_EVENT_AGE_SECONDS", "120")
             ),

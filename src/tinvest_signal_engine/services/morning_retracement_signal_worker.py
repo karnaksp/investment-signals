@@ -55,6 +55,7 @@ from tinvest_signal_engine.config import (
     load_instrument_configs,
     load_secret,
 )
+from tinvest_signal_engine.delivery_policy import DeliveryNotionalThresholds
 from tinvest_signal_engine.domain.morning_retracement_signal import (
     MorningRetracementRecommendation,
     MorningRetracementRuntimePolicy,
@@ -93,6 +94,7 @@ class _PreparedRecommendation:
 
 def main() -> None:
     runtime = RuntimeSettings.from_env(service_name="detector")
+    delivery_thresholds = DeliveryNotionalThresholds(runtime)
     configure_logging(runtime.log_level)
     policy_path = Path(
         os.getenv(
@@ -212,6 +214,7 @@ def main() -> None:
                             policy=policy,
                             settings=settings,
                             runtime=runtime,
+                            delivery_thresholds=delivery_thresholds,
                         )
                         event = _broker_event(prepared.signal)
                         ReliableEventProcessor(
@@ -237,10 +240,7 @@ def main() -> None:
                             "unavailable_count": outcome_batch.unavailable,
                         },
                     )
-                if (
-                    _morning_session_deadline_passed(now)
-                    and outcome_batch.pending == 0
-                ):
+                if _morning_session_deadline_passed(now) and outcome_batch.pending == 0:
                     outcomes_drained_day = local_day
             except (
                 TimeoutError,
@@ -314,6 +314,7 @@ def _prepared_signal(
     policy: MorningRetracementRuntimePolicy,
     settings: MorningRetracementRuntimeSettings,
     runtime: RuntimeSettings,
+    delivery_thresholds: DeliveryNotionalThresholds,
 ) -> PreparedSignal:
     snapshot = recommendation.snapshot
     day = series.trading_day.isoformat()
@@ -376,9 +377,7 @@ def _prepared_signal(
         "historical_target_probability_lower": (
             policy.historical_target_probability_lower
         ),
-        "historical_non_loss_probability": (
-            policy.historical_non_loss_probability
-        ),
+        "historical_non_loss_probability": (policy.historical_non_loss_probability),
         "historical_non_loss_probability_lower": (
             policy.historical_non_loss_probability_lower
         ),
@@ -401,7 +400,32 @@ def _prepared_signal(
         "break_even_target_progress_fraction": (
             policy.break_even_target_progress_fraction
         ),
+        "window_notional": sum(
+            candle.close * candle.volume
+            for candle in series.current_session
+            if candle.complete and candle.at <= snapshot.observed_at
+        ),
+        "window_notional_currency": "RUB",
+        "window_notional_source": "cumulative_completed_candles",
     }
+    minimum_notional = delivery_thresholds.minimum_for(SIGNAL_TYPE)
+    notional_allowed = delivery_thresholds.allows(
+        SIGNAL_TYPE, payload["window_notional"]
+    )
+    payload["delivery_min_notional_rub"] = minimum_notional
+    payload["delivery_observed_notional_rub"] = payload["window_notional"]
+    payload["delivery_status"] = (
+        "delivered" if settings.telegram_enabled and notional_allowed else "suppressed"
+    )
+    payload["delivery_reason"] = (
+        "morning_retracement_eligible"
+        if settings.telegram_enabled and notional_allowed
+        else (
+            "notional_below_delivery_threshold"
+            if settings.telegram_enabled
+            else "delivery_disabled"
+        )
+    )
     source_event_id = "sha256:" + sha256(identity.encode("utf-8")).hexdigest()
     signal = SignalRecord(
         signal_id=signal_id,
@@ -435,7 +459,7 @@ def _prepared_signal(
         provenance_status="complete",
     )
     targets: tuple[DeliveryTarget, ...] = ()
-    if settings.telegram_enabled:
+    if settings.telegram_enabled and notional_allowed:
         chat_id = load_secret("TELEGRAM_CHAT_ID") or ""
         thread_id = load_secret("TELEGRAM_MESSAGE_THREAD_ID") or ""
         if chat_id and load_secret("TELEGRAM_BOT_TOKEN"):

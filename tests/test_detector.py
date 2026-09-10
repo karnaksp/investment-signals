@@ -153,6 +153,7 @@ class SignalDetectorTest(unittest.TestCase):
             volume.payload["baseline_volatility_estimator_version"],
             "2.0.0",
         )
+        self.assertGreater(volume.payload["window_notional"], 0.0)
 
     def test_suppressed_window_updates_history_without_consuming_cooldown(self) -> None:
         detector = SignalDetector(
@@ -286,9 +287,7 @@ class SignalDetectorTest(unittest.TestCase):
         self.assertEqual(price_jump.payload["start_price"], 100.0)
         self.assertEqual(price_jump.payload["current_price"], 102.0)
         self.assertIsNotNone(price_jump.payload["baseline_volatility_bps"])
-        self.assertEqual(
-            price_jump.payload["baseline_volatility_horizon_seconds"], 180
-        )
+        self.assertEqual(price_jump.payload["baseline_volatility_horizon_seconds"], 180)
         self.assertEqual(
             price_jump.payload["baseline_volatility_observed_until"],
             (start + timedelta(seconds=35)).isoformat(),

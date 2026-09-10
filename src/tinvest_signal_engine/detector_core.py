@@ -179,8 +179,22 @@ class SignalDetector:
         signal: TriggerSignal,
         event: NormalizedEvent,
     ) -> TriggerSignal:
+        payload = dict(signal.payload)
+        if "window_notional" not in payload:
+            cfg = self._settings_for(signal.instrument_id)
+            state = self._states.get(signal.instrument_id)
+            cutoff = event.source_time - timedelta(seconds=cfg.trade_window_seconds)
+            payload["window_notional"] = sum(
+                point.notional
+                for point in (() if state is None else state.trade_points)
+                if cutoff <= point.ts <= event.source_time
+            )
+            payload["window_notional_currency"] = "price_units"
+            payload["window_notional_window_seconds"] = cfg.trade_window_seconds
+            payload["window_notional_source"] = "rolling_trade_window"
         return replace(
             signal,
+            payload=payload,
             signal_id=deterministic_signal_id(event.event_id, signal.signal_type),
             source_event_id=event.event_id,
             source_event_at=event.source_time,
@@ -307,9 +321,7 @@ class SignalDetector:
                     ),
                     "historical_distinct_maturities": evidence.distinct_maturities,
                     "historical_success_rate": float(evidence.success_rate),
-                    "historical_wilson_lower_bound": float(
-                        evidence.wilson_lower_bound
-                    ),
+                    "historical_wilson_lower_bound": float(evidence.wilson_lower_bound),
                     "historical_mean_net_return_bps": float(
                         evidence.mean_net_return_bps
                     ),

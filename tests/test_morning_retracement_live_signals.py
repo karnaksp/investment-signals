@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from hashlib import sha256
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
@@ -28,6 +29,9 @@ from tinvest_signal_engine.domain.morning_retracement_signal import (
     LinearProbabilityModel,
     MorningRetracementRuntimePolicy,
     MorningRetracementRuntimeSettings,
+)
+from tinvest_signal_engine.services.morning_retracement_signal_worker import (
+    _prepared_signal,
 )
 
 
@@ -254,6 +258,46 @@ def test_formal_signal_uses_latest_causal_completed_minute() -> None:
     assert recommendation.model_probability > 0.99
     assert recommendation.target_price == pytest.approx(101.025)
     assert recommendation.initial_stop_price == pytest.approx(102.87)
+
+
+def test_formal_signal_keeps_evidence_but_suppresses_telegram_below_turnover(
+) -> None:
+    series = _series()
+    settings = _settings(telegram_enabled=True)
+    recommendation = GenerateMorningRetracementRecommendations(_policy()).execute(
+        (series,), settings=settings
+    )[0][1]
+
+    class Thresholds:
+        @staticmethod
+        def minimum_for(signal_type: str) -> float:
+            assert signal_type == "morning_retracement_recommendation"
+            return 40_000_000.0
+
+        @staticmethod
+        def allows(signal_type: str, window_notional: object) -> bool:
+            assert signal_type == "morning_retracement_recommendation"
+            assert float(window_notional) < 40_000_000.0
+            return False
+
+    prepared = _prepared_signal(
+        series=series,
+        recommendation=recommendation,
+        policy=_policy(),
+        settings=settings,
+        runtime=SimpleNamespace(
+            expectation_catalog_version="test-catalog",
+            cost_model_version="test-cost",
+        ),
+        delivery_thresholds=Thresholds(),  # type: ignore[arg-type]
+    )
+
+    assert prepared.delivery_targets == ()
+    assert prepared.signal.payload["delivery_status"] == "suppressed"
+    assert (
+        prepared.signal.payload["delivery_reason"]
+        == "notional_below_delivery_threshold"
+    )
 
 
 def test_live_assessment_scores_latest_completed_minute_snapshot() -> None:

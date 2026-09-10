@@ -142,7 +142,7 @@ def test_forced_stale_suppression_does_not_create_fresh_activity_context() -> No
         source_event_type="orderbook",
         signal_type="orderbook_imbalance",
         z_score=8.0,
-        payload={"quality_score": 90},
+        payload={"quality_score": 90, "window_notional": 40_000_001.0},
     )
 
     governed = adapter._govern_delivery(fresh_liquidity)

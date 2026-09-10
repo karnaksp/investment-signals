@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+from pathlib import Path
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from dataclasses import replace
@@ -15,13 +17,12 @@ from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
 
-POLICY_VERSION = "delivery_v4"
+POLICY_VERSION = "delivery_v5"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
 
-_VOLUME_SPIKE_MIN_DELIVERY_NOTIONAL_RUB = 40_000_000.0
-_VOLUME_SPIKE_NOTIONAL_DELIVERY_RULE = "volume_spike_window_notional_gt_40m"
+_NOTIONAL_DELIVERY_RULE = "signal_window_notional_gt_configured_threshold"
 
 _ALWAYS_TYPES = {"trading_status_changed", "market_access_changed"}
 _COMBO_TYPES = {"microstructure_combo_long", "microstructure_combo_short"}
@@ -57,6 +58,83 @@ class DeliveryDecision:
         return self.status == DELIVERY_DELIVERED
 
 
+class DeliveryNotionalThresholds:
+    """Hot-reloaded external-delivery turnover thresholds.
+
+    A zero threshold disables this gate for one signal type.  Invalid runtime
+    files never replace the last known-good policy.
+    """
+
+    def __init__(self, settings: RuntimeSettings) -> None:
+        configured_default = float(settings.signal_delivery_default_min_notional_rub)
+        self._fallback_default = (
+            configured_default
+            if math.isfinite(configured_default) and configured_default >= 0.0
+            else 40_000_000.0
+        )
+        self._default = self._fallback_default
+        self._overrides: dict[str, float] = {}
+        self._path = Path(settings.signal_delivery_notional_policy_path)
+        self._reload_interval = max(0.0, float(settings.config_reload_interval_seconds))
+        self._last_poll = 0.0
+        self._loaded_mtime_ns: int | None = None
+        self.refresh(force=True)
+
+    def refresh(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_poll < self._reload_interval:
+            return
+        self._last_poll = now
+        try:
+            mtime_ns = self._path.stat().st_mtime_ns
+        except FileNotFoundError:
+            if self._loaded_mtime_ns is not None:
+                self._default = self._fallback_default
+                self._overrides = {}
+                self._loaded_mtime_ns = None
+            return
+        except OSError:
+            logger.exception("Failed to stat delivery notional policy")
+            return
+        if not force and mtime_ns == self._loaded_mtime_ns:
+            return
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("delivery notional policy must be an object")
+            default = _nonnegative_finite_number(
+                raw.get("default_min_notional_rub"),
+                field="default_min_notional_rub",
+            )
+            overrides_raw = raw.get("signal_min_notional_rub", {})
+            if not isinstance(overrides_raw, dict):
+                raise ValueError("signal_min_notional_rub must be an object")
+            overrides = {
+                str(signal_type).strip(): _nonnegative_finite_number(
+                    value, field=f"signal_min_notional_rub.{signal_type}"
+                )
+                for signal_type, value in overrides_raw.items()
+                if str(signal_type).strip()
+            }
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            logger.exception("Ignored invalid delivery notional policy")
+            return
+        self._default = default
+        self._overrides = overrides
+        self._loaded_mtime_ns = mtime_ns
+
+    def minimum_for(self, signal_type: str) -> float:
+        self.refresh()
+        return self._overrides.get(signal_type, self._default)
+
+    def allows(self, signal_type: str, window_notional: object) -> bool:
+        minimum = self.minimum_for(signal_type)
+        if minimum <= 0.0:
+            return True
+        observed = _finite_number_or_nan(window_notional)
+        return math.isfinite(observed) and observed > minimum
+
+
 class DeliveryPolicy:
     """Stateful delivery gate for Telegram/webhook notifications.
 
@@ -68,15 +146,16 @@ class DeliveryPolicy:
         self,
         settings: RuntimeSettings,
         *,
-        delivered_count_since: Callable[
-            [datetime, str | None, str | None], int
-        ]
+        delivered_count_since: Callable[[datetime, str | None, str | None], int]
         | None = None,
     ):
         self.enabled = bool(settings.signal_delivery_enabled)
         legacy_floor = settings.signal_min_quality_score
         configured_floor = settings.signal_delivery_min_quality
-        if legacy_floor is not None and settings.signal_delivery_min_quality_raw is None:
+        if (
+            legacy_floor is not None
+            and settings.signal_delivery_min_quality_raw is None
+        ):
             configured_floor = legacy_floor
         self.min_quality = max(0, int(configured_floor))
         self.max_per_hour = max(0, int(settings.signal_delivery_max_per_hour))
@@ -85,6 +164,7 @@ class DeliveryPolicy:
         )
         self._delivered_count_since = delivered_count_since
         self._type_rules = _parse_type_rules(settings.signal_delivery_type_rules_json)
+        self.notional_thresholds = DeliveryNotionalThresholds(settings)
         self._recent_activity: dict[str, deque[tuple[datetime, str]]] = defaultdict(
             deque
         )
@@ -133,6 +213,12 @@ class DeliveryPolicy:
             "delivery_priority": self._priority(signal, decision),
             "delivery_channel": self._channel(decision),
             "delivery_explanation_ru": self._explanation_ru(decision),
+            "delivery_min_notional_rub": self.notional_thresholds.minimum_for(
+                signal.signal_type
+            ),
+            "delivery_observed_notional_rub": _finite_number_or_none(
+                signal.payload.get("window_notional")
+            ),
             "delivered_at": (
                 decision.delivered_at.isoformat()
                 if decision.delivered_at is not None
@@ -169,29 +255,25 @@ class DeliveryPolicy:
         if signal.signal_type not in _ALWAYS_TYPES:
             self._last_instrument_delivery[signal.instrument_id] = ts
         if signal.signal_type in _ALWAYS_TYPES:
-            self._last_status_delivery[
-                (signal.instrument_id, signal.signal_type)
-            ] = ts
+            self._last_status_delivery[(signal.instrument_id, signal.signal_type)] = ts
         return candidate
 
     def _candidate_decision(
         self, signal: TriggerSignal, now: datetime
     ) -> DeliveryDecision:
         st = signal.signal_type
-        if st == "volume_spike":
-            window_notional = _payload_number(signal, "window_notional")
-            below_delivery_floor = (
-                not math.isfinite(window_notional)
-                or window_notional <= _VOLUME_SPIKE_MIN_DELIVERY_NOTIONAL_RUB
-            )
-            if below_delivery_floor:
-                return DeliveryDecision(
-                    status=DELIVERY_SUPPRESSED,
-                    reason="volume_spike_notional_below_delivery_floor",
-                    rule=_VOLUME_SPIKE_NOTIONAL_DELIVERY_RULE,
-                )
-
         custom = self._custom_decision(signal, now)
+        if custom is not None and not custom.should_send:
+            return custom
+        if not self.notional_thresholds.allows(
+            st, signal.payload.get("window_notional")
+        ):
+            return DeliveryDecision(
+                status=DELIVERY_SUPPRESSED,
+                reason="notional_below_delivery_threshold",
+                rule=_NOTIONAL_DELIVERY_RULE,
+            )
+
         if custom is not None:
             return custom
 
@@ -216,12 +298,8 @@ class DeliveryPolicy:
 
         if st in _VALIDATED_LONG_HORIZON_TYPES:
             success_rate = _payload_number(signal, "historical_success_rate")
-            lower_bound = _payload_number(
-                signal, "historical_wilson_lower_bound"
-            )
-            sample_size = _payload_number(
-                signal, "historical_eligible_observations"
-            )
+            lower_bound = _payload_number(signal, "historical_wilson_lower_bound")
+            sample_size = _payload_number(signal, "historical_eligible_observations")
             if success_rate >= 0.90 and lower_bound >= 0.85 and sample_size >= 100:
                 return DeliveryDecision(
                     status=DELIVERY_DELIVERED,
@@ -409,11 +487,14 @@ class DeliveryPolicy:
                 reason="instrument_cooldown",
                 rule="instrument_delivery_cooldown",
             )
-        if self._persistent_delivered_count(
-            since=since,
-            instrument_id=signal.instrument_id,
-            signal_type=None,
-        ) > 0:
+        if (
+            self._persistent_delivered_count(
+                since=since,
+                instrument_id=signal.instrument_id,
+                signal_type=None,
+            )
+            > 0
+        ):
             return DeliveryDecision(
                 status=DELIVERY_SUPPRESSED,
                 reason="instrument_cooldown",
@@ -458,9 +539,7 @@ class DeliveryPolicy:
         if self._delivered_count_since is None:
             return 0
         try:
-            return int(
-                self._delivered_count_since(since, instrument_id, signal_type)
-            )
+            return int(self._delivered_count_since(since, instrument_id, signal_type))
         except Exception:
             logger.exception("Failed to read persistent delivery history")
             return 0
@@ -542,6 +621,26 @@ def _payload_number(signal: TriggerSignal, key: str) -> float:
     return 0.0
 
 
+def _nonnegative_finite_number(value: object, *, field: str) -> float:
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be numeric")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise ValueError(f"{field} must be finite and non-negative")
+    return parsed
+
+
+def _finite_number_or_nan(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return math.nan
+
+
+def _finite_number_or_none(value: object) -> float | None:
+    parsed = _finite_number_or_nan(value)
+    return parsed if math.isfinite(parsed) else None
+
+
 _REASON_RU: dict[str, str] = {
     "validated_bond_convergence": "Историческая проверка сигнала схождения облигации к номиналу прошла заданный порог; уведомление отправлено сразу.",
     "bond_convergence_evidence_below_gate": "Сигнал схождения облигации сохранён, но историческая проверка не прошла заданный порог.",
@@ -551,8 +650,9 @@ _REASON_RU: dict[str, str] = {
     "price_near_activity": "Движение цены подтверждено недавней активностью по тому же инструменту.",
     "momentum_quality_and_z": "Momentum-сигнал прошёл одновременно порог качества и |z|.",
     "momentum_extreme_z": "Momentum-сигнал прошёл как экстремальный |z|.",
-    "volume_spike_notional_below_delivery_floor": (
-        "Всплеск объёма сохранён, но оборот за окно не превышает 40 млн ₽."
+    "notional_below_delivery_threshold": (
+        "Сигнал сохранён, но оборот за его рабочее окно не превышает "
+        "настроенный порог доставки."
     ),
     "large_trade_high_quality_or_z": "Крупный принт прошёл высокий quality или экстремальный |z|.",
     "liquidity_near_activity": "Liquidity-сигнал подтверждён недавней активностью.",

@@ -17,6 +17,8 @@ def _settings(monkeypatch, **env: str) -> RuntimeSettings:
         "SIGNAL_DELIVERY_MAX_PER_HOUR",
         "SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS",
         "SIGNAL_DELIVERY_TYPE_RULES_JSON",
+        "SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB",
+        "SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE",
         "SIGNAL_DELIVERY_MAX_EVENT_AGE_SECONDS",
         "SIGNAL_MIN_QUALITY_SCORE",
     ):
@@ -65,7 +67,7 @@ def test_combo_score_six_is_delivered(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "combo_score_ge_6"
-    assert out.payload["delivery_policy_version"] == "delivery_v4"
+    assert out.payload["delivery_policy_version"] == "delivery_v5"
     assert out.payload["delivery_priority"] == "high"
     assert out.payload["delivery_channel"] == "realtime"
     assert out.payload["delivery_explanation_ru"]
@@ -364,12 +366,11 @@ def test_volume_spike_at_or_below_notional_floor_is_not_delivered(
     out = policy.apply(_signal(payload=payload, z_score=20.0))
 
     assert out.payload["delivery_status"] == "suppressed"
+    assert out.payload["delivery_reason"] == "notional_below_delivery_threshold"
     assert (
-        out.payload["delivery_reason"]
-        == "volume_spike_notional_below_delivery_floor"
+        out.payload["delivery_rule"] == "signal_window_notional_gt_configured_threshold"
     )
-    assert out.payload["delivery_rule"] == "volume_spike_window_notional_gt_40m"
-    assert "40 млн" in out.payload["delivery_explanation_ru"]
+    assert out.payload["delivery_min_notional_rub"] == 40_000_000.0
 
 
 def test_volume_spike_above_notional_floor_can_be_delivered(monkeypatch) -> None:
@@ -406,13 +407,10 @@ def test_volume_spike_notional_floor_cannot_be_bypassed_by_custom_rule(
     )
 
     assert out.payload["delivery_status"] == "suppressed"
-    assert (
-        out.payload["delivery_reason"]
-        == "volume_spike_notional_below_delivery_floor"
-    )
+    assert out.payload["delivery_reason"] == "notional_below_delivery_threshold"
 
 
-def test_volume_spike_notional_floor_does_not_affect_other_signal_types(
+def test_default_notional_floor_affects_other_signal_types(
     monkeypatch,
 ) -> None:
     policy = DeliveryPolicy(_settings(monkeypatch))
@@ -420,10 +418,80 @@ def test_volume_spike_notional_floor_does_not_affect_other_signal_types(
     out = policy.apply(
         _signal(
             signal_type="trade_rate_spike",
-            payload={"quality_score": 99},
+            payload={"quality_score": 99, "window_notional": 40_000_000.0},
             z_score=20.0,
         )
     )
 
+    assert out.payload["delivery_status"] == "suppressed"
+    assert out.payload["delivery_reason"] == "notional_below_delivery_threshold"
+
+
+def test_per_signal_zero_override_disables_notional_gate(monkeypatch, tmp_path) -> None:
+    policy_path = tmp_path / "delivery-notional-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default_min_notional_rub": 40_000_000,
+                "signal_min_notional_rub": {"trading_status_changed": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE=str(policy_path),
+            CONFIG_RELOAD_INTERVAL_SECONDS="0",
+        )
+    )
+
+    out = policy.apply(
+        _signal(
+            signal_type="trading_status_changed",
+            payload={"quality_score": 0},
+            z_score=0.0,
+        )
+    )
+
     assert out.payload["delivery_status"] == "delivered"
-    assert out.payload["delivery_reason"] == "momentum_quality_and_z"
+    assert out.payload["delivery_min_notional_rub"] == 0.0
+
+
+def test_notional_threshold_file_is_hot_reloaded(monkeypatch, tmp_path) -> None:
+    policy_path = tmp_path / "delivery-notional-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default_min_notional_rub": 50_000_000,
+                "signal_min_notional_rub": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE=str(policy_path),
+            CONFIG_RELOAD_INTERVAL_SECONDS="0",
+        )
+    )
+    signal = _signal(
+        signal_type="trade_rate_spike",
+        payload={"quality_score": 99, "window_notional": 45_000_000},
+        z_score=20.0,
+    )
+
+    assert policy.apply(signal).payload["delivery_status"] == "suppressed"
+
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default_min_notional_rub": 50_000_000,
+                "signal_min_notional_rub": {"trade_rate_spike": 44_000_000},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert policy.apply(signal).payload["delivery_status"] == "delivered"
