@@ -10,8 +10,10 @@ from tinvest_signal_engine.signal_interpretation import build_signal_interpretat
 from tinvest_signal_engine.signal_locale import (
     build_plain_explanation_ru,
     build_telegram_html,
+    format_plain_alert_ru,
     signal_type_ru,
 )
+from tinvest_signal_engine.sinks import TelegramAlertSink
 from tinvest_signal_engine.terminal_links import (
     t_invest_instrument_url,
     t_invest_terminal_open_chart_url,
@@ -138,6 +140,126 @@ def test_telegram_price_jump_uses_interpretation_not_legacy_text() -> None:
     )
     assert "Цена выросла на +1,88%" in html
     assert "Диапазон движения цены" not in html
+
+
+def test_telegram_alert_has_compact_owner_facing_format() -> None:
+    signal = _signal(
+        ticker="ROSN",
+        class_code="TQBR",
+        signal_type="volume_spike",
+        severity=3,
+        metric_value=157_300.0,
+        baseline_value=11_530.0,
+        z_score=8.01,
+        window_seconds=180,
+        payload={
+            "window_lots": 157_300.0,
+            "window_units": 157_300.0,
+            "window_notional": 52_920_000.0,
+        },
+    )
+    quality = {
+        "quality_score": 97,
+        "quality_tier_ru": "высокая",
+        "quality_hint_ru": (
+            "Сильное отклонение и/или редкий паттерн — приоритет просмотра."
+        ),
+    }
+
+    message = build_telegram_html(
+        signal,
+        quality,
+        ticker_terminal_url="https://example.test/chart",
+        instrument_page_url="https://example.test/instrument",
+    )
+
+    assert message == (
+        '<a href="https://example.test/chart"><b>ROSN</b></a>\n'
+        "Тип: Всплеск объёма\n"
+        'Терминал: <a href="https://www.tbank.ru/terminal/">'
+        'tbank.ru/terminal</a> · <a href="https://example.test/instrument">'
+        "карточка инструмента</a>\n\n"
+        "Объём за 180 с: 157,3 тыс лотов, оборот ≈ 52,92 млн ₽ "
+        "(x13,64 к базе).\n"
+        "Сильное отклонение и/или редкий паттерн — приоритет просмотра."
+    )
+    for removed in (
+        "(TQBR)",
+        "volume_spike",
+        "Оценка:",
+        "97/100",
+        "Серьёзность:",
+        "|z|=",
+        "шт.",
+        "Всплеск объёма — ROSN",
+    ):
+        assert removed not in message
+
+
+def test_plain_telegram_fallback_is_compact_too() -> None:
+    signal = enrich_signal_for_delivery(
+        _signal(
+            ticker="ROSN",
+            class_code="TQBR",
+            signal_type="volume_spike",
+            payload={"window_notional": 52_920_000.0},
+        )
+    )
+
+    message = format_plain_alert_ru(
+        signal,
+        ticker_terminal_url="https://example.test/chart",
+        instrument_page_url="https://example.test/instrument",
+    )
+
+    assert message.startswith("ROSN\nТип: Всплеск объёма\nТерминал:")
+    assert "(TQBR)" not in message
+    assert "volume_spike" not in message
+    assert "Оценка:" not in message
+    assert "Серьёзность:" not in message
+    assert "rolling volume" not in message
+
+
+def test_telegram_sink_replaces_stale_preformatted_message() -> None:
+    class _Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json() -> dict[str, bool]:
+            return {"ok": True}
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    class _Client:
+        def __init__(self) -> None:
+            self.payload: dict[str, object] = {}
+
+        def post(self, _url: str, *, json: dict[str, object]) -> _Response:
+            self.payload = json
+            return _Response()
+
+    client = _Client()
+    sink = TelegramAlertSink(
+        bot_token="token",
+        chat_id="chat",
+        client=client,
+    )
+    signal = _signal(
+        payload={
+            "telegram_html": "СТАРЫЙ МНОГОСЛОВНЫЙ ШАБЛОН",
+            "window_notional": 52_920_000.0,
+        }
+    )
+
+    sink.send(signal)
+
+    delivered = str(client.payload["text"])
+    assert "СТАРЫЙ МНОГОСЛОВНЫЙ ШАБЛОН" not in delivered
+    assert "Тип: Всплеск объёма" in delivered
+    assert "Оценка:" not in delivered
 
 
 def test_volume_spike_interpretation_has_notional() -> None:

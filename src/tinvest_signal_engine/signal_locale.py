@@ -180,11 +180,6 @@ def build_summary_ru(signal: TriggerSignal, quality: dict) -> str:
     return "\n".join(lines)
 
 
-def _telegram_br_lines(text: str) -> str:
-    """Telegram HTML: перенос строки — символ ``\\n``; теги ``<br>`` / ``<br/>`` в HTML mode не поддерживаются."""
-    return text
-
-
 def build_telegram_html(
     signal: TriggerSignal,
     quality: dict,
@@ -195,14 +190,12 @@ def build_telegram_html(
     """HTML для Telegram: тикер ведёт в веб-терминал, отдельно — карточка инструмента."""
     t_esc = html.escape(signal.ticker)
     type_ru = html.escape(signal_type_ru(signal.signal_type))
-    type_raw = html.escape(signal.signal_type)
-    summ_plain = build_summary_ru(signal, quality)
-    summ = _telegram_br_lines(html.escape(summ_plain))
+    interpretation = build_signal_interpretation(signal)
+    detail = html.escape(str(interpretation.get("headline_ru") or "").strip())
+    hint = html.escape(str(quality.get("quality_hint_ru") or "").strip())
     term_href = html.escape(ticker_terminal_url, quote=True)
     inv_href = html.escape(instrument_page_url, quote=True)
-    wterm = html.escape(t_invest_web_terminal_url())
-    score = quality["quality_score"]
-    tier = html.escape(str(quality["quality_tier_ru"]))
+    wterm = html.escape(t_invest_web_terminal_url(), quote=True)
     if signal.signal_type == "morning_retracement_recommendation":
         payload = signal.payload or {}
         direction = (
@@ -247,14 +240,18 @@ def build_telegram_html(
             "Исследовательская рекомендация: вероятность не гарантирует результат."
         )
     # Вложенность <b><a>…</a></b> у Bot API часто даёт 400; допустимо <a><b>…</b></a>.
-    return (
-        f"<a href=\"{term_href}\"><b>{t_esc}</b></a> ({html.escape(signal.class_code)})\n"
-        f"Тип: {type_ru} <code>{type_raw}</code>\n"
-        f"Оценка: <b>{score}</b>/100 ({tier})\n"
+    lines = [
+        f"<a href=\"{term_href}\"><b>{t_esc}</b></a>",
+        f"Тип: {type_ru}",
         f"Терминал: <a href=\"{wterm}\">tbank.ru/terminal</a> · "
-        f"<a href=\"{inv_href}\">карточка инструмента</a>\n\n"
-        f"{summ}"
-    )
+        f"<a href=\"{inv_href}\">карточка инструмента</a>",
+        "",
+    ]
+    if detail:
+        lines.append(detail)
+    if hint:
+        lines.append(hint)
+    return "\n".join(lines)
 
 
 def format_plain_alert_ru(
@@ -264,17 +261,21 @@ def format_plain_alert_ru(
     instrument_page_url: str,
 ) -> str:
     """Простой текст без HTML (fallback для Telegram при ошибках разметки)."""
-    q = signal.payload or {}
-    score = q.get("quality_score", "")
-    tier = q.get("quality_tier_ru", "")
-    head = (
-        f"{signal.ticker} ({signal.class_code}) — {signal_type_ru(signal.signal_type)}\n"
-        f"Терминал: {ticker_terminal_url}\n"
-        f"Карточка: {instrument_page_url}\n"
-    )
-    if score != "":
-        head += f"Оценка: {score}/100 ({tier})\n"
-    return head + "\n" + signal.summary
+    payload = signal.payload or {}
+    interpretation = build_signal_interpretation(signal)
+    detail = str(interpretation.get("headline_ru") or "").strip()
+    hint = str(payload.get("quality_hint_ru") or "").strip()
+    lines = [
+        signal.ticker,
+        f"Тип: {signal_type_ru(signal.signal_type)}",
+        f"Терминал: {ticker_terminal_url} · карточка инструмента: {instrument_page_url}",
+        "",
+    ]
+    if detail:
+        lines.append(detail)
+    if hint:
+        lines.append(hint)
+    return "\n".join(lines)
 
 
 def _percent_ru(value: object) -> str:

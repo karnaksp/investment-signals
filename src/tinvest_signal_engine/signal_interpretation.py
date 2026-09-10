@@ -157,8 +157,6 @@ def _volume_spike(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     headline = (
         f"Объём за {signal.window_seconds} с: {_qty(lots)} лотов"
     )
-    if units is not None:
-        headline += f" / {_qty(units)} шт."
     if notional is not None:
         headline += f", оборот {_money(notional, signal)}"
     if ratio is not None:

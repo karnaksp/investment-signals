@@ -1244,11 +1244,11 @@ class TelegramAlertSink:
     def send(self, signal: TriggerSignal) -> None:
         if self._client is None or not self._bot_token or not self._chat_id:
             return
+        # Формируем представление в момент отправки. Так очередь, созданная старой
+        # версией детектора, не протащит в Telegram устаревший многословный шаблон.
+        signal = enrich_signal_for_delivery(signal)
         p = signal.payload or {}
         tg = p.get("telegram_html")
-        if not (isinstance(tg, str) and tg.strip()):
-            signal = enrich_signal_for_delivery(signal)
-            tg = (signal.payload or {}).get("telegram_html")
         text = (
             tg
             if isinstance(tg, str) and tg.strip()
