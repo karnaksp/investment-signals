@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the resolved futures universe for changes
+
+[Path]
+PathChanged=/var/lib/investment-signals-pro/runtime-config/instruments.yaml
+Unit=investment-signals-futures-config-reload.service
+
+[Install]
+WantedBy=multi-user.target

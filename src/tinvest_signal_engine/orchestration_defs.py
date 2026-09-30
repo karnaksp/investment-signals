@@ -29,6 +29,10 @@ from .logging_utils import configure_logging
 from .services.bond_convergence_emitter import run_once as run_bond_convergence_once
 from .services.daily_adaptive_calibration import run_once as run_adaptive_calibration_once
 from .services.threshold_cron import run_recalc_once
+from .futures_orchestration_defs import (
+    nightly_futures_universe_schedule,
+    refresh_liquid_futures_universe_job,
+)
 
 
 @op(name="threshold_recalc_op", tags={"component": "threshold"})
@@ -187,11 +191,13 @@ defs = Definitions(
         daily_adaptive_calibration_job,
         unary_kafka_poll_once_job,
         bond_convergence_scan_job,
+        refresh_liquid_futures_universe_job,
     ],
     schedules=[
         daily_threshold_schedule,
         daily_adaptive_calibration_schedule,
         quarter_hourly_unary_schedule,
         daily_bond_convergence_schedule,
+        nightly_futures_universe_schedule,
     ],
 )

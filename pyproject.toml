@@ -54,6 +54,7 @@ tinvest-bond-convergence-emitter = "tinvest_signal_engine.services.bond_converge
 tinvest-cache-candles = "tinvest_signal_engine.services.candle_cache:main"
 tinvest-import-scientific-history = "tinvest_signal_engine.services.historical_candle_import:main"
 tinvest-morning-retracement-worker = "tinvest_signal_engine.services.morning_retracement_signal_worker:main"
+tinvest-refresh-futures = "tinvest_signal_engine.services.futures_universe_refresh:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

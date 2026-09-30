@@ -13,6 +13,14 @@ Cron по умолчанию (UTC): пересчёт порогов **`0 2 * * *
 
 - `DAGSTER_THRESHOLD_CRON` — cron для порогов;
 - `DAGSTER_UNARY_CRON` — cron для unary.
+- `DAGSTER_FUTURES_REFRESH_CRON` — ночное обновление ликвидных контрактов;
+- `DAGSTER_FUTURES_REFRESH_TIMEZONE` — часовой пояс обновления фьючерсов;
+- `FUTURES_UNIVERSE_CONFIG` — Git-конфиг базовых активов и правил ролловера.
+
+На production-VM `investment-signals-futures-config-reload.path` следит за
+атомарной заменой runtime-конфига и перезапускает ingestor только при реальном
+изменении выбранных контрактов. После перезагрузки VM path unit и контейнеры
+восстанавливаются автоматически.
 
 После `docker compose up` UI: `http://localhost:${HOST_DAGSTER_PORT:-30300}`.
 

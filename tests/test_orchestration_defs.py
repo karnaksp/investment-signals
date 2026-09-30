@@ -20,6 +20,10 @@ def test_dagster_definitions_exposes_jobs_and_schedules() -> None:
         orchestration_defs.bond_convergence_scan_job.name
         == "bond_convergence_scan_job"
     )
+    assert (
+        orchestration_defs.refresh_liquid_futures_universe_job.name
+        == "refresh_liquid_futures_universe_job"
+    )
     assert orchestration_defs.daily_threshold_schedule.name == "daily_threshold_recalc"
     assert (
         orchestration_defs.quarter_hourly_unary_schedule.name
@@ -44,5 +48,9 @@ def test_dagster_definitions_exposes_jobs_and_schedules() -> None:
     )
     assert (
         orchestration_defs.daily_bond_convergence_schedule.default_status
+        is DefaultScheduleStatus.RUNNING
+    )
+    assert (
+        orchestration_defs.nightly_futures_universe_schedule.default_status
         is DefaultScheduleStatus.RUNNING
     )
