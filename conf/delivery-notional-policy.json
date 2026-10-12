@@ -7,6 +7,7 @@
     "futures_positioning": 0,
     "liquidity_vacuum": 0,
     "obi_dynamics": 0,
-    "open_interest_spike": 0
+    "open_interest_spike": 0,
+    "volume_spike": 500000000
   }
 }
