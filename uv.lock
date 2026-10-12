@@ -2442,7 +2442,7 @@ wheels = [
 
 [[package]]
 name = "tinvest-signal-engine"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "cachetools" },
@@ -2487,6 +2487,7 @@ proto = [
 ]
 replay = [
     { name = "duckdb" },
+    { name = "pytz" },
 ]
 research = [
     { name = "duckdb" },
@@ -2523,6 +2524,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "python-dateutil" },
+    { name = "pytz", marker = "extra == 'replay'", specifier = ">=2024.1" },
     { name = "pyyaml" },
     { name = "redis", specifier = ">=5.0.0" },
     { name = "scikit-learn", marker = "extra == 'research'", specifier = ">=1.4" },

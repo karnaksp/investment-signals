@@ -42,7 +42,7 @@ RUN python3 -m venv /opt/venv \
 
 FROM ${UBUNTU_IMAGE} AS runtime
 
-ARG APP_VERSION=0.2.0
+ARG APP_VERSION=1.0.0
 ARG APP_COMMIT_SHA=unknown
 ARG APP_BUILD_TIME=unknown
 

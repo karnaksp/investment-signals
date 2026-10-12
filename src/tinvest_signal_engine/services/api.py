@@ -1070,7 +1070,7 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
     fastapi_app = FastAPI(
         title="T-Invest Signal API",
-        version=str(runtime.get("app_version") or "0.2.0"),
+        version=str(runtime.get("app_version") or "1.0.0"),
         description=(
             "Чтение накопленных аномалий рынка (сигналов), "
             "записанных сервисом детектора в Postgres. "
