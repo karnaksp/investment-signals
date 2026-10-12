@@ -400,13 +400,18 @@ def test_custom_rule_can_force_admin_only(monkeypatch) -> None:
 
 @pytest.mark.parametrize(
     "window_notional",
-    [None, float("nan"), 39_999_999.0, 40_000_000.0],
+    [None, float("nan"), 499_999_999.0, 500_000_000.0],
 )
 def test_volume_spike_at_or_below_notional_floor_is_not_delivered(
     monkeypatch,
     window_notional: float | None,
 ) -> None:
-    policy = DeliveryPolicy(_settings(monkeypatch))
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE="conf/delivery-notional-policy.json",
+        )
+    )
     payload = {"quality_score": 99, "window_notional": window_notional}
 
     out = policy.apply(_signal(payload=payload, z_score=20.0))
@@ -416,15 +421,20 @@ def test_volume_spike_at_or_below_notional_floor_is_not_delivered(
     assert (
         out.payload["delivery_rule"] == "signal_window_notional_gt_configured_threshold"
     )
-    assert out.payload["delivery_min_notional_rub"] == 40_000_000.0
+    assert out.payload["delivery_min_notional_rub"] == 500_000_000.0
 
 
 def test_volume_spike_above_notional_floor_can_be_delivered(monkeypatch) -> None:
-    policy = DeliveryPolicy(_settings(monkeypatch))
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE="conf/delivery-notional-policy.json",
+        )
+    )
 
     out = policy.apply(
         _signal(
-            payload={"quality_score": 99, "window_notional": 40_000_000.01},
+            payload={"quality_score": 99, "window_notional": 500_000_000.01},
             z_score=20.0,
         )
     )
@@ -439,6 +449,7 @@ def test_volume_spike_notional_floor_cannot_be_bypassed_by_custom_rule(
     policy = DeliveryPolicy(
         _settings(
             monkeypatch,
+            SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE="conf/delivery-notional-policy.json",
             SIGNAL_DELIVERY_TYPE_RULES_JSON=json.dumps(
                 {"volume_spike": {"always": True}}
             ),
@@ -447,7 +458,7 @@ def test_volume_spike_notional_floor_cannot_be_bypassed_by_custom_rule(
 
     out = policy.apply(
         _signal(
-            payload={"quality_score": 99, "window_notional": 39_999_999.0},
+            payload={"quality_score": 99, "window_notional": 499_999_999.0},
             z_score=20.0,
         )
     )
