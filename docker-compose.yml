@@ -150,6 +150,27 @@ services:
       retries: 20
       start_period: 15s
 
+  # Release gate: apply immutable PostgreSQL and ClickHouse migrations before
+  # application services are allowed to read the upgraded schema.
+  migrate:
+    build: *app-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      CLICKHOUSE_HTTP_URL: http://clickhouse:8123
+    command:
+      - tinvest-migrate
+      - --release-version
+      - "${APP_VERSION:-0.0.0+local}"
+      - --migrations-root
+      - /app/sql
+    restart: "no"
+
   # Поток T-Invest → Kafka (сырые события); читает conf/instruments.yaml.
   ingestor:
     build: *app-build
@@ -179,6 +200,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -240,6 +263,7 @@ services:
       - .env
     environment:
       DAGSTER_HOME: /opt/dagster/dagster_home
+      HOME: /opt/dagster/dagster_home
       PROTO_DIR: /app/proto
       MARKET_UNARY_POLL_SECONDS: "${MARKET_UNARY_POLL_SECONDS:-300}"
     volumes:
@@ -268,10 +292,13 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
       DAGSTER_HOME: /opt/dagster/dagster_home
+      HOME: /opt/dagster/dagster_home
       PROTO_DIR: /app/proto
       MARKET_UNARY_POLL_SECONDS: "${MARKET_UNARY_POLL_SECONDS:-300}"
       ADAPTIVE_CALIBRATION_STATE_DIR: /var/lib/investment-signals/adaptive-calibration
@@ -430,6 +457,8 @@ services:
       postgres:
         condition: service_healthy
       clickhouse-init:
+        condition: service_completed_successfully
+      migrate:
         condition: service_completed_successfully
     env_file:
       - .env

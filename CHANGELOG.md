@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.1.1 - 2026-10-12
+
+- Added a one-shot Compose migration gate so PostgreSQL and ClickHouse upgrades
+  complete before detector, API, and orchestration services start.
+- Pointed Dagster's runtime home at its writable persistent volume, preventing
+  restart loops under the non-root production user.
+
 ## 1.1.0 - 2026-10-12
 
 - Добавлены realtime-сигналы `confirmed_impulse_long/short`,
