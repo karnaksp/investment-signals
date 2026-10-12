@@ -58,6 +58,26 @@ class InstrumentRegistry:
         return iter(self._by_instrument_id.values())
 
 
+def request_error_retry_delay_seconds(
+    exc: RequestError,
+    *,
+    fallback_seconds: int = 5,
+    max_seconds: int = 300,
+) -> int:
+    """Возвращает паузу для повторного запроса с учетом лимитов T-Invest."""
+    metadata = getattr(exc, "metadata", None)
+    reset = getattr(metadata, "ratelimit_reset", None)
+    if reset is None:
+        return fallback_seconds
+    try:
+        reset_seconds = int(reset)
+    except (TypeError, ValueError):
+        return fallback_seconds
+    if reset_seconds <= 0:
+        return fallback_seconds
+    return min(max_seconds, max(fallback_seconds, reset_seconds + 1))
+
+
 def build_instrument_registry(
     client,
     instrument_configs: list[InstrumentSubscriptionConfig],

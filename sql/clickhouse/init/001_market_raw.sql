@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS signal_engine.market_raw_events
 (
     event_id String,
     event_type LowCardinality(String),
-    instrument_id String,
+    instrument_id LowCardinality(String),
     ticker LowCardinality(String),
     class_code LowCardinality(String),
     alias LowCardinality(String),

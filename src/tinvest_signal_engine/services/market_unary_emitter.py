@@ -264,7 +264,7 @@ def _emit_tech_analysis(
 
 
 def main() -> None:
-    settings = RuntimeSettings.from_env()
+    settings = RuntimeSettings.from_env(service_name="market_unary_emitter")
     configure_logging(settings.log_level)
     if settings.market_unary_poll_seconds <= 0:
         raise RuntimeError(

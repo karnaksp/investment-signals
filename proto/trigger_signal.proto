@@ -19,4 +19,12 @@ message TriggerSignalV1 {
   int32 window_seconds = 13;
   string summary = 14;
   string payload_json = 15;
+  string source_event_id = 16;
+  string source_event_at_rfc3339 = 17;
+  string signal_schema_version = 18;
+  string expectation_catalog_version = 19;
+  string detector_config_version = 20;
+  string delivery_config_version = 21;
+  string cost_model_version = 22;
+  string provenance_status = 23;
 }

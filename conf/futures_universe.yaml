@@ -1,0 +1,53 @@
+version: 1
+
+# Stable aliases and base assets are the source of truth kept in Git. The
+# concrete exchange ticker is resolved nightly and written into the managed
+# FUTURES_NEAREST block of instruments.yaml.
+defaults:
+  roll_before_expiry_days: 5
+  require_two_sided_order_book: true
+  minimum_two_sided_lots: 1
+  max_candidates: 4
+
+futures:
+  - alias: brent_oil
+    basic_asset: Brent
+  - alias: gold
+    basic_asset: Золото в долларах
+  - alias: silver
+    basic_asset: Серебро
+    require_name_substrings: ["SILV-"]
+    exclude_name_substrings: ["мини", "SILVM"]
+  - alias: usd_rub
+    basic_asset: USD/RUB
+    ticker_pattern: '^Si[FGHJKMNQUVXZ]\d$'
+  - alias: eur_rub
+    basic_asset: EUR/RUB
+    ticker_pattern: '^Eu[FGHJKMNQUVXZ]\d$'
+  - alias: cny_rub
+    basic_asset: CNY/RUB
+    ticker_pattern: '^CR[FGHJKMNQUVXZ]\d$'
+  - alias: wheat
+    basic_asset: Пшеница
+    require_name_substrings: ["WHEAT-"]
+  - alias: palladium
+    basic_asset: Палладий
+    ticker_pattern: '^PD[FGHJKMNQUVXZ]\d$'
+  - alias: platinum
+    basic_asset: Платина
+    ticker_pattern: '^PT[FGHJKMNQUVXZ]\d$'
+  - alias: nat_gas_us
+    basic_asset: Газ (США)
+    exclude_name_substrings: ["микро", "мини"]
+  - alias: nasdaq100
+    basic_asset: Nasdaq 100
+  - alias: sber_fut
+    basic_asset: SBER
+  - alias: gazp_fut
+    basic_asset: GAZP
+  - alias: gold_rub
+    basic_asset: Золото в рублях
+  - alias: rts_index
+    basic_asset: RTSI
+  - alias: imoex
+    basic_asset: IMOEX

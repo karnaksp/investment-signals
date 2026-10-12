@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from pathlib import Path
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from dataclasses import replace
@@ -14,14 +17,17 @@ from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
 
-POLICY_VERSION = "delivery_v3"
+POLICY_VERSION = "delivery_v5"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
 
+_NOTIONAL_DELIVERY_RULE = "signal_window_notional_gt_configured_threshold"
+
 _ALWAYS_TYPES = {"trading_status_changed", "market_access_changed"}
 _COMBO_TYPES = {"microstructure_combo_long", "microstructure_combo_short"}
 _LARGE_TRADE_TYPES = {"large_trade_print"}
+_VALIDATED_LONG_HORIZON_TYPES = {"bond_maturity_convergence"}
 _ACTIVITY_CONTEXT_TYPES = {
     "volume_spike",
     "trade_rate_spike",
@@ -52,6 +58,83 @@ class DeliveryDecision:
         return self.status == DELIVERY_DELIVERED
 
 
+class DeliveryNotionalThresholds:
+    """Hot-reloaded external-delivery turnover thresholds.
+
+    A zero threshold disables this gate for one signal type.  Invalid runtime
+    files never replace the last known-good policy.
+    """
+
+    def __init__(self, settings: RuntimeSettings) -> None:
+        configured_default = float(settings.signal_delivery_default_min_notional_rub)
+        self._fallback_default = (
+            configured_default
+            if math.isfinite(configured_default) and configured_default >= 0.0
+            else 40_000_000.0
+        )
+        self._default = self._fallback_default
+        self._overrides: dict[str, float] = {}
+        self._path = Path(settings.signal_delivery_notional_policy_path)
+        self._reload_interval = max(0.0, float(settings.config_reload_interval_seconds))
+        self._last_poll = 0.0
+        self._loaded_mtime_ns: int | None = None
+        self.refresh(force=True)
+
+    def refresh(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_poll < self._reload_interval:
+            return
+        self._last_poll = now
+        try:
+            mtime_ns = self._path.stat().st_mtime_ns
+        except FileNotFoundError:
+            if self._loaded_mtime_ns is not None:
+                self._default = self._fallback_default
+                self._overrides = {}
+                self._loaded_mtime_ns = None
+            return
+        except OSError:
+            logger.exception("Failed to stat delivery notional policy")
+            return
+        if not force and mtime_ns == self._loaded_mtime_ns:
+            return
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("delivery notional policy must be an object")
+            default = _nonnegative_finite_number(
+                raw.get("default_min_notional_rub"),
+                field="default_min_notional_rub",
+            )
+            overrides_raw = raw.get("signal_min_notional_rub", {})
+            if not isinstance(overrides_raw, dict):
+                raise ValueError("signal_min_notional_rub must be an object")
+            overrides = {
+                str(signal_type).strip(): _nonnegative_finite_number(
+                    value, field=f"signal_min_notional_rub.{signal_type}"
+                )
+                for signal_type, value in overrides_raw.items()
+                if str(signal_type).strip()
+            }
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            logger.exception("Ignored invalid delivery notional policy")
+            return
+        self._default = default
+        self._overrides = overrides
+        self._loaded_mtime_ns = mtime_ns
+
+    def minimum_for(self, signal_type: str) -> float:
+        self.refresh()
+        return self._overrides.get(signal_type, self._default)
+
+    def allows(self, signal_type: str, window_notional: object) -> bool:
+        minimum = self.minimum_for(signal_type)
+        if minimum <= 0.0:
+            return True
+        observed = _finite_number_or_nan(window_notional)
+        return math.isfinite(observed) and observed > minimum
+
+
 class DeliveryPolicy:
     """Stateful delivery gate for Telegram/webhook notifications.
 
@@ -63,15 +146,16 @@ class DeliveryPolicy:
         self,
         settings: RuntimeSettings,
         *,
-        delivered_count_since: Callable[
-            [datetime, str | None, str | None], int
-        ]
+        delivered_count_since: Callable[[datetime, str | None, str | None], int]
         | None = None,
     ):
         self.enabled = bool(settings.signal_delivery_enabled)
         legacy_floor = settings.signal_min_quality_score
         configured_floor = settings.signal_delivery_min_quality
-        if legacy_floor is not None and settings.signal_delivery_min_quality_raw is None:
+        if (
+            legacy_floor is not None
+            and settings.signal_delivery_min_quality_raw is None
+        ):
             configured_floor = legacy_floor
         self.min_quality = max(0, int(configured_floor))
         self.max_per_hour = max(0, int(settings.signal_delivery_max_per_hour))
@@ -80,6 +164,7 @@ class DeliveryPolicy:
         )
         self._delivered_count_since = delivered_count_since
         self._type_rules = _parse_type_rules(settings.signal_delivery_type_rules_json)
+        self.notional_thresholds = DeliveryNotionalThresholds(settings)
         self._recent_activity: dict[str, deque[tuple[datetime, str]]] = defaultdict(
             deque
         )
@@ -91,20 +176,55 @@ class DeliveryPolicy:
         now = signal.detected_at or utc_now()
         self._record_activity_context(signal, now)
         decision = self.decide(signal, now=now)
+        return self._annotate(signal, decision)
+
+    def suppress(
+        self,
+        signal: TriggerSignal,
+        *,
+        reason_code: str,
+        rule: str,
+        metadata: dict[str, object] | None = None,
+    ) -> TriggerSignal:
+        """Suppress without mutating cooldown, rate-limit, or context state."""
+
+        decision = DeliveryDecision(
+            status=DELIVERY_SUPPRESSED,
+            reason=reason_code,
+            rule=rule,
+            channel="admin_only",
+        )
+        return self._annotate(signal, decision, metadata=metadata)
+
+    def _annotate(
+        self,
+        signal: TriggerSignal,
+        decision: DeliveryDecision,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> TriggerSignal:
         payload = {
             **signal.payload,
             "delivery_status": decision.status,
             "delivery_reason": decision.reason,
+            "delivery_reason_code": decision.reason,
             "delivery_rule": decision.rule,
             "delivery_policy_version": POLICY_VERSION,
             "delivery_priority": self._priority(signal, decision),
             "delivery_channel": self._channel(decision),
             "delivery_explanation_ru": self._explanation_ru(decision),
+            "delivery_min_notional_rub": self.notional_thresholds.minimum_for(
+                signal.signal_type
+            ),
+            "delivery_observed_notional_rub": _finite_number_or_none(
+                signal.payload.get("window_notional")
+            ),
             "delivered_at": (
                 decision.delivered_at.isoformat()
                 if decision.delivered_at is not None
                 else None
             ),
+            **(metadata or {}),
         }
         return replace(signal, payload=payload)
 
@@ -135,21 +255,30 @@ class DeliveryPolicy:
         if signal.signal_type not in _ALWAYS_TYPES:
             self._last_instrument_delivery[signal.instrument_id] = ts
         if signal.signal_type in _ALWAYS_TYPES:
-            self._last_status_delivery[
-                (signal.instrument_id, signal.signal_type)
-            ] = ts
+            self._last_status_delivery[(signal.instrument_id, signal.signal_type)] = ts
         return candidate
 
     def _candidate_decision(
         self, signal: TriggerSignal, now: datetime
     ) -> DeliveryDecision:
+        st = signal.signal_type
         custom = self._custom_decision(signal, now)
+        if custom is not None and not custom.should_send:
+            return custom
+        if not self.notional_thresholds.allows(
+            st, signal.payload.get("window_notional")
+        ):
+            return DeliveryDecision(
+                status=DELIVERY_SUPPRESSED,
+                reason="notional_below_delivery_threshold",
+                rule=_NOTIONAL_DELIVERY_RULE,
+            )
+
         if custom is not None:
             return custom
 
         quality = _quality(signal)
         abs_z = abs(float(signal.z_score))
-        st = signal.signal_type
 
         if st in _ALWAYS_TYPES:
             key = (signal.instrument_id, st)
@@ -165,6 +294,23 @@ class DeliveryPolicy:
                 reason="status_or_access_change",
                 rule="status_access_always",
                 delivered_at=now,
+            )
+
+        if st in _VALIDATED_LONG_HORIZON_TYPES:
+            success_rate = _payload_number(signal, "historical_success_rate")
+            lower_bound = _payload_number(signal, "historical_wilson_lower_bound")
+            sample_size = _payload_number(signal, "historical_eligible_observations")
+            if success_rate >= 0.90 and lower_bound >= 0.85 and sample_size >= 100:
+                return DeliveryDecision(
+                    status=DELIVERY_DELIVERED,
+                    reason="validated_bond_convergence",
+                    rule="bond_convergence_historical_gate_v1",
+                    delivered_at=now,
+                )
+            return DeliveryDecision(
+                status=DELIVERY_SUPPRESSED,
+                reason="bond_convergence_evidence_below_gate",
+                rule="bond_convergence_historical_gate_v1",
             )
 
         if st in _COMBO_TYPES:
@@ -341,11 +487,14 @@ class DeliveryPolicy:
                 reason="instrument_cooldown",
                 rule="instrument_delivery_cooldown",
             )
-        if self._persistent_delivered_count(
-            since=since,
-            instrument_id=signal.instrument_id,
-            signal_type=None,
-        ) > 0:
+        if (
+            self._persistent_delivered_count(
+                since=since,
+                instrument_id=signal.instrument_id,
+                signal_type=None,
+            )
+            > 0
+        ):
             return DeliveryDecision(
                 status=DELIVERY_SUPPRESSED,
                 reason="instrument_cooldown",
@@ -390,9 +539,7 @@ class DeliveryPolicy:
         if self._delivered_count_since is None:
             return 0
         try:
-            return int(
-                self._delivered_count_since(since, instrument_id, signal_type)
-            )
+            return int(self._delivered_count_since(since, instrument_id, signal_type))
         except Exception:
             logger.exception("Failed to read persistent delivery history")
             return 0
@@ -474,13 +621,39 @@ def _payload_number(signal: TriggerSignal, key: str) -> float:
     return 0.0
 
 
+def _nonnegative_finite_number(value: object, *, field: str) -> float:
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be numeric")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise ValueError(f"{field} must be finite and non-negative")
+    return parsed
+
+
+def _finite_number_or_nan(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return math.nan
+
+
+def _finite_number_or_none(value: object) -> float | None:
+    parsed = _finite_number_or_nan(value)
+    return parsed if math.isfinite(parsed) else None
+
+
 _REASON_RU: dict[str, str] = {
+    "validated_bond_convergence": "Историческая проверка сигнала схождения облигации к номиналу прошла заданный порог; уведомление отправлено сразу.",
+    "bond_convergence_evidence_below_gate": "Сигнал схождения облигации сохранён, но историческая проверка не прошла заданный порог.",
     "combo_score_ge_6": "Комбо-сигнал набрал проходной score и отправлен в realtime.",
     "status_or_access_change": "Режим торгов или доступ к заявкам изменился; статусные события отправляются в realtime.",
     "price_extreme_quality_and_z": "Сильное движение цены прошло строгий порог качества и |z|.",
     "price_near_activity": "Движение цены подтверждено недавней активностью по тому же инструменту.",
     "momentum_quality_and_z": "Momentum-сигнал прошёл одновременно порог качества и |z|.",
     "momentum_extreme_z": "Momentum-сигнал прошёл как экстремальный |z|.",
+    "notional_below_delivery_threshold": (
+        "Сигнал сохранён, но оборот за его рабочее окно не превышает "
+        "настроенный порог доставки."
+    ),
     "large_trade_high_quality_or_z": "Крупный принт прошёл высокий quality или экстремальный |z|.",
     "liquidity_near_activity": "Liquidity-сигнал подтверждён недавней активностью.",
     "quality_floor": "Сигнал прошёл общий высокий порог качества.",
@@ -498,4 +671,8 @@ _REASON_RU: dict[str, str] = {
     "instrument_cooldown": "Сигнал сохранён, но подавлен cooldown по инструменту.",
     "status_cooldown": "Статусный сигнал сохранён, но повтор подавлен часовым cooldown.",
     "custom_type_rule_not_matched": "Сигнал сохранён, но custom type rule не дал realtime-доставку.",
+    "delivery_event_age_exceeded": "Событие обработано для локальной статистики, но слишком устарело для Telegram или webhook.",
+    "delivery_event_crossed_session": "Событие относится к предыдущей торговой сессии и сохранено только для локальной статистики.",
+    "delivery_event_time_unavailable": "Время исходного события неизвестно, поэтому внешнее уведомление безопасно подавлено.",
+    "delivery_event_time_in_future": "Время исходного события расходится с часами сервиса; внешнее уведомление безопасно подавлено.",
 }

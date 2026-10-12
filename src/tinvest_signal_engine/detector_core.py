@@ -6,12 +6,26 @@ import math
 from collections import defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from statistics import fmean
 from typing import Any, Iterable
 from uuid import uuid4
 
 from .config import DetectorSettings
+from .domain.detector_observations import (
+    HISTORY_SAMPLING_POLICY_VERSION,
+    DetectorObservation,
+    deterministic_observation_id,
+)
+from .domain.bond_convergence import (
+    HISTORICAL_EVIDENCE,
+    PAR_PRICE,
+    POLICY_VERSION as BOND_CONVERGENCE_POLICY_VERSION,
+    BondConvergenceSnapshot,
+    evaluate_bond_convergence,
+)
+from .domain.signal_identity import deterministic_signal_id
 from .models import NormalizedEvent, TriggerSignal
 from .serialization import quotation_to_float, utc_now
 
@@ -83,23 +97,46 @@ class SignalDetector:
         per_instrument: dict[str, DetectorSettings] | None = None,
         *,
         lead_lag_pairs: tuple[tuple[str, str], ...] = (),
+        expectation_catalog_version: str | None = None,
+        detector_config_version: str | None = None,
+        delivery_config_version: str | None = None,
+        cost_model_version: str | None = None,
     ):
         self._default_settings = settings
         self._per_instrument = per_instrument or {}
         self._states: dict[str, InstrumentState] = defaultdict(InstrumentState)
         self._lead_lag_pairs = lead_lag_pairs
+        self._expectation_catalog_version = expectation_catalog_version
+        self._detector_config_version = detector_config_version
+        self._delivery_config_version = delivery_config_version
+        self._cost_model_version = cost_model_version
         self._mid_track: dict[str, deque[tuple[datetime, float]]] = defaultdict(
             lambda: deque(maxlen=4000)
         )
         # Последние unary-снимки по instrument_id (не сериализуем в Redis).
         self._unary_context: dict[str, dict[str, Any]] = {}
+        self._pending_observations: list[DetectorObservation] = []
 
     def _settings_for(self, instrument_id: str) -> DetectorSettings:
         return self._per_instrument.get(instrument_id, self._default_settings)
 
-    def process(self, event: NormalizedEvent) -> list[TriggerSignal]:
+    def process(
+        self,
+        event: NormalizedEvent,
+        *,
+        emit_signals: bool = True,
+    ) -> list[TriggerSignal]:
+        self._pending_observations = []
         cfg = self._settings_for(event.instrument_id)
         state = self._states[event.instrument_id]
+        alert_state_before = (
+            {
+                instrument_id: dict(instrument_state.last_alert_at)
+                for instrument_id, instrument_state in self._states.items()
+            }
+            if not emit_signals
+            else None
+        )
         if event.event_type == "trade":
             signals = self._process_trade_event(event, state, cfg)
         elif event.event_type == "last_price":
@@ -114,11 +151,71 @@ class SignalDetector:
             signals = self._process_candle_event(event, state, cfg)
         elif event.event_type in {"market_values", "tech_analysis"}:
             signals = self._process_unary_snapshot_event(event)
+        elif event.event_type == "bond_convergence_observation":
+            signals = self._process_bond_convergence_event(event)
         else:
             signals = []
         signals = list(signals)
         signals.extend(self._maybe_lead_lag(event, cfg))
-        return signals
+        if not emit_signals:
+            for instrument_id, instrument_state in self._states.items():
+                instrument_state.last_alert_at.clear()
+                instrument_state.last_alert_at.update(
+                    (alert_state_before or {}).get(instrument_id, {})
+                )
+            self._pending_observations = []
+            return []
+        return [self._attach_provenance(signal, event) for signal in signals]
+
+    def drain_observations(self) -> tuple[DetectorObservation, ...]:
+        """Return observations from the latest event exactly once."""
+
+        observations = tuple(self._pending_observations)
+        self._pending_observations = []
+        return observations
+
+    def _attach_provenance(
+        self,
+        signal: TriggerSignal,
+        event: NormalizedEvent,
+    ) -> TriggerSignal:
+        payload = dict(signal.payload)
+        if "window_notional" not in payload:
+            cfg = self._settings_for(signal.instrument_id)
+            state = self._states.get(signal.instrument_id)
+            cutoff = event.source_time - timedelta(seconds=cfg.trade_window_seconds)
+            payload["window_notional"] = sum(
+                point.notional
+                for point in (() if state is None else state.trade_points)
+                if cutoff <= point.ts <= event.source_time
+            )
+            payload["window_notional_currency"] = "price_units"
+            payload["window_notional_window_seconds"] = cfg.trade_window_seconds
+            payload["window_notional_source"] = "rolling_trade_window"
+        return replace(
+            signal,
+            payload=payload,
+            signal_id=deterministic_signal_id(event.event_id, signal.signal_type),
+            source_event_id=event.event_id,
+            source_event_at=event.source_time,
+            signal_schema_version="1.0.0",
+            expectation_catalog_version=self._expectation_catalog_version,
+            detector_config_version=self._detector_config_version,
+            delivery_config_version=self._delivery_config_version,
+            cost_model_version=self._cost_model_version,
+            provenance_status=(
+                "complete"
+                if all(
+                    (
+                        self._expectation_catalog_version,
+                        self._detector_config_version,
+                        self._delivery_config_version,
+                        self._cost_model_version,
+                    )
+                )
+                else "legacy"
+            ),
+        )
 
     @staticmethod
     def _truncate_unary_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -148,6 +245,95 @@ class SignalDetector:
         }
         return []
 
+    @staticmethod
+    def _process_bond_convergence_event(
+        event: NormalizedEvent,
+    ) -> list[TriggerSignal]:
+        payload = event.payload
+        try:
+            snapshot = BondConvergenceSnapshot(
+                instrument_id=event.instrument_id,
+                ticker=event.ticker,
+                class_code=event.class_code,
+                alias=event.alias,
+                figi=event.figi,
+                uid=event.uid,
+                lot=event.lot,
+                source_time=event.source_time,
+                maturity_date=date.fromisoformat(str(payload["maturity_date"])),
+                clean_price=Decimal(str(payload["clean_price"])),
+                sessions_to_maturity=int(payload["sessions_to_maturity"]),
+                currency=str(payload["currency"]),
+                country_of_risk=str(payload["country_of_risk"]),
+                risk_level=str(payload["risk_level"]),
+                amortization=bool(payload["amortization"]),
+                subordinated=bool(payload["subordinated"]),
+                perpetual=bool(payload["perpetual"]),
+                api_trade_available=bool(payload["api_trade_available"]),
+                buy_available=bool(payload["buy_available"]),
+                sell_available=bool(payload["sell_available"]),
+            )
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            return []
+        decision = evaluate_bond_convergence(snapshot)
+        if not decision.eligible or decision.direction is None:
+            return []
+
+        evidence = HISTORICAL_EVIDENCE
+        direction_ru = "рост" if decision.direction == "up" else "снижение"
+        return [
+            TriggerSignal(
+                signal_id=str(uuid4()),
+                detected_at=utc_now(),
+                instrument_id=event.instrument_id,
+                ticker=event.ticker,
+                class_code=event.class_code,
+                alias=event.alias,
+                source_event_type=event.event_type,
+                signal_type="bond_maturity_convergence",
+                severity=2,
+                metric_value=float(decision.expected_net_distance_bps),
+                baseline_value=float(evidence.mean_net_return_bps),
+                z_score=0.0,
+                window_seconds=0,
+                summary=(
+                    f"Ожидается {direction_ru} чистой цены {event.ticker} "
+                    f"к номиналу {PAR_PRICE}% к погашению."
+                ),
+                payload={
+                    **payload,
+                    "price_direction": decision.direction,
+                    "direction_sign": decision.direction_sign,
+                    "target_clean_price": float(PAR_PRICE),
+                    "gross_distance_bps": float(decision.gross_distance_bps),
+                    "expected_net_distance_bps": float(
+                        decision.expected_net_distance_bps
+                    ),
+                    "bond_convergence_policy_version": (
+                        BOND_CONVERGENCE_POLICY_VERSION
+                    ),
+                    "historical_evidence_version": evidence.version,
+                    "historical_eligible_observations": (
+                        evidence.eligible_observations
+                    ),
+                    "historical_successful_observations": (
+                        evidence.successful_observations
+                    ),
+                    "historical_distinct_maturities": evidence.distinct_maturities,
+                    "historical_success_rate": float(evidence.success_rate),
+                    "historical_wilson_lower_bound": float(evidence.wilson_lower_bound),
+                    "historical_mean_net_return_bps": float(
+                        evidence.mean_net_return_bps
+                    ),
+                    "assumed_round_trip_cost_bps": float(
+                        evidence.assumed_round_trip_cost_bps
+                    ),
+                    "outcome_schedule": "maturity_only",
+                    "quality_score": 94,
+                },
+            )
+        ]
+
     def enrich_signals_with_unary(
         self, signals: list[TriggerSignal]
     ) -> list[TriggerSignal]:
@@ -162,9 +348,7 @@ class SignalDetector:
             if not ctx:
                 out.append(s)
                 continue
-            out.append(
-                replace(s, payload={**s.payload, "unary_context": dict(ctx)})
-            )
+            out.append(replace(s, payload={**s.payload, "unary_context": dict(ctx)}))
         return out
 
     def export_alert_state(self) -> dict[str, dict[str, str]]:
@@ -225,15 +409,11 @@ class SignalDetector:
 
         if signed_qty != 0:
             signals.extend(
-                self._maybe_emit_trade_burst(
-                    event, state, cfg, signed_qty=signed_qty
-                )
+                self._maybe_emit_trade_burst(event, state, cfg, signed_qty=signed_qty)
             )
 
         signals.extend(self._sample_trade_windows(event, state, cfg))
-        signals.extend(
-            self._sample_price_move(event, state, cfg, current_price=price)
-        )
+        signals.extend(self._sample_price_move(event, state, cfg, current_price=price))
         return signals
 
     def _process_last_price_event(
@@ -300,9 +480,7 @@ class SignalDetector:
 
         if cfg.limit_band_warning_bps > 0:
             signals.extend(
-                self._maybe_emit_price_near_limit_band(
-                    event, state, cfg, mid=mid
-                )
+                self._maybe_emit_price_near_limit_band(event, state, cfg, mid=mid)
             )
 
         if not self._should_sample(state, "orderbook", event.source_time, cfg):
@@ -311,6 +489,7 @@ class SignalDetector:
         spread_bps = ((best_ask - best_bid) / mid) * 10_000
         imbalance_abs = abs((top_bids_qty - top_asks_qty) / total_qty)
         imbalance_ratio = top_bids_qty / total_qty
+        volatility_context = self._baseline_volatility_context(event, cfg)
 
         signals.extend(
             self._maybe_emit_from_history(
@@ -337,43 +516,45 @@ class SignalDetector:
                     "depth_levels": depth,
                     "top_bid_qty": top_bids_qty,
                     "top_ask_qty": top_asks_qty,
+                    **volatility_context,
                 },
             )
         )
 
-        if imbalance_abs >= cfg.imbalance_absolute_threshold:
-            signals.extend(
-                self._maybe_emit_from_history(
-                    event=event,
-                    state=state,
-                    cfg=cfg,
-                    signal_type="orderbook_imbalance",
-                    source_event_type="orderbook",
-                    history=state.imbalance_history,
-                    threshold=cfg.imbalance_zscore_threshold,
-                    value=imbalance_abs,
-                    baseline_label="imbalance",
-                    window_seconds=cfg.orderbook_window_seconds,
-                    summary_template=(
-                        "{ticker} order book imbalance reached {metric:.2f} "
-                        "vs baseline {baseline:.2f} (z={z_score:.2f})."
-                    ),
-                    payload_extra={
-                        "imbalance_abs": imbalance_abs,
-                        "imbalance_ratio": imbalance_ratio,
-                        "dominant_side": (
-                            "bid" if top_bids_qty >= top_asks_qty else "ask"
-                        ),
-                        "depth_levels": depth,
-                        "top_bid_qty": top_bids_qty,
-                        "top_ask_qty": top_asks_qty,
-                        "total_book_qty": total_qty,
-                        "best_bid": best_bid,
-                        "best_ask": best_ask,
-                        "mid": mid,
-                    },
-                )
+        signals.extend(
+            self._maybe_emit_from_history(
+                event=event,
+                state=state,
+                cfg=cfg,
+                signal_type="orderbook_imbalance",
+                source_event_type="orderbook",
+                history=state.imbalance_history,
+                threshold=cfg.imbalance_zscore_threshold,
+                value=imbalance_abs,
+                baseline_label="imbalance",
+                window_seconds=cfg.orderbook_window_seconds,
+                summary_template=(
+                    "{ticker} order book imbalance reached {metric:.2f} "
+                    "vs baseline {baseline:.2f} (z={z_score:.2f})."
+                ),
+                payload_extra={
+                    "imbalance_abs": imbalance_abs,
+                    "imbalance_ratio": imbalance_ratio,
+                    "dominant_side": ("bid" if top_bids_qty >= top_asks_qty else "ask"),
+                    "depth_levels": depth,
+                    "top_bid_qty": top_bids_qty,
+                    "top_ask_qty": top_asks_qty,
+                    "total_book_qty": total_qty,
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "mid": mid,
+                    **volatility_context,
+                },
+                absolute_gate_passed=(
+                    imbalance_abs >= cfg.imbalance_absolute_threshold
+                ),
             )
+        )
 
         state.spread_history.append(spread_bps)
         state.imbalance_history.append(imbalance_abs)
@@ -383,37 +564,38 @@ class SignalDetector:
             obi = (top_bids_qty - top_asks_qty) / total_qty
             if state.last_sampled_obi is not None:
                 delta_obi = obi - state.last_sampled_obi
-                if abs(delta_obi) >= cfg.obi_delta_absolute_threshold:
-                    tmpl = (
-                        "{ticker} L"
-                        + str(depth)
-                        + " OBI jump |Δ|={metric:.3f} "
-                        "vs baseline {baseline:.3f} (z={z_score:.2f})."
+                tmpl = (
+                    "{ticker} L" + str(depth) + " OBI jump |Δ|={metric:.3f} "
+                    "vs baseline {baseline:.3f} (z={z_score:.2f})."
+                )
+                signals.extend(
+                    self._maybe_emit_from_history(
+                        event=event,
+                        state=state,
+                        cfg=cfg,
+                        signal_type="obi_dynamics",
+                        source_event_type="orderbook",
+                        history=state.obi_delta_history,
+                        threshold=cfg.obi_delta_zscore_threshold,
+                        value=abs(delta_obi),
+                        baseline_label="obi delta",
+                        window_seconds=cfg.orderbook_window_seconds,
+                        summary_template=tmpl,
+                        payload_extra={
+                            "obi": obi,
+                            "previous_obi": state.last_sampled_obi,
+                            "delta_obi": delta_obi,
+                            "abs_delta_obi": abs(delta_obi),
+                            "depth_levels": depth,
+                            "top_bid_qty": top_bids_qty,
+                            "top_ask_qty": top_asks_qty,
+                            **volatility_context,
+                        },
+                        absolute_gate_passed=(
+                            abs(delta_obi) >= cfg.obi_delta_absolute_threshold
+                        ),
                     )
-                    signals.extend(
-                        self._maybe_emit_from_history(
-                            event=event,
-                            state=state,
-                            cfg=cfg,
-                            signal_type="obi_dynamics",
-                            source_event_type="orderbook",
-                            history=state.obi_delta_history,
-                            threshold=cfg.obi_delta_zscore_threshold,
-                            value=abs(delta_obi),
-                            baseline_label="obi delta",
-                            window_seconds=cfg.orderbook_window_seconds,
-                            summary_template=tmpl,
-                            payload_extra={
-                                "obi": obi,
-                                "previous_obi": state.last_sampled_obi,
-                                "delta_obi": delta_obi,
-                                "abs_delta_obi": abs(delta_obi),
-                                "depth_levels": depth,
-                                "top_bid_qty": top_bids_qty,
-                                "top_ask_qty": top_asks_qty,
-                            },
-                        )
-                    )
+                )
                 state.obi_delta_history.append(abs(delta_obi))
             state.last_sampled_obi = obi
 
@@ -433,9 +615,7 @@ class SignalDetector:
             return []
         signals: list[TriggerSignal] = []
         if cfg.track_market_access_flags:
-            signals.extend(
-                self._maybe_emit_market_access_change(event, state, cfg)
-            )
+            signals.extend(self._maybe_emit_market_access_change(event, state, cfg))
 
         previous_status = state.last_trading_status
         state.last_trading_status = status
@@ -487,6 +667,7 @@ class SignalDetector:
         trade_count = float(len(state.trade_points))
         lot = max(1, int(event.lot or 0))
         current_price = quotation_to_float(event.payload.get("price"))
+        volatility_context = self._baseline_volatility_context(event, cfg)
         signals: list[TriggerSignal] = []
 
         signals.extend(
@@ -512,6 +693,7 @@ class SignalDetector:
                     "window_notional_currency": "price_units",
                     "last_price": current_price,
                     "lot": lot,
+                    **volatility_context,
                 },
             )
         )
@@ -541,6 +723,7 @@ class SignalDetector:
                     "avg_trade_notional": (
                         total_notional / trade_count if trade_count > 0 else None
                     ),
+                    **volatility_context,
                     "last_price": current_price,
                     "lot": lot,
                 },
@@ -572,11 +755,11 @@ class SignalDetector:
             return []
         signed_move_bps = ((current_price - oldest_price) / oldest_price) * 10_000
         move_bps = abs(signed_move_bps)
-        if (
-            cfg.price_move_absolute_threshold_bps > 0
-            and move_bps < cfg.price_move_absolute_threshold_bps
-        ):
-            return []
+        absolute_gate_passed = (
+            cfg.price_move_absolute_threshold_bps <= 0
+            or move_bps >= cfg.price_move_absolute_threshold_bps
+        )
+        volatility_context = self._baseline_volatility_context(event, cfg)
         signals = self._maybe_emit_from_history(
             event=event,
             state=state,
@@ -600,7 +783,9 @@ class SignalDetector:
                 "price_change_pct": signed_move_bps / 100.0,
                 "abs_price_change_bps": move_bps,
                 "price_direction": "up" if signed_move_bps > 0 else "down",
+                **volatility_context,
             },
+            absolute_gate_passed=absolute_gate_passed,
         )
 
         state.return_history.append(move_bps)
@@ -742,6 +927,7 @@ class SignalDetector:
                         "imbalance_ratio": imbalance_ratio,
                         "signed_delta_qty": signed_delta_qty,
                         "combo_detail": combo_detail,
+                        **self._baseline_volatility_context(event, cfg),
                     },
                 )
             )
@@ -780,6 +966,7 @@ class SignalDetector:
                         "imbalance_ratio": imbalance_ratio,
                         "signed_delta_qty": signed_delta_qty,
                         "combo_detail": combo_detail,
+                        **self._baseline_volatility_context(event, cfg),
                     },
                 )
             )
@@ -905,6 +1092,7 @@ class SignalDetector:
                     ),
                     "mid_move_bps": mid_move_bps,
                     "gap_seconds": (cur.ts - prev.ts).total_seconds(),
+                    **self._baseline_volatility_context(event, cfg),
                     "event_payload": event.payload,
                 },
             )
@@ -925,20 +1113,60 @@ class SignalDetector:
         window_seconds: int,
         summary_template: str,
         payload_extra: dict[str, Any] | None = None,
+        absolute_gate_passed: bool = True,
     ) -> list[TriggerSignal]:
         if len(history) < cfg.min_baseline_points:
             return []
         baseline, z_score = _z_score(history, value)
-        if z_score < threshold:
-            return []
+        threshold_passed = z_score >= threshold
+        relative_gate_passed = True
         if cfg.min_relative_metric_excursion > 0.0:
             b = float(baseline)
             if abs(b) >= 1e-9:
                 rel = abs(float(value) - b) / max(abs(b), 1e-12)
                 if rel < cfg.min_relative_metric_excursion:
-                    return []
-        state.last_active_at[signal_type] = event.source_time
-        if not self._is_alert_ready(state, signal_type, event.source_time, cfg):
+                    relative_gate_passed = False
+        detector_passed = (
+            threshold_passed and relative_gate_passed and absolute_gate_passed
+        )
+        signal_emitted = detector_passed and self._is_alert_ready(
+            state, signal_type, event.source_time, cfg
+        )
+        detector_config_version = self._detector_config_version or "unversioned"
+        self._pending_observations.append(
+            DetectorObservation(
+                observation_id=deterministic_observation_id(
+                    source_event_id=event.event_id,
+                    signal_type=signal_type,
+                    detector_config_version=detector_config_version,
+                ),
+                source_event_id=event.event_id,
+                observed_at=event.source_time,
+                instrument_id=event.instrument_id,
+                source_event_type=source_event_type,
+                signal_type=signal_type,
+                metric_value=float(value),
+                baseline_value=float(baseline),
+                z_score=float(z_score),
+                threshold_value=float(threshold),
+                threshold_passed=threshold_passed,
+                detector_passed=detector_passed,
+                signal_emitted=signal_emitted,
+                window_seconds=window_seconds,
+                sampling_policy_version=HISTORY_SAMPLING_POLICY_VERSION,
+                detector_config_version=detector_config_version,
+                expectation_catalog_version=self._expectation_catalog_version,
+                provenance_status=(
+                    "complete"
+                    if self._detector_config_version
+                    and self._expectation_catalog_version
+                    else "legacy"
+                ),
+            )
+        )
+        if detector_passed:
+            state.last_active_at[signal_type] = event.source_time
+        if not signal_emitted:
             return []
         state.last_alert_at[signal_type] = event.source_time
         payload = {
@@ -1055,9 +1283,32 @@ class SignalDetector:
             return
         dq = self._mid_track[instrument_id]
         dq.append((ts, float(px)))
-        cutoff = ts - timedelta(seconds=max(5, cfg.lead_lag_window_seconds))
+        cutoff = ts - timedelta(
+            seconds=max(
+                5,
+                cfg.lead_lag_window_seconds,
+                cfg.baseline_volatility_window_seconds,
+            )
+        )
         while dq and dq[0][0] < cutoff:
             dq.popleft()
+
+    def _baseline_volatility_context(
+        self,
+        event: NormalizedEvent,
+        cfg: DetectorSettings,
+    ) -> dict[str, Any]:
+        return {
+            "baseline_volatility_bps": _realized_volatility_bps(
+                self._mid_track[event.instrument_id]
+            ),
+            "baseline_volatility_horizon_seconds": (
+                cfg.baseline_volatility_window_seconds
+            ),
+            "baseline_volatility_observed_until": event.source_time.isoformat(),
+            "baseline_volatility_estimator": "tick_realized_rv",
+            "baseline_volatility_estimator_version": "2.0.0",
+        }
 
     def _maybe_emit_trade_burst(
         self,
@@ -1173,13 +1424,7 @@ class SignalDetector:
     ) -> list[TriggerSignal]:
         lim_up = quotation_to_float(event.payload.get("limit_up"))
         lim_dn = quotation_to_float(event.payload.get("limit_down"))
-        if (
-            lim_up is None
-            or lim_dn is None
-            or lim_up <= 0
-            or lim_dn <= 0
-            or mid <= 0
-        ):
+        if lim_up is None or lim_dn is None or lim_up <= 0 or lim_dn <= 0 or mid <= 0:
             return []
         dist_up = (lim_up - mid) / mid * 10_000.0
         dist_dn = (mid - lim_dn) / mid * 10_000.0
@@ -1288,9 +1533,7 @@ class SignalDetector:
             oi = float(int(event.payload.get("open_interest", 0)))
         except (TypeError, ValueError):
             return []
-        if not self._should_sample(
-            state, "open_interest", event.source_time, cfg
-        ):
+        if not self._should_sample(state, "open_interest", event.source_time, cfg):
             return []
         signals = self._maybe_emit_from_history(
             event=event,
@@ -1307,7 +1550,10 @@ class SignalDetector:
                 "{ticker} open interest {metric:.0f} vs baseline {baseline:.0f} "
                 "(z={z_score:.2f})."
             ),
-            payload_extra={"open_interest": oi},
+            payload_extra={
+                "open_interest": oi,
+                **self._baseline_volatility_context(event, cfg),
+            },
         )
         state.open_interest_history.append(oi)
         state.last_sample_at["open_interest"] = event.source_time
@@ -1376,7 +1622,13 @@ class SignalDetector:
             now = event.source_time
             leader_move = _range_bps_in_window(leader_ring, now, window)
             follower_move = _range_bps_in_window(follower_ring, now, window)
-            if leader_move is None or follower_move is None:
+            leader_signed_move = _signed_move_bps_in_window(leader_ring, now, window)
+            if (
+                leader_move is None
+                or follower_move is None
+                or leader_signed_move is None
+                or abs(leader_signed_move) <= 1e-12
+            ):
                 continue
             if leader_move < cfg.lead_lag_leader_move_bps:
                 continue
@@ -1415,7 +1667,11 @@ class SignalDetector:
                         "leader_instrument_id": leader_id,
                         "follower_instrument_id": follower_id,
                         "leader_range_bps": leader_move,
+                        "leader_signed_move_bps": leader_signed_move,
                         "follower_range_bps": follower_move,
+                        "follower_expected_direction": (
+                            "long" if leader_signed_move > 0 else "short"
+                        ),
                     },
                 )
             )
@@ -1446,6 +1702,33 @@ def _range_bps_in_window(
     if mid <= 0:
         return None
     return (hi - lo) / mid * 10_000.0
+
+
+def _signed_move_bps_in_window(
+    ring: deque[tuple[datetime, float]],
+    now: datetime,
+    window: timedelta,
+) -> float | None:
+    start = now - window
+    prices = [px for ts, px in ring if start <= ts <= now]
+    if len(prices) < 2 or prices[0] <= 0:
+        return None
+    return ((prices[-1] - prices[0]) / prices[0]) * 10_000.0
+
+
+def _realized_volatility_bps(
+    ring: deque[tuple[datetime, float]],
+) -> float | None:
+    """Realized path volatility as sqrt(sum of squared simple returns)."""
+
+    prices = [price for _, price in ring if price > 0 and math.isfinite(price)]
+    if len(prices) < 3:
+        return None
+    returns = [
+        ((current / previous) - 1.0) * 10_000.0
+        for previous, current in zip(prices, prices[1:])
+    ]
+    return math.sqrt(sum(value * value for value in returns))
 
 
 def _severity_from_z_score(z_score: float) -> int:
@@ -1498,4 +1781,3 @@ def _signed_quantity_from_trade_payload(
         if raw_direction == 2:
             return -quantity
     return 0.0
-

@@ -1,0 +1,97 @@
+name: Tagged release
+
+"on":
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          with open("pyproject.toml", "rb") as source:
+              version = tomllib.load(source)["project"]["version"]
+          expected = f"v{version}"
+          if os.environ["RELEASE_TAG"] != expected:
+              raise SystemExit(
+                  f"tag {os.environ['RELEASE_TAG']!r} does not match {expected!r}"
+              )
+          PY
+
+      - name: Sync T-Invest SDK
+        run: python scripts/sync_invest_sdk.py
+
+      - name: Install verification dependencies
+        run: python -m pip install --upgrade build ".[dev,docs,backtest]"
+
+      - name: Run release gates
+        run: |
+          python -m pytest -q
+          python scripts/check_architecture.py
+          node --check src/tinvest_signal_engine/static/admin_app.js
+          python -m mkdocs build --strict
+          python -m build
+
+      - name: Build and smoke production image
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker build \
+            --build-arg APP_VERSION="${RELEASE_TAG#v}" \
+            --build-arg APP_COMMIT_SHA="${RELEASE_SHA}" \
+            --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t tinvest-signal-engine:release .
+          docker run --rm tinvest-signal-engine:release python -c \
+            "from tinvest_signal_engine.runtime_info import runtime_fingerprint; print(runtime_fingerprint())"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+            exit 0
+          fi
+          notes="docs/releases/${RELEASE_TAG}.md"
+          if [[ -f "$notes" ]]; then
+            gh release create "$RELEASE_TAG" dist/* \
+              --verify-tag \
+              --title "Investment Signals Core ${RELEASE_TAG}" \
+              --notes-file "$notes"
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --verify-tag \
+              --title "Investment Signals Core ${RELEASE_TAG}" \
+              --generate-notes
+          fi

@@ -1,0 +1,10 @@
+[Unit]
+Description=Reload Investment Signals ingestion after a futures rollover
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/var/lib/investment-signals-pro/runtime-config/instruments.yaml
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/docker inspect investment-signals-pro-ingestor-1
+ExecStart=/usr/bin/docker restart --timeout 30 investment-signals-pro-ingestor-1

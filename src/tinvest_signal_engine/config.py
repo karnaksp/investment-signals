@@ -9,7 +9,95 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+
+_SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
+    "api": frozenset(
+        {
+            "ADMIN_API_TOKEN",
+            "CLICKHOUSE_PASSWORD",
+            "POSTGRES_PASSWORD",
+            "REDIS_URL",
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
+            "TINVEST_TOKEN",
+        }
+    ),
+    "bond_convergence_emitter": frozenset({"TINVEST_TOKEN"}),
+    "candle_cache": frozenset({"TINVEST_TOKEN"}),
+    "dagster": frozenset({"POSTGRES_PASSWORD", "TINVEST_TOKEN"}),
+    "detector": frozenset(
+        {
+            "ALERT_WEBHOOK_URL",
+            "POSTGRES_PASSWORD",
+            "REDIS_URL",
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
+        }
+    ),
+    "delivery_worker": frozenset(
+        {
+            "ALERT_WEBHOOK_URL",
+            "POSTGRES_PASSWORD",
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
+        }
+    ),
+    "ingestor": frozenset({"TINVEST_TOKEN"}),
+    "historical_candle_import": frozenset({"CLICKHOUSE_PASSWORD"}),
+    "local_notifier": frozenset(),
+    "market_unary_emitter": frozenset({"TINVEST_TOKEN"}),
+    "migration": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
+    "observation_worker": frozenset(
+        {"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}
+    ),
+    "reference_tick_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
+    "scientific_candle_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
+    "signal_outcome_worker": frozenset(
+        {"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}
+    ),
+    "threshold_cron": frozenset({"TINVEST_TOKEN"}),
+}
+
+
+def load_secret(
+    name: str,
+    *,
+    default: str | None = None,
+    service_name: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Load one secret from ``NAME`` or Docker-style ``NAME_FILE``.
+
+    When ``service_name`` is supplied, secrets outside that service's explicit
+    allowlist are ignored. This keeps one service from accidentally consuming
+    credentials intended for another service.
+    """
+    env = os.environ if environ is None else environ
+    if service_name is not None:
+        allowed = _SERVICE_SECRET_NAMES.get(service_name)
+        if allowed is None:
+            raise ValueError(f"Unknown service name: {service_name!r}")
+        if name not in allowed:
+            return default
+
+    direct = env.get(name)
+    file_value = env.get(f"{name}_FILE")
+    if direct and file_value:
+        raise ValueError(f"Set only one of {name} and {name}_FILE")
+    if file_value:
+        path = Path(file_value).expanduser()
+        value = path.read_text(encoding="utf-8").rstrip("\r\n")
+        if "\x00" in value:
+            raise ValueError(f"Secret file for {name} contains a NUL byte")
+        return value
+    if direct is not None:
+        return direct
+    return default
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -31,6 +119,19 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _env_optional_int(name: str) -> int | None:
     raw_value = os.getenv(name)
+    if raw_value is None:
+        return None
+    value = raw_value.strip()
+    return int(value) if value else None
+
+
+def _env_optional_path(name: str) -> Path | None:
+    value = (os.getenv(name) or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def _secret_optional_int(name: str, *, service_name: str | None = None) -> int | None:
+    raw_value = load_secret(name, service_name=service_name)
     if raw_value is None:
         return None
     value = raw_value.strip()
@@ -83,6 +184,7 @@ class DetectorSettings:
     trade_window_seconds: int = 60
     price_window_seconds: int = 90
     orderbook_window_seconds: int = 120
+    baseline_volatility_window_seconds: int = 180
     alert_cooldown_seconds: int = 120
     volume_zscore_threshold: float = 4.0
     trade_count_zscore_threshold: float = 4.0
@@ -151,6 +253,7 @@ class RuntimeSettings:
     kafka_signal_topic: str
     kafka_consumer_group: str
     kafka_auto_offset_reset: str
+    kafka_first_boot_warmup_age_seconds: int
     local_notifier_consumer_group: str
     local_notification_duration_seconds: int
     postgres_host: str
@@ -173,6 +276,19 @@ class RuntimeSettings:
     detector_path: Path
     detector_overrides_path: Path
     config_reload_interval_seconds: int
+    ingestor_orderbook_min_interval_ms: int
+    ingestor_health_snapshot_path: Path
+    ingestor_health_stale_after_seconds: int
+    detector_health_snapshot_path: Path | None
+    delivery_health_snapshot_path: Path | None
+    ingestor_recovery_lookback_minutes: int
+    ingestor_candle_recovery_interval_seconds: int
+    ingestor_candle_recovery_overlap_minutes: int
+    market_schedule_timezone: str
+    market_collection_start: str
+    market_collection_end: str
+    market_signal_start: str
+    market_signal_end: str
     threshold_recalc_interval_hours: int
     threshold_lookback_days: int
     threshold_hourly_deviation_multiplier: float
@@ -202,6 +318,13 @@ class RuntimeSettings:
     signal_delivery_max_per_hour: int
     signal_delivery_instrument_cooldown_seconds: int
     signal_delivery_type_rules_json: str
+    # Minimum rolling turnover required for external delivery. Per-type
+    # overrides are hot-reloaded from the runtime policy file.
+    signal_delivery_default_min_notional_rub: float
+    signal_delivery_notional_policy_path: Path
+    # Replayed events remain local evidence but never become realtime alerts
+    # after this wall-clock age.
+    signal_delivery_max_event_age_seconds: int
     # Периодический unary-эмиттер → Kafka raw (см. tinvest-market-unary-emitter). 0 = выключено.
     market_unary_poll_seconds: int
     # Один цикл опроса и выход (Dagster / ручной прогон); иначе бесконечный цикл как сервис.
@@ -219,9 +342,35 @@ class RuntimeSettings:
     market_unary_metrics_listen_port: int | None
     admin_api_rate_limit_per_minute: int
     admin_api_allowed_ips: frozenset[str] | None
+    expectation_catalog_version: str | None
+    detector_config_version: str | None
+    delivery_config_version: str | None
+    cost_model_version: str | None
+    kafka_raw_dlq_topic: str
+    delivery_worker_poll_seconds: float
+    delivery_worker_claim_lease_seconds: int
+    delivery_worker_max_attempts: int
+    delivery_worker_retry_base_seconds: int
+    delivery_worker_retry_max_seconds: int
+    delivery_worker_metrics_listen_port: int | None
+    observation_worker_poll_seconds: float
+    observation_worker_claim_lease_seconds: int
+    observation_worker_batch_size: int
+    observation_worker_clickhouse_timeout_seconds: float
+    observation_worker_max_attempts: int
+    observation_worker_retry_base_seconds: int
+    observation_worker_retry_max_seconds: int
+    observation_worker_metrics_listen_port: int | None
+    observation_retention_hours: int
+    observation_purge_batch_size: int
+    processed_event_retention_days: int
+    processed_event_purge_interval_seconds: int
+    processed_event_purge_batch_size: int
 
     @classmethod
-    def from_env(cls) -> "RuntimeSettings":
+    def from_env(
+        cls, *, service_name: str | None = None
+    ) -> "RuntimeSettings":
         instruments_path = Path(
             os.getenv("INSTRUMENTS_CONFIG", "conf/instruments.yaml")
         )
@@ -234,7 +383,10 @@ class RuntimeSettings:
             )
         )
         return cls(
-            tinvest_token=os.getenv("TINVEST_TOKEN", ""),
+            tinvest_token=load_secret(
+                "TINVEST_TOKEN", default="", service_name=service_name
+            )
+            or "",
             tinvest_use_sandbox=_env_bool(
                 "TINVEST_USE_SANDBOX", default=False
             ),
@@ -260,6 +412,10 @@ class RuntimeSettings:
             kafka_auto_offset_reset=os.getenv(
                 "KAFKA_AUTO_OFFSET_RESET", "latest"
             ),
+            kafka_first_boot_warmup_age_seconds=max(
+                0,
+                int(os.getenv("KAFKA_FIRST_BOOT_WARMUP_AGE_SECONDS", "900")),
+            ),
             local_notifier_consumer_group=os.getenv(
                 "LOCAL_NOTIFIER_CONSUMER_GROUP", "local-notifier"
             ),
@@ -270,7 +426,12 @@ class RuntimeSettings:
             postgres_port=int(os.getenv("POSTGRES_PORT", "5432")),
             postgres_database=os.getenv("POSTGRES_DATABASE", "signal_engine"),
             postgres_username=os.getenv("POSTGRES_USERNAME", "signal_engine"),
-            postgres_password=os.getenv("POSTGRES_PASSWORD", "signal_engine"),
+            postgres_password=load_secret(
+                "POSTGRES_PASSWORD",
+                default="signal_engine",
+                service_name=service_name,
+            )
+            or "",
             postgres_table=os.getenv("POSTGRES_TABLE", "market_signals"),
             postgres_startup_timeout_seconds=int(
                 os.getenv("POSTGRES_STARTUP_TIMEOUT_SECONDS", "90")
@@ -281,11 +442,20 @@ class RuntimeSettings:
             api_host=os.getenv("API_HOST", "0.0.0.0"),
             api_port=int(os.getenv("API_PORT", "8000")),
             api_reload=_env_bool("TINVEST_API_RELOAD", default=False),
-            alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
-            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
-            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
-            telegram_message_thread_id=_env_optional_int(
-                "TELEGRAM_MESSAGE_THREAD_ID"
+            alert_webhook_url=load_secret(
+                "ALERT_WEBHOOK_URL", service_name=service_name
+            )
+            or None,
+            telegram_bot_token=load_secret(
+                "TELEGRAM_BOT_TOKEN", service_name=service_name
+            )
+            or None,
+            telegram_chat_id=load_secret(
+                "TELEGRAM_CHAT_ID", service_name=service_name
+            )
+            or None,
+            telegram_message_thread_id=_secret_optional_int(
+                "TELEGRAM_MESSAGE_THREAD_ID", service_name=service_name
             ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             instruments_path=instruments_path,
@@ -293,6 +463,77 @@ class RuntimeSettings:
             detector_overrides_path=detector_overrides_path,
             config_reload_interval_seconds=int(
                 os.getenv("CONFIG_RELOAD_INTERVAL_SECONDS", "10")
+            ),
+            ingestor_orderbook_min_interval_ms=max(
+                0, int(os.getenv("INGESTOR_ORDERBOOK_MIN_INTERVAL_MS", "0"))
+            ),
+            ingestor_health_snapshot_path=Path(
+                os.getenv(
+                    "INGESTOR_HEALTH_SNAPSHOT_PATH",
+                    "/tmp/investment-signals/ingestor-health.json",
+                )
+            ),
+            ingestor_health_stale_after_seconds=max(
+                1,
+                int(
+                    os.getenv(
+                        "INGESTOR_HEALTH_STALE_AFTER_SECONDS",
+                        "180",
+                    )
+                ),
+            ),
+            detector_health_snapshot_path=_env_optional_path(
+                "DETECTOR_HEALTH_SNAPSHOT_PATH"
+            ),
+            delivery_health_snapshot_path=_env_optional_path(
+                "DELIVERY_HEALTH_SNAPSHOT_PATH"
+            ),
+            ingestor_recovery_lookback_minutes=max(
+                0,
+                int(
+                    os.getenv(
+                        "INGESTOR_RECOVERY_LOOKBACK_MINUTES",
+                        "240",
+                    )
+                ),
+            ),
+            ingestor_candle_recovery_interval_seconds=max(
+                0,
+                int(
+                    os.getenv(
+                        "INGESTOR_CANDLE_RECOVERY_INTERVAL_SECONDS",
+                        "300",
+                    )
+                ),
+            ),
+            ingestor_candle_recovery_overlap_minutes=max(
+                1,
+                int(
+                    os.getenv(
+                        "INGESTOR_CANDLE_RECOVERY_OVERLAP_MINUTES",
+                        "15",
+                    )
+                ),
+            ),
+            market_schedule_timezone=(
+                os.getenv("MARKET_SCHEDULE_TIMEZONE", "Europe/Moscow").strip()
+                or "Europe/Moscow"
+            ),
+            market_collection_start=(
+                os.getenv("MARKET_COLLECTION_START", "07:00").strip()
+                or "07:00"
+            ),
+            market_collection_end=(
+                os.getenv("MARKET_COLLECTION_END", "23:00").strip()
+                or "23:00"
+            ),
+            market_signal_start=(
+                os.getenv("MARKET_SIGNAL_START", "07:15").strip()
+                or "07:15"
+            ),
+            market_signal_end=(
+                os.getenv("MARKET_SIGNAL_END", "22:45").strip()
+                or "22:45"
             ),
             threshold_recalc_interval_hours=int(
                 os.getenv("THRESHOLD_RECALC_INTERVAL_HOURS", "24")
@@ -312,7 +553,10 @@ class RuntimeSettings:
                 os.getenv("KAFKA_COMPRESSION_CODEC", "lz4").strip().lower()
                 or "lz4"
             ),
-            redis_url=(os.getenv("REDIS_URL") or "").strip() or None,
+            redis_url=(
+                load_secret("REDIS_URL", service_name=service_name) or ""
+            ).strip()
+            or None,
             redis_alert_flush_interval_seconds=int(
                 os.getenv("REDIS_ALERT_FLUSH_INTERVAL_SECONDS", "30")
             ),
@@ -334,7 +578,10 @@ class RuntimeSettings:
             kafka_protobuf_schema_id_signal=_env_optional_int(
                 "KAFKA_PROTOBUF_SCHEMA_ID_SIGNAL"
             ),
-            admin_api_token=(os.getenv("ADMIN_API_TOKEN") or "").strip() or None,
+            admin_api_token=(
+                load_secret("ADMIN_API_TOKEN", service_name=service_name) or ""
+            ).strip()
+            or None,
             signal_accuracy_json_path=Path(
                 os.getenv(
                     "SIGNAL_ACCURACY_JSON_PATH",
@@ -348,8 +595,10 @@ class RuntimeSettings:
                 (os.getenv("CLICKHOUSE_USERNAME") or "").strip() or None
             ),
             clickhouse_http_password=(
-                (os.getenv("CLICKHOUSE_PASSWORD") or "").strip() or None
-            ),
+                load_secret("CLICKHOUSE_PASSWORD", service_name=service_name)
+                or ""
+            ).strip()
+            or None,
             signal_min_quality_score=_env_optional_int(
                 "SIGNAL_MIN_QUALITY_SCORE"
             ),
@@ -370,6 +619,21 @@ class RuntimeSettings:
             ),
             signal_delivery_type_rules_json=(
                 os.getenv("SIGNAL_DELIVERY_TYPE_RULES_JSON", "").strip()
+            ),
+            signal_delivery_default_min_notional_rub=float(
+                os.getenv(
+                    "SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "40000000"
+                )
+            ),
+            signal_delivery_notional_policy_path=Path(
+                os.getenv(
+                    "SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE",
+                    "/var/lib/investment-signals-pro/signalctl/runtime-secrets/"
+                    "detector/delivery-notional-policy.json",
+                )
+            ).expanduser(),
+            signal_delivery_max_event_age_seconds=int(
+                os.getenv("SIGNAL_DELIVERY_MAX_EVENT_AGE_SECONDS", "120")
             ),
             market_unary_poll_seconds=int(
                 os.getenv("MARKET_UNARY_POLL_SECONDS", "0")
@@ -419,6 +683,98 @@ class RuntimeSettings:
             admin_api_allowed_ips=_parse_admin_ip_allowlist(
                 os.getenv("ADMIN_API_ALLOWED_IPS", "")
             ),
+            expectation_catalog_version=(
+                (os.getenv("EXPECTATION_CATALOG_VERSION") or "").strip()
+                or None
+            ),
+            detector_config_version=(
+                (os.getenv("DETECTOR_CONFIG_VERSION") or "").strip() or None
+            ),
+            delivery_config_version=(
+                (os.getenv("DELIVERY_CONFIG_VERSION") or "").strip() or None
+            ),
+            cost_model_version=(
+                (os.getenv("COST_MODEL_VERSION") or "").strip() or None
+            ),
+            kafka_raw_dlq_topic=(
+                os.getenv("KAFKA_RAW_DLQ_TOPIC", "marketdata.raw.dlq").strip()
+                or "marketdata.raw.dlq"
+            ),
+            delivery_worker_poll_seconds=max(
+                0.05,
+                float(os.getenv("DELIVERY_WORKER_POLL_SECONDS", "1")),
+            ),
+            delivery_worker_claim_lease_seconds=int(
+                os.getenv("DELIVERY_WORKER_CLAIM_LEASE_SECONDS", "60")
+            ),
+            delivery_worker_max_attempts=int(
+                os.getenv("DELIVERY_WORKER_MAX_ATTEMPTS", "8")
+            ),
+            delivery_worker_retry_base_seconds=int(
+                os.getenv("DELIVERY_WORKER_RETRY_BASE_SECONDS", "5")
+            ),
+            delivery_worker_retry_max_seconds=int(
+                os.getenv("DELIVERY_WORKER_RETRY_MAX_SECONDS", "900")
+            ),
+            delivery_worker_metrics_listen_port=_env_optional_int(
+                "DELIVERY_WORKER_METRICS_LISTEN_PORT"
+            ),
+            observation_worker_poll_seconds=max(
+                0.05,
+                float(os.getenv("OBSERVATION_WORKER_POLL_SECONDS", "1")),
+            ),
+            observation_worker_claim_lease_seconds=int(
+                os.getenv("OBSERVATION_WORKER_CLAIM_LEASE_SECONDS", "60")
+            ),
+            observation_worker_batch_size=int(
+                os.getenv("OBSERVATION_WORKER_BATCH_SIZE", "250")
+            ),
+            observation_worker_clickhouse_timeout_seconds=float(
+                os.getenv("OBSERVATION_WORKER_CLICKHOUSE_TIMEOUT_SECONDS", "15")
+            ),
+            observation_worker_max_attempts=int(
+                os.getenv("OBSERVATION_WORKER_MAX_ATTEMPTS", "8")
+            ),
+            observation_worker_retry_base_seconds=int(
+                os.getenv("OBSERVATION_WORKER_RETRY_BASE_SECONDS", "5")
+            ),
+            observation_worker_retry_max_seconds=int(
+                os.getenv("OBSERVATION_WORKER_RETRY_MAX_SECONDS", "900")
+            ),
+            observation_worker_metrics_listen_port=_env_optional_int(
+                "OBSERVATION_WORKER_METRICS_LISTEN_PORT"
+            ),
+            observation_retention_hours=max(
+                24,
+                int(os.getenv("OBSERVATION_RETENTION_HOURS", "24")),
+            ),
+            observation_purge_batch_size=min(
+                100_000,
+                max(
+                    1,
+                    int(os.getenv("OBSERVATION_PURGE_BATCH_SIZE", "50000")),
+                ),
+            ),
+            processed_event_retention_days=max(
+                1,
+                int(os.getenv("PROCESSED_EVENT_RETENTION_DAYS", "3")),
+            ),
+            processed_event_purge_interval_seconds=max(
+                60,
+                int(
+                    os.getenv(
+                        "PROCESSED_EVENT_PURGE_INTERVAL_SECONDS",
+                        "900",
+                    )
+                ),
+            ),
+            processed_event_purge_batch_size=min(
+                100_000,
+                max(
+                    1,
+                    int(os.getenv("PROCESSED_EVENT_PURGE_BATCH_SIZE", "100000")),
+                ),
+            ),
         )
 
 
@@ -433,6 +789,9 @@ def _detector_settings_from_mapping(
         price_window_seconds=int(detector.get("price_window_seconds", 90)),
         orderbook_window_seconds=int(
             detector.get("orderbook_window_seconds", 120)
+        ),
+        baseline_volatility_window_seconds=int(
+            detector.get("baseline_volatility_window_seconds", 180)
         ),
         alert_cooldown_seconds=int(
             detector.get("alert_cooldown_seconds", 120)
@@ -598,17 +957,23 @@ def load_detector_config(
     detector_block = raw.get("detector", {}) or {}
     if not isinstance(detector_block, dict):
         raise ValueError(f"'detector' in {path} must be a mapping")
-    base_settings = _detector_settings_from_mapping(detector_block)
 
     per_raw = raw.get("per_instrument") or {}
     if overrides_path is not None and overrides_path.exists():
         override_raw = _read_yaml(overrides_path)
+        override_detector = override_raw.get("detector") or {}
+        if override_detector and not isinstance(override_detector, dict):
+            raise ValueError(
+                f"'detector' in {overrides_path} must be a mapping"
+            )
+        detector_block = {**detector_block, **override_detector}
         override_per_raw = override_raw.get("per_instrument") or {}
         if override_per_raw and not isinstance(override_per_raw, dict):
             raise ValueError(
                 f"'per_instrument' in {overrides_path} must be a mapping"
             )
         per_raw = {**per_raw, **override_per_raw}
+    base_settings = _detector_settings_from_mapping(detector_block)
     if per_raw and not isinstance(per_raw, dict):
         raise ValueError(f"'per_instrument' in {path} must be a mapping")
     per_instrument: dict[str, DetectorSettings] = {}

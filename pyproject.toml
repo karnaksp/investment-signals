@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tinvest-signal-engine"
-version = "0.1.0"
+version = "1.0.0"
 description = "Realtime anomaly detection pipeline for T-Invest market data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,7 +30,7 @@ dependencies = [
   "orjson>=3.10",
   "prometheus-client>=0.20",
   "psycopg[binary]>=3.2",
-  "protobuf>=4.25.1,<8",
+  "protobuf>=5.29.6,<6",
   "python-dateutil",
   "pyyaml",
   "redis>=5.0.0",
@@ -45,6 +45,16 @@ tinvest-local-notifier = "tinvest_signal_engine.services.local_notifier:main"
 tinvest-threshold-cron = "tinvest_signal_engine.services.threshold_cron:main"
 tinvest-accuracy-metrics = "tinvest_signal_engine.services.accuracy_metrics:main"
 tinvest-market-unary-emitter = "tinvest_signal_engine.services.market_unary_emitter:main"
+tinvest-migrate = "tinvest_signal_engine.services.migrate:main"
+tinvest-delivery-worker = "tinvest_signal_engine.services.delivery_worker:main"
+tinvest-observation-worker = "tinvest_signal_engine.services.observation_worker:main"
+tinvest-scientific-candle-writer = "tinvest_signal_engine.services.scientific_candle_writer:main"
+tinvest-signal-outcome-worker = "tinvest_signal_engine.services.signal_outcome_worker:main"
+tinvest-bond-convergence-emitter = "tinvest_signal_engine.services.bond_convergence_emitter:main"
+tinvest-cache-candles = "tinvest_signal_engine.services.candle_cache:main"
+tinvest-import-scientific-history = "tinvest_signal_engine.services.historical_candle_import:main"
+tinvest-morning-retracement-worker = "tinvest_signal_engine.services.morning_retracement_signal_worker:main"
+tinvest-refresh-futures = "tinvest_signal_engine.services.futures_universe_refresh:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -60,6 +70,10 @@ orchestration = [
   "dagster>=1.8.0,<2",
   "dagster-webserver>=1.8.0,<2",
 ]
+replay = [
+  "duckdb==1.5.4",
+  "pytz>=2024.1",
+]
 dev = [
   "pytest>=8",
   "playwright>=1.40",
@@ -74,6 +88,11 @@ docs = [
 backtest = [
   "clickhouse-connect>=0.7.0",
   "duckdb>=1.0.0",
+]
+research = [
+  "duckdb>=1.0.0",
+  "scikit-learn>=1.4",
+  "lightgbm>=4.0",
 ]
 proto = [
   "grpcio-tools>=1.62,<1.82",

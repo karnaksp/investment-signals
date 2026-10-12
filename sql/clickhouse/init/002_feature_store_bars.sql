@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS signal_engine.features_trade_bar_1m
 (
-    instrument_id String,
+    instrument_id LowCardinality(String),
     bucket DateTime,
     sum_pv Float64,
     sum_qty Float64,
@@ -40,7 +40,7 @@ WHERE qty > 0 AND px > 0 AND isFinite(qty) AND isFinite(px);
 
 CREATE TABLE IF NOT EXISTS signal_engine.features_trade_bar_5m
 (
-    instrument_id String,
+    instrument_id LowCardinality(String),
     bucket DateTime,
     sum_pv Float64,
     sum_qty Float64,
@@ -76,7 +76,7 @@ WHERE qty > 0 AND px > 0 AND isFinite(qty) AND isFinite(px);
 
 CREATE TABLE IF NOT EXISTS signal_engine.features_trade_bar_15m
 (
-    instrument_id String,
+    instrument_id LowCardinality(String),
     bucket DateTime,
     sum_pv Float64,
     sum_qty Float64,

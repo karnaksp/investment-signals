@@ -1,0 +1,1944 @@
+"""Internal HTTP composition root for immutable hypothesis replay.
+
+The service deliberately owns no broker client.  It composes the existing
+application use cases with local cache and filesystem adapters, and persists
+the asynchronous job envelope so work can be resumed after a process restart.
+"""
+
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+import ctypes
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import gc
+from hashlib import sha256
+import json
+import logging
+import os
+from pathlib import Path
+from threading import Event, Lock, RLock, Thread
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
+from uuid import uuid4
+
+from fastapi import FastAPI, Header, HTTPException, Response, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from tinvest_signal_engine.adapters.hypothesis_replay_evidence import (
+    LocalReplayEvidenceReader,
+)
+from tinvest_signal_engine.adapters.composite_scientific_candle_cache import (
+    ClickHouseScientificCandleSource,
+    CompositeScientificCandleCache,
+    VersionedScientificCandleSource,
+)
+from tinvest_signal_engine.adapters.jump_activity_replay import (
+    JsonJumpReplayArtifactAdapter,
+    ParquetCandleCacheAdapter,
+)
+from tinvest_signal_engine.adapters.local_hypothesis_replay import (
+    ImmutableReplayArtifactStore,
+    LocalCandleCache,
+)
+from tinvest_signal_engine.adapters.replay_artifact_retention import (
+    LocalReplayArtifactRetention,
+    ReplayArtifactRetentionResult,
+)
+from tinvest_signal_engine.adapters.scientific_candle_replay import (
+    ScientificCandleReplayArtifactAdapter,
+)
+from tinvest_signal_engine.adapters.prospective_scientific_replay import (
+    ProspectiveScientificReplayArtifactAdapter,
+)
+from tinvest_signal_engine.adapters.r2_extension_replay import (
+    R2ExtensionReplayArtifactAdapter,
+)
+from tinvest_signal_engine.adapters.file_scientific_combination_pipeline import (
+    FileProspectiveScientificPartitionStage,
+    FileProspectiveScientificRowSpool,
+    FileScientificCombinationStreamingArtifacts,
+)
+from tinvest_signal_engine.adapters.derived_combination_evidence_file import (
+    FileDerivedScientificCombinationEvidenceReader,
+)
+from tinvest_signal_engine.application.derived_combination_evidence import (
+    BuildDerivedScientificCombinationEvidence,
+    ScientificCombinationEvidenceArtifactPort,
+)
+from tinvest_signal_engine.application.historical_hypothesis_replay import (
+    DEFAULT_LIQUID_UNIVERSE,
+    HistoricalReplayRequest,
+    RunHistoricalHypothesisReplay,
+)
+from tinvest_signal_engine.application.jump_activity_replay import (
+    RunJumpActivityReplay,
+)
+from tinvest_signal_engine.application.scientific_candle_models import (
+    BuildScientificCandleModelResearch,
+    ScientificCandleResearchRequest,
+)
+from tinvest_signal_engine.application.prospective_scientific_models import (
+    INDEPENDENT_PARTITIONED_HYPOTHESES,
+    ProspectiveScientificRequest,
+    build_partitioned_prospective_scientific_research,
+    build_prospective_scientific_research,
+    iter_independent_prospective_row_partitions,
+    partitioned_prospective_split,
+    prospective_report_fingerprint_from_rows,
+)
+from tinvest_signal_engine.application.prospective_portfolio_extensions import (
+    BuildR2ExtensionReplay,
+    R2ExtensionRequest,
+)
+from tinvest_signal_engine.application.scientific_combination_evidence import (
+    EvaluateScientificCombinationPartitions,
+)
+from tinvest_signal_engine.application.historical_hypothesis_replay import (
+    HistoricalCandleCachePort,
+)
+from tinvest_signal_engine.domain.historical_hypothesis_replay import ReplayCostModel
+from tinvest_signal_engine.domain.hypothesis_formulas import HypothesisId
+from tinvest_signal_engine.domain.jump_activity_replay import (
+    CostModel,
+    JumpReplayPolicy,
+)
+from tinvest_signal_engine.domain.scientific_candle_models import (
+    ScientificCandleHypothesis,
+    ScientificCandlePolicy,
+)
+from tinvest_signal_engine.domain.prospective_scientific_models import (
+    ProspectiveHypothesis,
+    ProspectiveScientificPolicy,
+)
+from tinvest_signal_engine.domain.prospective_portfolio_extensions import (
+    R2ExtensionHypothesis,
+    R2ExtensionPolicy,
+)
+from tinvest_signal_engine.domain.scientific_hypothesis_combinations import (
+    ScientificCombinationId,
+)
+from tinvest_signal_engine.domain.scientific_replay_contract import (
+    ReplaySourceDataState,
+    SCIENTIFIC_REPLAY_CONTRACT_V1,
+    scientific_replay_definition,
+    scientific_replay_formula_fingerprint,
+)
+
+
+JobState = Literal["queued", "running", "completed", "failed"]
+ALL_HYPOTHESES = tuple(item.short_id for item in SCIENTIFIC_REPLAY_CONTRACT_V1)
+R2_EXTENSION_HYPOTHESES = frozenset({"H10", "H11"})
+SCIENTIFIC_CANDLE_HYPOTHESES = frozenset({"H15", "H7V2"})
+PROSPECTIVE_SCIENTIFIC_HYPOTHESES = frozenset(
+    {
+        "H3V2",
+        "H4V2",
+        "H3V3",
+        "H4V3",
+        "H7V3",
+        "H11V2",
+        "H12",
+        "H12V2",
+        "H15V2",
+        "H16",
+        "H16V2",
+        "H17",
+        "H17V2",
+    }
+)
+COMBINATION_SOURCE_HYPOTHESES = (
+    ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+    ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+    ProspectiveHypothesis.JUMP_LOW_ACTIVITY_REVERSAL_V2,
+    ProspectiveHypothesis.JUMP_HIGH_ACTIVITY_CONTINUATION_V2,
+    ProspectiveHypothesis.RELATIVE_VOLUME_VOLATILITY_V3,
+    ProspectiveHypothesis.PAIR_RESIDUAL_REVERSION,
+    ProspectiveHypothesis.VOLATILITY_JUMP_PERSISTENCE,
+)
+COMBINATION_SOURCE_IDS = frozenset(item.value for item in COMBINATION_SOURCE_HYPOTHESES)
+SUPPORTED_HYPOTHESES = (
+    frozenset(ALL_HYPOTHESES)
+    | R2_EXTENSION_HYPOTHESES
+    | SCIENTIFIC_CANDLE_HYPOTHESES
+    | PROSPECTIVE_SCIENTIFIC_HYPOTHESES
+)
+LEGACY_DEFAULT_HYPOTHESES = tuple(
+    item
+    for item in ALL_HYPOTHESES
+    if item not in SCIENTIFIC_CANDLE_HYPOTHESES | R2_EXTENSION_HYPOTHESES
+)
+GENERAL_HYPOTHESES = frozenset({"H1", "H2", "H5", "H6", "H7"})
+JUMP_HYPOTHESES = frozenset({"H3", "H4"})
+ORDERBOOK_HYPOTHESES = frozenset({"H8", "H9"})
+JOB_SCHEMA_VERSION = 2
+PREPARED_CANDLE_CACHE_LIMIT = 8
+
+
+class ReplayCostModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(default="research-cost-v1.0.0", min_length=1, max_length=128)
+    commission_bps: float = Field(default=3.0, ge=0.0)
+    slippage_bps: float = Field(default=3.0, ge=0.0)
+    entry_half_spread_bps: float = Field(default=2.0, ge=0.0)
+    exit_half_spread_bps: float = Field(default=2.0, ge=0.0)
+
+    @property
+    def round_trip_bps(self) -> float:
+        return (
+            self.commission_bps
+            + self.slippage_bps
+            + self.entry_half_spread_bps
+            + self.exit_half_spread_bps
+        )
+
+
+class StartReplayRequest(BaseModel):
+    """Transport request mapped to existing application request objects."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hypothesis_ids: tuple[str, ...] = LEGACY_DEFAULT_HYPOTHESES
+    tickers: tuple[str, ...] = ()
+    liquid_universe: tuple[str, ...] = DEFAULT_LIQUID_UNIVERSE
+    cost_model: ReplayCostModelRequest = ReplayCostModelRequest()
+    resume: bool = True
+
+    @field_validator("hypothesis_ids")
+    @classmethod
+    def validate_hypotheses(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(sorted({value.strip().upper() for value in values}))
+        if not normalized:
+            raise ValueError("at least one hypothesis must be selected")
+        unsupported = sorted(set(normalized) - SUPPORTED_HYPOTHESES)
+        if unsupported:
+            raise ValueError(f"unsupported hypotheses: {unsupported}")
+        jump_selection = set(normalized) & JUMP_HYPOTHESES
+        if jump_selection and jump_selection != JUMP_HYPOTHESES:
+            raise ValueError("H3 and H4 must be replayed together")
+        return normalized
+
+    @field_validator("tickers", "liquid_universe")
+    @classmethod
+    def normalize_tickers(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(
+            sorted({value.strip().upper() for value in values if value.strip()})
+        )
+        return normalized
+
+
+class ReplayAcceptedResponse(BaseModel):
+    job_id: str
+    status: JobState
+    idempotency_key_hash: str
+    run_fingerprint: str
+    status_url: str
+    result_url: str
+    reused: bool
+
+
+class ReplayProgressResponse(BaseModel):
+    """Bounded operator-facing progress for a long local replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal[
+        "queued",
+        "preparing_data",
+        "general_hypotheses",
+        "jump_hypotheses",
+        "relative_value_hypotheses",
+        "scientific_hypotheses",
+        "prospective_hypotheses",
+        "combination_hypotheses",
+        "orderbook_hypotheses",
+        "finalizing",
+        "completed",
+        "failed",
+    ]
+    completed_units: int = Field(ge=0)
+    total_units: int = Field(ge=1)
+    current_hypothesis_id: str | None = None
+    updated_at: str
+
+
+class ReplayStatusResponse(BaseModel):
+    job_id: str
+    status: JobState
+    run_fingerprint: str
+    hypothesis_ids: tuple[str, ...]
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    attempt: int
+    recovered_after_restart: bool = False
+    error: Mapping[str, str] | None = None
+    progress: ReplayProgressResponse
+
+
+class ReplayResultResponse(BaseModel):
+    job_id: str
+    status: Literal["completed"]
+    run_fingerprint: str
+    dataset_fingerprint: str
+    hypothesis_ids: tuple[str, ...]
+    engines: tuple[Mapping[str, Any], ...]
+    evidence: tuple["ReplayEvidenceResponse", ...]
+    derived_evidence: tuple["DerivedReplayEvidenceResponse", ...] = ()
+    network_download_performed: Literal[False] = False
+
+
+class ReplayEvidenceReasonCountResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: str = Field(min_length=1)
+    count: int = Field(gt=0)
+
+
+class ReplayEvidenceConfidenceIntervalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    lower: float
+    estimate: float
+    upper: float
+    confidence_level: float = Field(gt=0.0, lt=1.0)
+
+
+class ReplayEvidenceDiagnosticsV2Response(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    version: Literal["evidence-diagnostics-v2"]
+    event_prevalence: float | None = Field(default=None, ge=0.0, le=1.0)
+    eligible_event_count: int = Field(ge=0)
+    matched_event_count: int = Field(ge=0)
+    match_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    data_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    reasons_histogram: tuple[ReplayEvidenceReasonCountResponse, ...]
+    primary_effect_estimate: float | None = None
+    primary_effect_interval: ReplayEvidenceConfidenceIntervalResponse | None = None
+    primary_p_value: float | None = Field(default=None, ge=0.0, le=1.0)
+    descriptive_only: bool
+
+
+class ReplayControlMatchingResponse(BaseModel):
+    """Auditable common-support and control-dependence summary."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    selection_policy_version: str = Field(min_length=1)
+    maximum_control_reuse: int = Field(ge=1)
+    distinct_controls: int = Field(ge=0)
+    maximum_observed_control_reuse: int = Field(ge=0)
+    mean_control_reuse: float = Field(ge=0.0)
+    independent_control_clusters: int = Field(ge=0)
+    minimum_independent_control_clusters: int = Field(ge=1)
+    inference_unit: Literal["trading_day", "control_dependency_cluster"]
+
+
+class ReplayEvidenceResponse(BaseModel):
+    """Strict product-facing aggregate for one requested hypothesis."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    hypothesis_id: str = Field(pattern=r"^H(?:[1-9]|1[0-7])(?:V[1-9][0-9]*)?$")
+    catalog_hypothesis_id: str = Field(min_length=1)
+    expected_direction: str = Field(min_length=1)
+    market_phase: str = Field(min_length=1)
+    source_data_state: Literal[
+        "ready",
+        "insufficient_history",
+        "requires_live_orderbook",
+        "stale_live_orderbook",
+        "sequence_gap",
+        "timestamp_desynchronization",
+        "unavailable",
+    ]
+    decision: Literal["passed", "rejected", "inconclusive", "blocked_by_data"]
+    reason_codes: tuple[str, ...] = ()
+    independent_validation: bool
+    cost_adjusted: bool
+    sample_count: int = Field(ge=0)
+    trading_days: int = Field(ge=0)
+    generated_at: datetime
+    artifact_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    dataset_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    formula_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    cost_model_version: str = Field(min_length=1, max_length=128)
+    primary_metric_value: float | None = None
+    matched_control_lift_ci95_lower: float | None = None
+    matched_control_lift_ci95_upper: float | None = None
+    matched_controls: int = Field(ge=0)
+    controls_per_event: int = Field(ge=1)
+    adjusted_p_value: float | None = Field(default=None, ge=0.0, le=1.0)
+    stable_blocks: int = Field(ge=0)
+    total_blocks: int = Field(ge=0)
+    maximum_ticker_share: float | None = Field(default=None, ge=0.0, le=1.0)
+    maximum_period_share: float | None = Field(default=None, ge=0.0, le=1.0)
+    abstention_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    diagnostics_v2: ReplayEvidenceDiagnosticsV2Response | None = None
+    control_matching: ReplayControlMatchingResponse | None = None
+    horizons: tuple["ReplayHorizonEvidenceResponse", ...]
+    claim_family: str = Field(default="directional", min_length=1)
+    effect_unit: str = Field(default="cost_adjusted_signed_return_bps", min_length=1)
+    claim_scope: str = Field(default="price_direction", min_length=1)
+    target_metric: str = Field(default="forward_return", min_length=1)
+
+
+class DerivedReplayEvidenceResponse(ReplayEvidenceResponse):
+    """Aggregate for a derived C1-C5 hypothesis, separate from requested evidence."""
+
+    hypothesis_id: str = Field(pattern=r"^C[1-5]$")
+
+
+class ReplayHorizonEvidenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    horizon_seconds: int = Field(ge=1)
+    evidence_scope: Literal["independent_gate", "descriptive_only", "not_evaluated"]
+    source_data_state: Literal[
+        "ready",
+        "insufficient_history",
+        "requires_live_orderbook",
+        "stale_live_orderbook",
+        "sequence_gap",
+        "timestamp_desynchronization",
+        "unavailable",
+    ]
+    decision: Literal["passed", "rejected", "inconclusive", "blocked_by_data"] | None
+    sample_count: int = Field(ge=0)
+    primary_metric_value: float | None
+
+
+class ReplayRunner(Protocol):
+    def dataset_fingerprint(self, *, as_of: datetime | None = None) -> str: ...
+
+    def execute(
+        self,
+        request: StartReplayRequest,
+        *,
+        run_fingerprint: str,
+        dataset_as_of: datetime | None = None,
+        progress: "ReplayProgressReporter | None" = None,
+    ) -> Mapping[str, Any]: ...
+
+    def readiness(self) -> tuple[bool, str | None]: ...
+
+
+class ReplayEvidenceReader(Protocol):
+    def read_general(
+        self,
+        artifact_dir: str | Path,
+        requested_hypotheses: Sequence[str],
+        *,
+        generated_at: str,
+    ) -> tuple[Mapping[str, Any], ...]: ...
+
+    def read_jump(
+        self,
+        artifact_dir: str | Path,
+        requested_hypotheses: Sequence[str],
+        *,
+        generated_at: str,
+    ) -> tuple[Mapping[str, Any], ...]: ...
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+class ReplayArtifactRetentionCollector(Protocol):
+    def collect(
+        self, *, safe_to_remove_working: bool
+    ) -> ReplayArtifactRetentionResult: ...
+
+
+ReplayProgressReporter = Callable[
+    [str, int, int, str | None],
+    None,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _Submission:
+    record: Mapping[str, Any]
+    reused: bool
+
+
+class LocalReplayJobStore:
+    """Atomic filesystem store for recoverable asynchronous job envelopes."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+
+    def ensure_ready(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        probe = self.root / ".write-probe"
+        _atomic_json(probe, {"ready": True})
+        probe.unlink(missing_ok=True)
+        for path in sorted(self.root.glob("*/state.json")):
+            try:
+                _read_object(path)
+            except PermissionError as exc:
+                raise RuntimeError(
+                    f"replay job state is unreadable: {path}"
+                ) from exc
+
+    def records(self) -> tuple[dict[str, Any], ...]:
+        if not self.root.is_dir():
+            return ()
+        records: list[dict[str, Any]] = []
+        for path in sorted(self.root.glob("*/state.json")):
+            try:
+                records.append(_read_object(path))
+            except (OSError, ValueError, TypeError):
+                continue
+        return tuple(records)
+
+    def load(self, job_id: str) -> dict[str, Any] | None:
+        path = self._job_dir(job_id) / "state.json"
+        return _read_object(path) if path.is_file() else None
+
+    def save(self, record: Mapping[str, Any]) -> None:
+        job_dir = self._job_dir(str(record["job_id"]))
+        job_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_json(job_dir / "state.json", record)
+
+    def save_result(self, job_id: str, result: Mapping[str, Any]) -> None:
+        job_dir = self._job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_json(job_dir / "result.json", result)
+
+    def load_result(self, job_id: str) -> dict[str, Any] | None:
+        path = self._job_dir(job_id) / "result.json"
+        return _read_object(path) if path.is_file() else None
+
+    def _job_dir(self, job_id: str) -> Path:
+        if not job_id.startswith("job-") or len(job_id) != 36:
+            raise ValueError("invalid job id")
+        return self.root / job_id
+
+
+class ReplayJobManager:
+    """Persist, schedule, recover, and inspect local replay jobs."""
+
+    def __init__(
+        self,
+        *,
+        runner: ReplayRunner,
+        store: LocalReplayJobStore,
+        max_workers: int = 1,
+        retention: ReplayArtifactRetentionCollector | None = None,
+        maintenance_interval_seconds: float | None = None,
+    ) -> None:
+        self._runner = runner
+        self._store = store
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="hypothesis-replay",
+        )
+        self._lock = RLock()
+        self._futures: dict[str, Future[None]] = {}
+        self._single_worker = max_workers == 1
+        self._retention = retention
+        self._maintenance_interval_seconds = maintenance_interval_seconds
+        self._maintenance_stop = Event()
+        self._maintenance_thread: Thread | None = None
+        self._last_retention_result: dict[str, Any] | None = None
+
+    def readiness(self) -> tuple[bool, str | None]:
+        try:
+            self._store.ensure_ready()
+            return self._runner.readiness()
+        except (OSError, RuntimeError, ValueError) as exc:
+            return False, str(exc)
+
+    def recover(self) -> int:
+        self._store.ensure_ready()
+        self._collect_retention(safe_to_remove_working=True)
+        recovered = 0
+        with self._lock:
+            active_records = [
+                record
+                for record in self._store.records()
+                if record.get("status") in {"queued", "running"}
+            ]
+            retained: list[dict[str, Any]] = []
+            by_request: dict[str, list[dict[str, Any]]] = {}
+            for record in active_records:
+                key = _request_key(record.get("request"))
+                by_request.setdefault(key, []).append(record)
+            for duplicates in by_request.values():
+                ordered = sorted(
+                    duplicates,
+                    key=lambda item: (
+                        0 if item.get("status") == "running" else 1,
+                        str(item.get("created_at", "")),
+                        str(item.get("job_id", "")),
+                    ),
+                )
+                retained.append(ordered[0])
+                for duplicate in ordered[1:]:
+                    now = _now()
+                    duplicate["status"] = "failed"
+                    duplicate["finished_at"] = now
+                    duplicate["updated_at"] = now
+                    duplicate["error"] = {
+                        "code": "replay_superseded_by_active_equivalent",
+                        "message": "An equivalent active replay already owns this request.",
+                    }
+                    duplicate["progress"] = _progress_payload(
+                        "failed",
+                        completed_units=int(
+                            _record_progress_payload(duplicate)["completed_units"]
+                        ),
+                        total_units=int(
+                            _record_progress_payload(duplicate)["total_units"]
+                        ),
+                    )
+                    self._store.save(duplicate)
+            for record in retained:
+                record["status"] = "queued"
+                record["recovered_after_restart"] = True
+                record["updated_at"] = _now()
+                record["progress"] = _initial_progress(
+                    StartReplayRequest.model_validate(record["request"])
+                )
+                self._store.save(record)
+                self._schedule(str(record["job_id"]))
+                recovered += 1
+        self._start_maintenance()
+        return recovered
+
+    def submit(self, request: StartReplayRequest, idempotency_key: str) -> _Submission:
+        key = idempotency_key.strip()
+        if not key or len(key) > 256:
+            raise ValueError("Idempotency-Key must contain 1 to 256 characters")
+        key_hash = _fingerprint({"idempotency_key": key})
+        request_payload = request.model_dump(mode="json")
+        with self._lock:
+            records = self._store.records()
+            for existing in records:
+                if existing.get("idempotency_key_hash") != key_hash:
+                    continue
+                if existing.get("request") != request_payload:
+                    raise IdempotencyConflict
+                if existing.get("status") == "failed" and request.resume:
+                    existing["status"] = "queued"
+                    existing["updated_at"] = _now()
+                    existing["finished_at"] = None
+                    existing["error"] = None
+                    existing["progress"] = _initial_progress(request)
+                    self._store.save(existing)
+                    self._schedule(str(existing["job_id"]))
+                return _Submission(existing, reused=True)
+            for existing in records:
+                if (
+                    existing.get("status") in {"queued", "running"}
+                    and existing.get("request") == request_payload
+                ):
+                    return _Submission(existing, reused=True)
+            dataset_as_of = datetime.now(timezone.utc)
+            dataset_fingerprint = self._runner.dataset_fingerprint(as_of=dataset_as_of)
+            run_fingerprint = _fingerprint(
+                {
+                    "schema_version": JOB_SCHEMA_VERSION,
+                    "dataset_fingerprint": dataset_fingerprint,
+                    "dataset_as_of": dataset_as_of.isoformat(),
+                    "request": request_payload,
+                }
+            )
+            job_id = (
+                "job-"
+                + sha256(f"{key_hash}:{run_fingerprint}".encode()).hexdigest()[:32]
+            )
+            now = _now()
+            record: dict[str, Any] = {
+                "schema_version": JOB_SCHEMA_VERSION,
+                "job_id": job_id,
+                "status": "queued",
+                "idempotency_key_hash": key_hash,
+                "run_fingerprint": run_fingerprint,
+                "dataset_fingerprint": dataset_fingerprint,
+                "dataset_as_of": dataset_as_of.isoformat(),
+                "request": request_payload,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": None,
+                "finished_at": None,
+                "attempt": 0,
+                "recovered_after_restart": False,
+                "error": None,
+                "progress": _initial_progress(request),
+            }
+            self._store.save(record)
+            self._schedule(job_id)
+            return _Submission(record, reused=False)
+
+    def status(self, job_id: str) -> Mapping[str, Any] | None:
+        return self._store.load(job_id)
+
+    def result(self, job_id: str) -> Mapping[str, Any] | None:
+        return self._store.load_result(job_id)
+
+    def close(self) -> None:
+        self._maintenance_stop.set()
+        if self._maintenance_thread is not None:
+            self._maintenance_thread.join(timeout=2)
+        self._executor.shutdown(wait=True, cancel_futures=False)
+
+    def _schedule(self, job_id: str) -> None:
+        current = self._futures.get(job_id)
+        if current is not None and not current.done():
+            return
+        self._futures[job_id] = self._executor.submit(self._run, job_id)
+
+    def _run(self, job_id: str) -> None:
+        with self._lock:
+            record = self._store.load(job_id)
+            if record is None or record.get("status") not in {"queued", "running"}:
+                return
+            record["status"] = "running"
+            record["started_at"] = _now()
+            record["updated_at"] = record["started_at"]
+            record["attempt"] = int(record.get("attempt", 0)) + 1
+            record["error"] = None
+            record["progress"] = _progress_payload(
+                "preparing_data",
+                completed_units=0,
+                total_units=_progress_total(
+                    StartReplayRequest.model_validate(record["request"])
+                ),
+            )
+            self._store.save(record)
+        try:
+            request = StartReplayRequest.model_validate(record["request"])
+            result = self._runner.execute(
+                request,
+                run_fingerprint=str(record["run_fingerprint"]),
+                dataset_as_of=datetime.fromisoformat(
+                    str(record.get("dataset_as_of", record["created_at"]))
+                ),
+                progress=lambda phase, completed, total, current: self._record_progress(
+                    job_id,
+                    phase=phase,
+                    completed_units=completed,
+                    total_units=total,
+                    current_hypothesis_id=current,
+                ),
+            )
+            completed = {
+                "job_id": job_id,
+                "status": "completed",
+                "run_fingerprint": record["run_fingerprint"],
+                "dataset_fingerprint": record["dataset_fingerprint"],
+                "hypothesis_ids": request.hypothesis_ids,
+                "engines": result["engines"],
+                "evidence": result["evidence"],
+                "derived_evidence": result.get("derived_evidence", ()),
+                "network_download_performed": False,
+            }
+            self._store.save_result(job_id, completed)
+            with self._lock:
+                record = self._store.load(job_id) or record
+                record["status"] = "completed"
+                record["finished_at"] = _now()
+                record["updated_at"] = record["finished_at"]
+                record["progress"] = _progress_payload(
+                    "completed",
+                    completed_units=_progress_total(request),
+                    total_units=_progress_total(request),
+                )
+                self._store.save(record)
+        except Exception as exc:  # background boundary must seal failures for polling
+            with self._lock:
+                record = self._store.load(job_id) or record
+                record["status"] = "failed"
+                record["finished_at"] = _now()
+                record["updated_at"] = record["finished_at"]
+                record["error"] = {
+                    "code": "replay_execution_failed",
+                    "message": str(exc)[:1000],
+                }
+                previous_progress = _record_progress_payload(record)
+                record["progress"] = _progress_payload(
+                    "failed",
+                    completed_units=int(previous_progress["completed_units"]),
+                    total_units=int(previous_progress["total_units"]),
+                    current_hypothesis_id=_optional_string(
+                        previous_progress.get("current_hypothesis_id")
+                    ),
+                )
+                self._store.save(record)
+        self._collect_retention(safe_to_remove_working=self._single_worker)
+
+    def _record_progress(
+        self,
+        job_id: str,
+        *,
+        phase: str,
+        completed_units: int,
+        total_units: int,
+        current_hypothesis_id: str | None,
+    ) -> None:
+        with self._lock:
+            record = self._store.load(job_id)
+            if record is None or record.get("status") != "running":
+                return
+            record["progress"] = _progress_payload(
+                phase,
+                completed_units=completed_units,
+                total_units=total_units,
+                current_hypothesis_id=current_hypothesis_id,
+            )
+            record["updated_at"] = record["progress"]["updated_at"]
+            self._store.save(record)
+
+    def retention_status(self) -> Mapping[str, Any]:
+        return dict(
+            self._last_retention_result
+            or {
+                "status": "not_run",
+                "budget_satisfied": False,
+            }
+        )
+
+    def run_retention(self) -> Mapping[str, Any]:
+        self._collect_retention(safe_to_remove_working=self._single_worker)
+        return self.retention_status()
+
+    def _collect_retention(self, *, safe_to_remove_working: bool) -> None:
+        if self._retention is None:
+            return
+        try:
+            result = self._retention.collect(
+                safe_to_remove_working=safe_to_remove_working,
+            )
+            payload = asdict(result)
+            payload["status"] = (
+                "ok"
+                if result.skipped_reason is None and result.budget_satisfied
+                else "attention_required"
+            )
+            payload["updated_at"] = _now()
+            self._last_retention_result = payload
+            if payload["status"] != "ok":
+                LOGGER.warning("replay artifact retention requires attention: %s", payload)
+        except Exception as exc:
+            # Retention is a best-effort outer-layer maintenance action.  It
+            # must never change an already sealed replay success/failure state.
+            self._last_retention_result = {
+                "status": "failed",
+                "budget_satisfied": False,
+                "error": type(exc).__name__,
+                "updated_at": _now(),
+            }
+            LOGGER.exception("replay artifact retention failed")
+
+    def _start_maintenance(self) -> None:
+        interval = self._maintenance_interval_seconds
+        if interval is None or interval <= 0 or self._maintenance_thread is not None:
+            return
+        self._maintenance_thread = Thread(
+            target=self._maintenance_loop,
+            name="replay-retention-maintenance",
+            daemon=True,
+        )
+        self._maintenance_thread.start()
+
+    def _maintenance_loop(self) -> None:
+        interval = self._maintenance_interval_seconds
+        if interval is None:
+            return
+        while not self._maintenance_stop.wait(interval):
+            active = any(
+                record.get("status") in {"queued", "running"}
+                for record in self._store.records()
+            )
+            if not active:
+                self._collect_retention(safe_to_remove_working=True)
+
+
+class IdempotencyConflict(RuntimeError):
+    """The same idempotency key was used with a different immutable input."""
+
+
+class LocalHypothesisPortfolioRunner:
+    """Composition adapter for the versioned scientific replay portfolio."""
+
+    def __init__(
+        self,
+        *,
+        cache_dir: str | Path,
+        artifact_root: str | Path,
+        evidence_reader: ReplayEvidenceReader | None = None,
+        r2_artifacts: R2ExtensionReplayArtifactAdapter | None = None,
+        scientific_artifacts: ScientificCandleReplayArtifactAdapter | None = None,
+        prospective_artifacts: ProspectiveScientificReplayArtifactAdapter | None = None,
+        live_candles: VersionedScientificCandleSource | None = None,
+        combination_evidence_reader: (
+            ScientificCombinationEvidenceArtifactPort | None
+        ) = None,
+        memory_reclaimer: Callable[[], None] | None = None,
+    ) -> None:
+        self._cache_dir = Path(cache_dir)
+        self._artifact_root = Path(artifact_root)
+        self._descriptor_cache = LocalCandleCache(self._cache_dir)
+        self._live_candles = live_candles
+        self._derived_combination_evidence = BuildDerivedScientificCombinationEvidence(
+            combination_evidence_reader
+            or FileDerivedScientificCombinationEvidenceReader()
+        )
+        self._evidence_reader = evidence_reader or LocalReplayEvidenceReader()
+        self._r2_artifacts = r2_artifacts or R2ExtensionReplayArtifactAdapter(
+            self._artifact_root / "h10-h11-r2"
+        )
+        self._scientific_artifacts = scientific_artifacts or (
+            ScientificCandleReplayArtifactAdapter(
+                self._artifact_root / "h10-h11-h15-h7v2"
+            )
+        )
+        self._prospective_artifacts = prospective_artifacts or (
+            ProspectiveScientificReplayArtifactAdapter(
+                self._artifact_root / "h3v2-h4v2-h7v3-h15v2-h16-h17"
+            )
+        )
+        self._memory_reclaimer = memory_reclaimer or _reclaim_replay_memory
+        # A new submission seals its dataset fingerprint at an exact ``as_of``.
+        # The worker receives that same timestamp moments later.  Retaining the
+        # lightweight cache object lets execution reuse the descriptor already
+        # computed during submission instead of repeating a full ClickHouse
+        # scan.  The bounded map is only an optimization: evicted/recovered jobs
+        # reconstruct the same causal cache and remain correct.
+        self._prepared_cache_lock = Lock()
+        self._prepared_caches: OrderedDict[datetime, HistoricalCandleCachePort] = (
+            OrderedDict()
+        )
+
+    def _candle_cache(self, as_of: datetime | None = None) -> HistoricalCandleCachePort:
+        if self._live_candles is None:
+            return self._descriptor_cache
+        return CompositeScientificCandleCache(
+            historical=LocalCandleCache(self._cache_dir),
+            live=self._live_candles,
+            as_of=as_of or datetime.now(timezone.utc),
+        )
+
+    def dataset_fingerprint(self, *, as_of: datetime | None = None) -> str:
+        candle_cache = self._candle_cache(as_of)
+        fingerprint = candle_cache.describe().dataset_fingerprint
+        if self._live_candles is not None and as_of is not None:
+            cutoff = as_of.astimezone(timezone.utc)
+            with self._prepared_cache_lock:
+                self._prepared_caches[cutoff] = candle_cache
+                self._prepared_caches.move_to_end(cutoff)
+                while len(self._prepared_caches) > PREPARED_CANDLE_CACHE_LIMIT:
+                    self._prepared_caches.popitem(last=False)
+        return fingerprint
+
+    def _execution_candle_cache(
+        self,
+        as_of: datetime | None,
+    ) -> HistoricalCandleCachePort:
+        if self._live_candles is None or as_of is None:
+            return self._candle_cache(as_of)
+        cutoff = as_of.astimezone(timezone.utc)
+        with self._prepared_cache_lock:
+            prepared = self._prepared_caches.pop(cutoff, None)
+        return prepared if prepared is not None else self._candle_cache(cutoff)
+
+    def readiness(self) -> tuple[bool, str | None]:
+        try:
+            descriptor = self._descriptor_cache.describe()
+            if descriptor.partition_count <= 0:
+                return False, "candle cache is empty"
+            self._artifact_root.mkdir(parents=True, exist_ok=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return False, str(exc)
+        return True, None
+
+    def execute(
+        self,
+        request: StartReplayRequest,
+        *,
+        run_fingerprint: str,
+        dataset_as_of: datetime | None = None,
+        progress: ReplayProgressReporter | None = None,
+    ) -> Mapping[str, Any]:
+        total_units = _progress_total(request)
+        _report_progress(progress, "preparing_data", 0, total_units)
+        candle_cache = self._execution_candle_cache(dataset_as_of)
+        materialize = getattr(
+            candle_cache,
+            "materialize_ticker_partitions",
+            None,
+        )
+        if callable(materialize):
+            materialize(self._artifact_root / ".replay-working")
+            # Materialisation decodes every live JSON row once, but retains
+            # only private disk partitions.  CPython/glibc can otherwise keep
+            # that transient high-water mark mapped until a later model adds
+            # its own graph and crosses the container memory limit.
+            self._memory_reclaimer()
+        try:
+            return self._execute_materialized(
+                request,
+                run_fingerprint=run_fingerprint,
+                candle_cache=candle_cache,
+                progress=progress,
+            )
+        finally:
+            close_materialized = getattr(
+                candle_cache,
+                "close_materialized_partitions",
+                None,
+            )
+            if callable(close_materialized):
+                close_materialized()
+            self._memory_reclaimer()
+
+    def _execute_materialized(
+        self,
+        request: StartReplayRequest,
+        *,
+        run_fingerprint: str,
+        candle_cache: HistoricalCandleCachePort,
+        progress: ReplayProgressReporter | None = None,
+    ) -> Mapping[str, Any]:
+        engines: list[Mapping[str, Any]] = []
+        evidence: list[Mapping[str, Any]] = []
+        derived_evidence: list[Mapping[str, Any]] = []
+        generated_at = _now()
+        total_units = _progress_total(request)
+        completed_units = 0
+        requested_general = tuple(
+            HypothesisId(value)
+            for value in request.hypothesis_ids
+            if value in GENERAL_HYPOTHESES
+        )
+        if requested_general:
+            _report_progress(
+                progress,
+                "general_hypotheses",
+                completed_units,
+                total_units,
+                requested_general[0].value,
+            )
+            executed_general = tuple(
+                HypothesisId(value) for value in sorted(GENERAL_HYPOTHESES)
+            )
+            execution = RunHistoricalHypothesisReplay(
+                cache=candle_cache,
+                artifacts=ImmutableReplayArtifactStore(
+                    self._artifact_root / "h1-h2-h5-h6-h7"
+                ),
+            ).execute(
+                HistoricalReplayRequest(
+                    selected_hypotheses=executed_general,
+                    cost_model=ReplayCostModel(
+                        version=request.cost_model.version,
+                        commission_bps=request.cost_model.commission_bps,
+                        slippage_bps=request.cost_model.slippage_bps,
+                        half_spread_entry_bps=request.cost_model.entry_half_spread_bps,
+                        half_spread_exit_bps=request.cost_model.exit_half_spread_bps,
+                    ),
+                    liquid_universe=request.liquid_universe,
+                    resume=request.resume,
+                )
+            )
+            engines.append(
+                {
+                    "engine": "scientific_candle_replay",
+                    "hypothesis_ids": tuple(item.value for item in requested_general),
+                    "requested_hypothesis_ids": tuple(
+                        item.value for item in requested_general
+                    ),
+                    "executed_hypothesis_ids": tuple(
+                        item.value for item in executed_general
+                    ),
+                    "application_run_id": execution.completion.run_id,
+                    "artifact_fingerprint": execution.completion.artifact_fingerprint,
+                    "artifact_uri": str(
+                        (
+                            self._artifact_root
+                            / "h1-h2-h5-h6-h7"
+                            / execution.completion.run_id.removeprefix("sha256:")
+                        ).resolve()
+                    ),
+                    "resumed": execution.completion.resumed,
+                }
+            )
+            evidence.extend(
+                self._evidence_reader.read_general(
+                    engines[-1]["artifact_uri"],
+                    tuple(item.value for item in requested_general),
+                    generated_at=generated_at,
+                )
+            )
+            del execution
+            self._memory_reclaimer()
+            completed_units += len(requested_general)
+        if set(request.hypothesis_ids) & JUMP_HYPOTHESES:
+            requested_jump = tuple(
+                sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)
+            )
+            _report_progress(
+                progress,
+                "jump_hypotheses",
+                completed_units,
+                total_units,
+                requested_jump[0],
+            )
+            jump = RunJumpActivityReplay(
+                candle_cache=ParquetCandleCacheAdapter(self._cache_dir),
+                artifacts=JsonJumpReplayArtifactAdapter(self._artifact_root / "h3-h4"),
+            ).execute(
+                policy=JumpReplayPolicy(
+                    cost_model=CostModel(
+                        version=request.cost_model.version,
+                        round_trip_bps=request.cost_model.round_trip_bps,
+                    )
+                ),
+                tickers=request.tickers or None,
+            )
+            engines.append(
+                {
+                    "engine": "jump_activity_replay",
+                    "hypothesis_ids": tuple(
+                        sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)
+                    ),
+                    "application_run_id": jump.run_id,
+                    "artifact_uri": jump.artifact_uri,
+                    "resumed": jump.reused,
+                }
+            )
+            evidence.extend(
+                self._evidence_reader.read_jump(
+                    jump.artifact_uri,
+                    tuple(sorted(set(request.hypothesis_ids) & JUMP_HYPOTHESES)),
+                    generated_at=generated_at,
+                )
+            )
+            del jump
+            self._memory_reclaimer()
+            completed_units += len(requested_jump)
+        requested_r2 = tuple(
+            R2ExtensionHypothesis(item)
+            for item in request.hypothesis_ids
+            if item in R2_EXTENSION_HYPOTHESES
+        )
+        if requested_r2:
+            _report_progress(
+                progress,
+                "relative_value_hypotheses",
+                completed_units,
+                total_units,
+                requested_r2[0].value,
+            )
+            r2_report = BuildR2ExtensionReplay(candle_cache).execute(
+                R2ExtensionRequest(
+                    selected_hypotheses=requested_r2,
+                    market_universe=request.liquid_universe,
+                    target_universe=request.tickers or request.liquid_universe,
+                    observed_exchange_open_is_schedule_evidence=True,
+                    policy=R2ExtensionPolicy(
+                        cost_model_version=request.cost_model.version,
+                        round_trip_cost_bps=request.cost_model.round_trip_bps,
+                    ),
+                )
+            )
+            r2_artifact = self._r2_artifacts.save(
+                r2_report,
+                requested_r2,
+                cost_model_version=request.cost_model.version,
+                blocking_reason_codes=("independent_evidence_gate_unavailable",),
+            )
+            engines.append(
+                {
+                    "engine": "causal_h10_h11_r2_replay",
+                    "hypothesis_ids": tuple(item.value for item in requested_r2),
+                    "application_run_id": r2_report.report_fingerprint,
+                    "artifact_fingerprint": r2_artifact.artifact_fingerprint,
+                    "artifact_uri": r2_artifact.artifact_uri,
+                    "resumed": False,
+                    "evidence_state": next(
+                        (
+                            item.get("decision", "blocked_by_data")
+                            for item in r2_artifact.evidence
+                            if item["hypothesis_id"]
+                            == R2ExtensionHypothesis.OPENING_GAP_REVERSION.value
+                        ),
+                        "blocked_by_data",
+                    ),
+                }
+            )
+            evidence.extend(r2_artifact.evidence)
+            del r2_artifact, r2_report
+            self._memory_reclaimer()
+            completed_units += len(requested_r2)
+        requested_scientific = tuple(
+            ScientificCandleHypothesis(item)
+            for item in request.hypothesis_ids
+            if item in SCIENTIFIC_CANDLE_HYPOTHESES
+        )
+        if requested_scientific:
+            _report_progress(
+                progress,
+                "scientific_hypotheses",
+                completed_units,
+                total_units,
+                requested_scientific[0].value,
+            )
+            report = BuildScientificCandleModelResearch(candle_cache).execute(
+                ScientificCandleResearchRequest(
+                    selected_hypotheses=requested_scientific,
+                    market_universe=request.liquid_universe,
+                    policy=ScientificCandlePolicy(
+                        round_trip_cost_bps=request.cost_model.round_trip_bps
+                    ),
+                )
+            )
+            artifact = self._scientific_artifacts.save(
+                report,
+                requested_scientific,
+                cost_model_version=request.cost_model.version,
+            )
+            engines.append(
+                {
+                    "engine": "next_scientific_candle_replay",
+                    "hypothesis_ids": tuple(
+                        item.value for item in requested_scientific
+                    ),
+                    "application_run_id": report.report_fingerprint,
+                    "artifact_fingerprint": artifact.artifact_fingerprint,
+                    "artifact_uri": artifact.artifact_uri,
+                    "resumed": False,
+                }
+            )
+            evidence.extend(artifact.evidence)
+            del artifact, report
+            self._memory_reclaimer()
+            completed_units += len(requested_scientific)
+        requested_prospective = tuple(
+            ProspectiveHypothesis(item)
+            for item in request.hypothesis_ids
+            if item in PROSPECTIVE_SCIENTIFIC_HYPOTHESES
+        )
+        if requested_prospective:
+            descriptor = candle_cache.describe()
+            policy = ProspectiveScientificPolicy(
+                round_trip_cost_bps=request.cost_model.round_trip_bps
+            )
+            partitioned = callable(
+                getattr(candle_cache, "iter_ticker_partitions", None)
+            )
+            candles = None if partitioned else candle_cache.load()
+
+            def build_one(
+                hypothesis: ProspectiveHypothesis,
+            ) -> Any:
+                scientific_request = ProspectiveScientificRequest(
+                    selected_hypotheses=(hypothesis,),
+                    policy=policy,
+                )
+                if partitioned:
+                    return build_partitioned_prospective_scientific_research(
+                        candle_cache,  # type: ignore[arg-type]
+                        dataset_fingerprint=descriptor.dataset_fingerprint,
+                        request=scientific_request,
+                    )
+                assert candles is not None
+                return build_prospective_scientific_research(
+                    candles,
+                    dataset_fingerprint=descriptor.dataset_fingerprint,
+                    request=scientific_request,
+                )
+
+            combinations_enabled = COMBINATION_SOURCE_IDS <= set(request.hypothesis_ids)
+            combination_source = (
+                FileProspectiveScientificPartitionStage(
+                    self._artifact_root
+                    / "scientific-combinations"
+                    / "source"
+                    / run_fingerprint.removeprefix("sha256:")
+                )
+                if combinations_enabled
+                else None
+            )
+
+            bounded_hypotheses = INDEPENDENT_PARTITIONED_HYPOTHESES
+            bounded_split = (
+                partitioned_prospective_split(candle_cache)  # type: ignore[arg-type]
+                if partitioned
+                and any(item in bounded_hypotheses for item in requested_prospective)
+                else None
+            )
+            prepared_replays = []
+            for hypothesis in requested_prospective:
+                _report_progress(
+                    progress,
+                    "prospective_hypotheses",
+                    completed_units,
+                    total_units,
+                    hypothesis.value,
+                )
+                if partitioned and hypothesis in bounded_hypotheses:
+                    scientific_request = ProspectiveScientificRequest(
+                        selected_hypotheses=(hypothesis,),
+                        policy=policy,
+                    )
+                    assert bounded_split is not None
+                    split = bounded_split
+                    spool_root = (
+                        self._artifact_root
+                        / "prospective-spool"
+                        / run_fingerprint.removeprefix("sha256:")
+                        / hypothesis.value
+                    )
+                    with FileProspectiveScientificRowSpool(spool_root) as spool:
+                        for (
+                            row_partition
+                        ) in iter_independent_prospective_row_partitions(
+                            candle_cache,  # type: ignore[arg-type]
+                            request=scientific_request,
+                        ):
+                            spool.stage_partition(row_partition)
+                        report_fingerprint = prospective_report_fingerprint_from_rows(
+                            dataset_fingerprint=descriptor.dataset_fingerprint,
+                            request=scientific_request,
+                            rows=spool.iter_rows,
+                        )
+                        if (
+                            combination_source is not None
+                            and hypothesis in COMBINATION_SOURCE_HYPOTHESES
+                        ):
+                            combination_source.stage_rows(
+                                dataset_fingerprint=descriptor.dataset_fingerprint,
+                                report_fingerprint=report_fingerprint,
+                                split=split,
+                                policy=policy,
+                                hypothesis=hypothesis,
+                                cost_model_version=request.cost_model.version,
+                                rows=spool.iter_rows(),
+                            )
+                        latest_target_at = spool.latest_target_at
+                        generated_at = (
+                            latest_target_at.isoformat()
+                            if latest_target_at is not None
+                            else datetime.combine(
+                                max(split.holdout_days),
+                                datetime.min.time(),
+                                tzinfo=timezone.utc,
+                            ).isoformat()
+                        )
+                        prepare_replayable = getattr(
+                            self._prospective_artifacts,
+                            "prepare_replayable_rows",
+                            None,
+                        )
+                        prepared_replays.append(
+                            prepare_replayable(
+                                spool.iter_rows,
+                                hypothesis=hypothesis,
+                                dataset_fingerprint=descriptor.dataset_fingerprint,
+                                report_fingerprint=report_fingerprint,
+                                split=split,
+                                policy=policy,
+                                generated_at=generated_at,
+                                cost_model_version=request.cost_model.version,
+                            )
+                            if callable(prepare_replayable)
+                            else self._prospective_artifacts.prepare_rows(
+                                spool.iter_rows(),
+                                hypothesis=hypothesis,
+                                dataset_fingerprint=descriptor.dataset_fingerprint,
+                                report_fingerprint=report_fingerprint,
+                                split=split,
+                                policy=policy,
+                                generated_at=generated_at,
+                                cost_model_version=request.cost_model.version,
+                            )
+                        )
+                    self._memory_reclaimer()
+                    completed_units += 1
+                    continue
+
+                report = build_one(hypothesis)
+                if (
+                    combination_source is not None
+                    and hypothesis in COMBINATION_SOURCE_HYPOTHESES
+                ):
+                    combination_source.stage(
+                        report,
+                        cost_model_version=request.cost_model.version,
+                    )
+                prepare_report = getattr(
+                    self._prospective_artifacts, "prepare_report", None
+                )
+                prepared_replays.append(
+                    prepare_report(
+                        report,
+                        hypothesis,
+                        cost_model_version=request.cost_model.version,
+                    )
+                    if callable(prepare_report)
+                    else report
+                )
+                if callable(prepare_report):
+                    del report
+                self._memory_reclaimer()
+                completed_units += 1
+
+            save_prepared = getattr(
+                self._prospective_artifacts, "save_prepared_portfolio", None
+            )
+            artifact = (
+                save_prepared(
+                    prepared_replays,
+                    requested_prospective,
+                    cost_model_version=request.cost_model.version,
+                )
+                if callable(save_prepared)
+                else self._prospective_artifacts.save_portfolio(
+                    iter(prepared_replays),
+                    requested_prospective,
+                    cost_model_version=request.cost_model.version,
+                )
+            )
+            engines.append(
+                {
+                    "engine": "prospective_scientific_replay",
+                    "hypothesis_ids": tuple(
+                        item.value for item in requested_prospective
+                    ),
+                    "application_run_id": artifact.artifact_fingerprint,
+                    "artifact_fingerprint": artifact.artifact_fingerprint,
+                    "artifact_uri": artifact.artifact_uri,
+                    "resumed": False,
+                }
+            )
+            evidence.extend(artifact.evidence)
+            del prepared_replays
+            self._memory_reclaimer()
+            if combination_source is not None:
+                _report_progress(
+                    progress,
+                    "combination_hypotheses",
+                    completed_units,
+                    total_units,
+                )
+                # H1/H2 have a legacy product evidence path, but C3 requires
+                # their causal prospective observations.  Build and release
+                # them one at a time after the main evidence adapter has
+                # already discarded every requested report graph.
+                for hypothesis in (
+                    ProspectiveHypothesis.MORNING_LOW_VOLUME_REVERSION,
+                    ProspectiveHypothesis.MORNING_HIGH_VOLUME_CONTINUATION,
+                ):
+                    if hypothesis in requested_prospective:
+                        continue
+                    combination_report = build_one(hypothesis)
+                    combination_source.stage(
+                        combination_report,
+                        cost_model_version=request.cost_model.version,
+                    )
+                    del combination_report
+                    self._memory_reclaimer()
+                combination_completion = EvaluateScientificCombinationPartitions(
+                    artifacts=FileScientificCombinationStreamingArtifacts(
+                        self._artifact_root / "scientific-combinations" / "evidence"
+                    )
+                ).execute(
+                    combination_source,
+                    cost_model_version=request.cost_model.version,
+                )
+                engines.append(
+                    {
+                        "engine": "scientific_combination_evidence",
+                        "combination_ids": tuple(
+                            item.value for item in ScientificCombinationId
+                        ),
+                        "application_run_id": combination_completion.run_id,
+                        "artifact_fingerprint": (
+                            combination_completion.artifact.artifact_fingerprint
+                        ),
+                        "artifact_uri": combination_completion.artifact.artifact_uri,
+                        "partition_count": combination_completion.partition_count,
+                        "observation_count": combination_completion.observation_count,
+                        "result_count": combination_completion.result_count,
+                        "resumed": combination_completion.resumed,
+                    }
+                )
+                derived_evidence.extend(
+                    DerivedReplayEvidenceResponse.model_validate(
+                        asdict(item)
+                    ).model_dump(mode="json")
+                    for item in self._derived_combination_evidence.execute(
+                        combination_completion.artifact.artifact_uri,
+                        expected_artifact_fingerprint=(
+                            combination_completion.artifact.artifact_fingerprint
+                        ),
+                        generated_at=datetime.fromisoformat(generated_at),
+                    )
+                )
+                del combination_completion
+                self._memory_reclaimer()
+        requested_orderbook = tuple(
+            item for item in request.hypothesis_ids if item in ORDERBOOK_HYPOTHESES
+        )
+        if requested_orderbook:
+            _report_progress(
+                progress,
+                "orderbook_hypotheses",
+                completed_units,
+                total_units,
+                requested_orderbook[0],
+            )
+            engines.append(
+                {
+                    "engine": "live_orderbook_replay",
+                    "hypothesis_ids": requested_orderbook,
+                    "availability": "requires_live_orderbook",
+                    "resumed": False,
+                }
+            )
+            evidence.extend(
+                _blocked_orderbook_evidence(
+                    hypothesis_id,
+                    dataset_fingerprint=candle_cache.describe().dataset_fingerprint,
+                    cost_model_version=request.cost_model.version,
+                    generated_at=generated_at,
+                )
+                for hypothesis_id in requested_orderbook
+            )
+            completed_units += len(requested_orderbook)
+        ordered = tuple(sorted(evidence, key=lambda item: str(item["hypothesis_id"])))
+        if tuple(item["hypothesis_id"] for item in ordered) != request.hypothesis_ids:
+            raise ValueError(
+                "replay must produce exactly one evidence row per hypothesis"
+            )
+        _report_progress(
+            progress,
+            "finalizing",
+            total_units,
+            total_units,
+        )
+        return {
+            "run_fingerprint": run_fingerprint,
+            "engines": tuple(engines),
+            "evidence": ordered,
+            "derived_evidence": tuple(derived_evidence),
+        }
+
+
+def _blocked_orderbook_evidence(
+    hypothesis_id: str,
+    *,
+    dataset_fingerprint: str,
+    cost_model_version: str,
+    generated_at: str,
+) -> Mapping[str, Any]:
+    definition = scientific_replay_definition(hypothesis_id)
+    formula_fingerprint = scientific_replay_formula_fingerprint(hypothesis_id)
+    return {
+        "hypothesis_id": hypothesis_id,
+        "catalog_hypothesis_id": definition.catalog_hypothesis_id,
+        "expected_direction": definition.expected_direction,
+        "market_phase": definition.market_phase,
+        "source_data_state": ReplaySourceDataState.REQUIRES_LIVE_ORDERBOOK.value,
+        "decision": "blocked_by_data",
+        "reason_codes": ("requires_live_orderbook",),
+        "independent_validation": False,
+        "cost_adjusted": False,
+        "sample_count": 0,
+        "trading_days": 0,
+        "generated_at": generated_at,
+        "artifact_fingerprint": formula_fingerprint,
+        "dataset_fingerprint": dataset_fingerprint,
+        "formula_fingerprint": formula_fingerprint,
+        "cost_model_version": cost_model_version,
+        "primary_metric_value": None,
+        "matched_control_lift_ci95_lower": None,
+        "matched_control_lift_ci95_upper": None,
+        "matched_controls": 0,
+        "controls_per_event": 5,
+        "adjusted_p_value": None,
+        "stable_blocks": 0,
+        "total_blocks": 0,
+        "maximum_ticker_share": None,
+        "maximum_period_share": None,
+        "abstention_rate": None,
+        "horizons": tuple(
+            {
+                "horizon_seconds": horizon,
+                "evidence_scope": "not_evaluated",
+                "source_data_state": (
+                    ReplaySourceDataState.REQUIRES_LIVE_ORDERBOOK.value
+                ),
+                "decision": "blocked_by_data",
+                "sample_count": 0,
+                "primary_metric_value": None,
+            }
+            for horizon in definition.horizons_seconds
+        ),
+    }
+
+
+def create_app(
+    *,
+    manager: ReplayJobManager,
+    close_manager: bool = False,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        manager.recover()
+        yield
+        if close_manager:
+            manager.close()
+
+    app = FastAPI(
+        title="Investment Signals hypothesis replay (internal)",
+        version="1.0.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+
+    @app.get("/health", include_in_schema=False)
+    def health() -> Mapping[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/ready", include_in_schema=False)
+    def ready(response: Response) -> Mapping[str, str]:
+        is_ready, reason = manager.readiness()
+        if not is_ready:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return {"status": "not_ready", "reason": reason or "unknown"}
+        return {"status": "ready"}
+
+    @app.get(
+        "/internal/v1/hypothesis-replays/retention",
+        include_in_schema=False,
+    )
+    def retention_status() -> Mapping[str, Any]:
+        return manager.retention_status()
+
+    @app.post(
+        "/internal/v1/hypothesis-replays/retention",
+        include_in_schema=False,
+    )
+    def run_retention() -> Mapping[str, Any]:
+        return manager.run_retention()
+
+    @app.post(
+        "/internal/v1/hypothesis-replays",
+        response_model=ReplayAcceptedResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_replay(
+        payload: StartReplayRequest,
+        idempotency_key: str = Header(
+            alias="Idempotency-Key", min_length=1, max_length=256
+        ),
+    ) -> ReplayAcceptedResponse:
+        try:
+            submission = manager.submit(payload, idempotency_key)
+        except IdempotencyConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "idempotency_key_conflict"},
+            ) from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "replay_submission_rejected", "message": str(exc)},
+            ) from exc
+        record = submission.record
+        job_id = str(record["job_id"])
+        return ReplayAcceptedResponse(
+            job_id=job_id,
+            status=str(record["status"]),  # type: ignore[arg-type]
+            idempotency_key_hash=str(record["idempotency_key_hash"]),
+            run_fingerprint=str(record["run_fingerprint"]),
+            status_url=f"/internal/v1/hypothesis-replays/{job_id}",
+            result_url=f"/internal/v1/hypothesis-replays/{job_id}/result",
+            reused=submission.reused,
+        )
+
+    @app.get(
+        "/internal/v1/hypothesis-replays/{job_id}",
+        response_model=ReplayStatusResponse,
+    )
+    def replay_status(job_id: str) -> ReplayStatusResponse:
+        try:
+            record = manager.status(job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return _status_response(record)
+
+    @app.get(
+        "/internal/v1/hypothesis-replays/{job_id}/result",
+        response_model=ReplayResultResponse | ReplayStatusResponse,
+    )
+    def replay_result(job_id: str, response: Response) -> Any:
+        try:
+            record = manager.status(job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if record["status"] == "failed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "replay_failed", "error": record.get("error")},
+            )
+        result = manager.result(job_id)
+        if record["status"] != "completed" or result is None:
+            response.status_code = status.HTTP_202_ACCEPTED
+            return _status_response(record)
+        return ReplayResultResponse.model_validate(result)
+
+    return app
+
+
+def build_app(
+    *,
+    cache_dir: Path,
+    state_dir: Path,
+    artifact_dir: Path,
+    clickhouse_url: str | None = None,
+    clickhouse_database: str = "signal_engine",
+    clickhouse_username: str = "investment_signals",
+    clickhouse_password_file: Path | None = None,
+    clickhouse_timeout_seconds: float = 300.0,
+) -> FastAPI:
+    live_candles: VersionedScientificCandleSource | None = None
+    if clickhouse_url:
+        if clickhouse_password_file is None:
+            raise ValueError(
+                "clickhouse_password_file is required when ClickHouse live candles are enabled"
+            )
+        live_candles = ClickHouseScientificCandleSource(
+            base_url=clickhouse_url,
+            database=clickhouse_database,
+            username=clickhouse_username,
+            password=clickhouse_password_file.read_text(encoding="utf-8").strip(),
+            timeout_seconds=clickhouse_timeout_seconds,
+        )
+    manager = ReplayJobManager(
+        runner=LocalHypothesisPortfolioRunner(
+            cache_dir=cache_dir,
+            artifact_root=artifact_dir,
+            live_candles=live_candles,
+        ),
+        store=LocalReplayJobStore(state_dir),
+        retention=LocalReplayArtifactRetention(
+            state_root=state_dir,
+            artifact_root=artifact_dir,
+        ),
+        maintenance_interval_seconds=900,
+    )
+    return create_app(manager=manager, close_manager=True)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Internal API for local scientific hypothesis replay",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("var/research/tinvest_candles/v1"),
+    )
+    parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path("var/research/hypothesis-replay-api/jobs"),
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=Path("var/research/hypothesis-replay-api/artifacts"),
+    )
+    parser.add_argument(
+        "--host",
+        choices=("127.0.0.1", "0.0.0.0"),
+        default="127.0.0.1",
+    )
+    parser.add_argument("--port", type=int, default=18181)
+    parser.add_argument("--clickhouse-url")
+    parser.add_argument("--clickhouse-database", default="signal_engine")
+    parser.add_argument("--clickhouse-username", default="investment_signals")
+    parser.add_argument("--clickhouse-password-file", type=Path)
+    parser.add_argument("--clickhouse-timeout-seconds", type=float, default=300.0)
+    args = parser.parse_args(argv)
+    import uvicorn
+
+    uvicorn.run(
+        build_app(
+            cache_dir=args.cache_dir,
+            state_dir=args.state_dir,
+            artifact_dir=args.artifact_dir,
+            clickhouse_url=args.clickhouse_url,
+            clickhouse_database=args.clickhouse_database,
+            clickhouse_username=args.clickhouse_username,
+            clickhouse_password_file=args.clickhouse_password_file,
+            clickhouse_timeout_seconds=args.clickhouse_timeout_seconds,
+        ),
+        host=args.host,
+        port=args.port,
+    )
+    return 0
+
+
+def _status_response(record: Mapping[str, Any]) -> ReplayStatusResponse:
+    request = StartReplayRequest.model_validate(record["request"])
+    return ReplayStatusResponse(
+        job_id=str(record["job_id"]),
+        status=str(record["status"]),  # type: ignore[arg-type]
+        run_fingerprint=str(record["run_fingerprint"]),
+        hypothesis_ids=request.hypothesis_ids,
+        created_at=str(record["created_at"]),
+        updated_at=str(record["updated_at"]),
+        started_at=_optional_string(record.get("started_at")),
+        finished_at=_optional_string(record.get("finished_at")),
+        attempt=int(record["attempt"]),
+        recovered_after_restart=bool(record.get("recovered_after_restart", False)),
+        error=record.get("error"),
+        progress=ReplayProgressResponse.model_validate(
+            _record_progress_payload(record)
+        ),
+    )
+
+
+def _optional_string(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _progress_total(request: StartReplayRequest) -> int:
+    return max(1, len(request.hypothesis_ids))
+
+
+def _initial_progress(request: StartReplayRequest) -> dict[str, Any]:
+    return _progress_payload(
+        "queued",
+        completed_units=0,
+        total_units=_progress_total(request),
+    )
+
+
+def _record_progress_payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    progress = record.get("progress")
+    if isinstance(progress, Mapping):
+        return progress
+    request = StartReplayRequest.model_validate(record["request"])
+    phase = "completed" if record.get("status") == "completed" else "queued"
+    completed = _progress_total(request) if phase == "completed" else 0
+    return _progress_payload(
+        phase,
+        completed_units=completed,
+        total_units=_progress_total(request),
+        updated_at=str(record.get("updated_at", _now())),
+    )
+
+
+def _progress_payload(
+    phase: str,
+    *,
+    completed_units: int,
+    total_units: int,
+    current_hypothesis_id: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "completed_units": max(0, min(completed_units, total_units)),
+        "total_units": max(1, total_units),
+        "current_hypothesis_id": current_hypothesis_id,
+        "updated_at": updated_at or _now(),
+    }
+
+
+def _report_progress(
+    reporter: ReplayProgressReporter | None,
+    phase: str,
+    completed_units: int,
+    total_units: int,
+    current_hypothesis_id: str | None = None,
+) -> None:
+    if reporter is not None:
+        reporter(
+            phase,
+            completed_units,
+            total_units,
+            current_hypothesis_id,
+        )
+
+
+def _reclaim_replay_memory() -> None:
+    """Return transient replay allocations to the container when possible.
+
+    Candle decoding and model construction create large, short-lived object
+    graphs.  They are no longer reachable at the boundaries where this helper
+    is called, but glibc may retain their free arenas and make the next model
+    appear additive to the cgroup.  Collection releases Python cycles;
+    ``malloc_trim`` then returns completely free glibc pages to the kernel.
+    Other C libraries and operating systems safely keep the collection-only
+    behaviour.
+    """
+
+    gc.collect()
+    try:
+        process = ctypes.CDLL(None)
+        malloc_trim = getattr(process, "malloc_trim")
+    except (AttributeError, OSError):
+        return
+    malloc_trim.argtypes = (ctypes.c_size_t,)
+    malloc_trim.restype = ctypes.c_int
+    malloc_trim(0)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _fingerprint(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _request_key(value: object) -> str:
+    if not isinstance(value, Mapping):
+        raise ValueError("replay request must be an object")
+    return _fingerprint(value)
+
+
+def _read_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON object expected: {path}")
+    return payload
+
+
+def _atomic_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid4().hex}")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -133,7 +133,15 @@ class PostgresSignalStore:
                 z_score,
                 window_seconds,
                 summary,
-                payload_json
+                payload_json,
+                source_event_id,
+                source_event_at,
+                signal_schema_version,
+                expectation_catalog_version,
+                detector_config_version,
+                delivery_config_version,
+                cost_model_version,
+                provenance_status
             ) VALUES (
                 %(signal_id)s,
                 %(detected_at)s,
@@ -149,8 +157,17 @@ class PostgresSignalStore:
                 %(z_score)s,
                 %(window_seconds)s,
                 %(summary)s,
-                %(payload_json)s::jsonb
+                %(payload_json)s::jsonb,
+                %(source_event_id)s,
+                %(source_event_at)s,
+                %(signal_schema_version)s,
+                %(expectation_catalog_version)s,
+                %(detector_config_version)s,
+                %(delivery_config_version)s,
+                %(cost_model_version)s,
+                %(provenance_status)s
             )
+            ON CONFLICT (signal_id) DO NOTHING
         """
         with self._cursor() as cursor:
             cursor.execute(
@@ -171,6 +188,16 @@ class PostgresSignalStore:
                     "window_seconds": signal.window_seconds,
                     "summary": signal.summary,
                     "payload_json": json_dumps(signal.payload),
+                    "source_event_id": signal.source_event_id,
+                    "source_event_at": signal.source_event_at,
+                    "signal_schema_version": signal.signal_schema_version,
+                    "expectation_catalog_version": (
+                        signal.expectation_catalog_version
+                    ),
+                    "detector_config_version": signal.detector_config_version,
+                    "delivery_config_version": signal.delivery_config_version,
+                    "cost_model_version": signal.cost_model_version,
+                    "provenance_status": signal.provenance_status,
                 },
             )
 
@@ -227,7 +254,15 @@ class PostgresSignalStore:
                 z_score,
                 window_seconds,
                 summary,
-                payload_json
+                payload_json,
+                source_event_id,
+                source_event_at,
+                signal_schema_version,
+                expectation_catalog_version,
+                detector_config_version,
+                delivery_config_version,
+                cost_model_version,
+                provenance_status
             FROM {self._table_name}
             {filter_clause}
             ORDER BY detected_at DESC
@@ -253,6 +288,20 @@ class PostgresSignalStore:
                 "window_seconds": row["window_seconds"],
                 "summary": row["summary"],
                 "payload": row["payload_json"],
+                "source_event_id": row["source_event_id"],
+                "source_event_at": (
+                    row["source_event_at"].isoformat()
+                    if row["source_event_at"] is not None
+                    else None
+                ),
+                "signal_schema_version": row["signal_schema_version"],
+                "expectation_catalog_version": row[
+                    "expectation_catalog_version"
+                ],
+                "detector_config_version": row["detector_config_version"],
+                "delivery_config_version": row["delivery_config_version"],
+                "cost_model_version": row["cost_model_version"],
+                "provenance_status": row["provenance_status"],
             }
             for row in rows
         ]
@@ -1161,7 +1210,11 @@ class WebhookAlertSink:
     def send(self, signal: TriggerSignal) -> None:
         if not self._webhook_url or self._client is None:
             return
-        self._client.post(self._webhook_url, json=_webhook_payload(signal))
+        response = self._client.post(
+            self._webhook_url,
+            json=_webhook_payload(signal),
+        )
+        response.raise_for_status()
 
     def close(self) -> None:
         if self._client is not None:
@@ -1175,14 +1228,13 @@ class TelegramAlertSink:
         bot_token: str | None,
         chat_id: str | None,
         message_thread_id: int | None = None,
+        client: Any | None = None,
     ):
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._message_thread_id = message_thread_id
         self._client = (
-            httpx.Client(timeout=5.0)
-            if self.enabled
-            else None
+            (client or httpx.Client(timeout=5.0)) if self.enabled else None
         )
 
     @property
@@ -1192,11 +1244,11 @@ class TelegramAlertSink:
     def send(self, signal: TriggerSignal) -> None:
         if self._client is None or not self._bot_token or not self._chat_id:
             return
+        # Формируем представление в момент отправки. Так очередь, созданная старой
+        # версией детектора, не протащит в Telegram устаревший многословный шаблон.
+        signal = enrich_signal_for_delivery(signal)
         p = signal.payload or {}
         tg = p.get("telegram_html")
-        if not (isinstance(tg, str) and tg.strip()):
-            signal = enrich_signal_for_delivery(signal)
-            tg = (signal.payload or {}).get("telegram_html")
         text = (
             tg
             if isinstance(tg, str) and tg.strip()

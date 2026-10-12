@@ -29,7 +29,7 @@ instruments:
       # Глубина стакана: число уровней с каждой стороны; пусто/null — не подписываться на стакан.
       order_book_depth: 50
       # Свечи (если true — указать candle_interval).
-      candles: false
+      candles: true
       candle_interval: 1m
 
   - ticker: GAZP
@@ -40,7 +40,7 @@ instruments:
       last_price: true
       info: false
       order_book_depth: 10
-      candles: false
+      candles: true
       candle_interval: 1m
 
   - ticker: LKOH
@@ -51,7 +51,7 @@ instruments:
       last_price: true
       info: false
       order_book_depth: 10
-      candles: false
+      candles: true
       candle_interval: 1m
 
   # --- RU equities: liquid / high-attention core (TQBR) ---
@@ -64,7 +64,7 @@ instruments:
       last_price: true
       info: false
       order_book_depth: 10
-      candles: false
+      candles: true
       candle_interval: 1m
 
   - ticker: VTBR
@@ -318,9 +318,9 @@ instruments:
     alias: seligdar
     subscriptions: *ru_equity_watch_subscriptions
 
-  # >>> FUTURES_NEAREST_BEGIN (python scripts/resolve_nearest_futures.py --write)
-  # Ближайшие контракты по дате экспирации (см. скрипт).
-  - ticker: BRM6
+  # >>> FUTURES_NEAREST_BEGIN (managed by tinvest-refresh-futures)
+  # Generated from conf/futures_universe.yaml; do not edit this block manually.
+  - ticker: BMX6
     class_code: SPBFUT
     alias: brent_oil
     subscriptions:
@@ -330,7 +330,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: GDM6
+  - ticker: GDZ6
     class_code: SPBFUT
     alias: gold
     subscriptions:
@@ -340,7 +340,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: SVM6
+  - ticker: SVZ6
     class_code: SPBFUT
     alias: silver
     subscriptions:
@@ -350,7 +350,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: SiM6
+  - ticker: SiZ6
     class_code: SPBFUT
     alias: usd_rub
     subscriptions:
@@ -360,7 +360,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: EuM6
+  - ticker: EuZ6
     class_code: SPBFUT
     alias: eur_rub
     subscriptions:
@@ -370,7 +370,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: CRM6
+  - ticker: CRZ6
     class_code: SPBFUT
     alias: cny_rub
     subscriptions:
@@ -380,7 +380,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: W4K6
+  - ticker: W4V6
     class_code: SPBFUT
     alias: wheat
     subscriptions:
@@ -390,7 +390,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: PDM6
+  - ticker: PDZ6
     class_code: SPBFUT
     alias: palladium
     subscriptions:
@@ -400,7 +400,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: PTM6
+  - ticker: PTZ6
     class_code: SPBFUT
     alias: platinum
     subscriptions:
@@ -410,7 +410,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: NGK6
+  - ticker: NGV6
     class_code: SPBFUT
     alias: nat_gas_us
     subscriptions:
@@ -420,7 +420,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: NAM6
+  - ticker: NAZ6
     class_code: SPBFUT
     alias: nasdaq100
     subscriptions:
@@ -430,7 +430,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: SRM6
+  - ticker: SRZ6
     class_code: SPBFUT
     alias: sber_fut
     subscriptions:
@@ -440,7 +440,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: GZM6
+  - ticker: GZZ6
     class_code: SPBFUT
     alias: gazp_fut
     subscriptions:
@@ -450,7 +450,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: GLM6
+  - ticker: GLZ6
     class_code: SPBFUT
     alias: gold_rub
     subscriptions:
@@ -460,7 +460,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: RIM6
+  - ticker: RIZ6
     class_code: SPBFUT
     alias: rts_index
     subscriptions:
@@ -470,7 +470,7 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: MXM6
+  - ticker: MXZ6
     class_code: SPBFUT
     alias: imoex
     subscriptions:

@@ -9,11 +9,62 @@ from typing import TYPE_CHECKING, Any
 from .serialization import parse_timestamp
 
 if TYPE_CHECKING:
-    from .detector_core import SignalDetector
+    from .detector_core import InstrumentState, SignalDetector
 
 _MID_TRACK_MAXLEN = 4000
 _ORDERBOOK_DEPTH_MAXLEN = 96
 _MICROBURST_MAXLEN = 512
+
+
+def export_instrument_state(
+    detector: SignalDetector,
+    instrument_id: str,
+) -> dict[str, Any]:
+    """Export one opaque state partition after processing its source event."""
+
+    state = detector._states[instrument_id]
+    payload = _serialize_instrument_state(state) or {}
+    payload["last_alert_at"] = {
+        key: value.isoformat() for key, value in state.last_alert_at.items()
+    }
+    mid_track = detector._mid_track.get(instrument_id, ())
+    return {
+        "instrument_id": instrument_id,
+        "state": payload,
+        "mid_track": [
+            [timestamp.isoformat(), float(price)] for timestamp, price in mid_track
+        ],
+    }
+
+
+def replace_instrument_states(
+    detector: SignalDetector,
+    payloads: list[dict[str, Any]],
+) -> None:
+    """Replace all in-memory partitions from the durable PostgreSQL snapshot set."""
+
+    detector._states.clear()
+    detector._mid_track.clear()
+    for payload in payloads:
+        instrument_id = payload.get("instrument_id")
+        state_payload = payload.get("state")
+        if not isinstance(instrument_id, str) or not isinstance(state_payload, dict):
+            raise ValueError("invalid detector state checkpoint payload")
+        state = _deserialize_instrument_state(state_payload)
+        for key, value in (state_payload.get("last_alert_at") or {}).items():
+            if isinstance(key, str) and isinstance(value, str):
+                state.last_alert_at[key] = parse_timestamp(value)
+        detector._states[instrument_id] = state
+        mid_track = payload.get("mid_track")
+        if not isinstance(mid_track, list):
+            raise ValueError("invalid detector mid-track checkpoint")
+        restored: deque[tuple[datetime, float]] = deque(maxlen=_MID_TRACK_MAXLEN)
+        for row in mid_track:
+            if not isinstance(row, list) or len(row) != 2:
+                raise ValueError("invalid detector mid-track row")
+            restored.append((parse_timestamp(str(row[0])), float(row[1])))
+        if restored:
+            detector._mid_track[instrument_id] = restored
 
 
 def export_window_state(detector: SignalDetector) -> dict[str, Any]:

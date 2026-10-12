@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import html
+from zoneinfo import ZoneInfo
 
 from .models import TriggerSignal
 from .signal_interpretation import build_signal_interpretation
 from .terminal_links import t_invest_web_terminal_url
 
+_MOSCOW = ZoneInfo("Europe/Moscow")
 _SIGNAL_TYPE_RU: dict[str, str] = {
     # Имена из detector_core.py и исторические алиасы
     "volume_spike": "Всплеск объёма",
@@ -33,6 +36,8 @@ _SIGNAL_TYPE_RU: dict[str, str] = {
     "price_near_limit_band": "Близко к лимиту цены дня",
     "open_interest_spike": "Всплеск открытого интереса",
     "candle_range_spike": "Широкий диапазон свечи",
+    "bond_maturity_convergence": "Схождение облигации к номиналу",
+    "morning_retracement_recommendation": "Вероятный утренний возврат цены",
 }
 
 
@@ -63,6 +68,16 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
     z = abs(float(signal.z_score))
     win = int(signal.window_seconds)
 
+    if st == "morning_retracement_recommendation":
+        direction = "вверх" if p.get("expected_direction") == "up" else "вниз"
+        probability = _percent_ru(p.get("model_probability"))
+        target = float(p.get("target_price") or 0.0)
+        deadline = _time_ru(p.get("deadline_at"))
+        return (
+            f"Модель оценивает вероятность возврата {direction} к уровню "
+            f"{target:g} в {probability}. Расчётный срок — не позже "
+            f"{deadline}; это исследовательская рекомендация, а не гарантия."
+        )
     if st == "trading_status_changed":
         prev = str(p.get("previous_status", "—"))
         cur = str(p.get("current_status", "—"))
@@ -165,11 +180,6 @@ def build_summary_ru(signal: TriggerSignal, quality: dict) -> str:
     return "\n".join(lines)
 
 
-def _telegram_br_lines(text: str) -> str:
-    """Telegram HTML: перенос строки — символ ``\\n``; теги ``<br>`` / ``<br/>`` в HTML mode не поддерживаются."""
-    return text
-
-
 def build_telegram_html(
     signal: TriggerSignal,
     quality: dict,
@@ -180,23 +190,68 @@ def build_telegram_html(
     """HTML для Telegram: тикер ведёт в веб-терминал, отдельно — карточка инструмента."""
     t_esc = html.escape(signal.ticker)
     type_ru = html.escape(signal_type_ru(signal.signal_type))
-    type_raw = html.escape(signal.signal_type)
-    summ_plain = build_summary_ru(signal, quality)
-    summ = _telegram_br_lines(html.escape(summ_plain))
+    interpretation = build_signal_interpretation(signal)
+    detail = html.escape(str(interpretation.get("headline_ru") or "").strip())
+    hint = html.escape(str(quality.get("quality_hint_ru") or "").strip())
     term_href = html.escape(ticker_terminal_url, quote=True)
     inv_href = html.escape(instrument_page_url, quote=True)
-    wterm = html.escape(t_invest_web_terminal_url())
-    score = quality["quality_score"]
-    tier = html.escape(str(quality["quality_tier_ru"]))
+    wterm = html.escape(t_invest_web_terminal_url(), quote=True)
+    if signal.signal_type == "morning_retracement_recommendation":
+        payload = signal.payload or {}
+        direction = (
+            "ВВЕРХ" if payload.get("expected_direction") == "up" else "ВНИЗ"
+        )
+        probability = _percent_ru(
+            payload.get("target_probability", payload.get("model_probability"))
+        )
+        non_loss_probability = _percent_ru(payload.get("non_loss_probability"))
+        historical = _percent_ru(payload.get("historical_target_probability"))
+        historical_non_loss = _percent_ru(
+            payload.get("historical_non_loss_probability")
+        )
+        lower = _percent_ru(payload.get("historical_target_probability_lower"))
+        target_fraction = float(payload.get("target_fraction") or 0.50)
+        target_label = f"R{round(target_fraction * 100)}"
+        expected_at = _time_ru(payload.get("expected_hit_at"))
+        expected_start = _time_ru(payload.get("expected_hit_window_start"))
+        expected_end = _time_ru(payload.get("expected_hit_window_end"))
+        deadline = _time_ru(payload.get("deadline_at"))
+        return (
+            f"<a href=\"{term_href}\"><b>{t_esc}</b></a> · "
+            f"<b>ВОЗВРАТ {direction}</b>\n"
+            f"Вероятность цели {target_label}: <b>{probability}</b>\n"
+            f"Вероятность результата без убытка: "
+            f"<b>{non_loss_probability}</b>\n"
+            f"Расчётный вход: {float(payload.get('entry_reference_price') or 0):g}\n"
+            f"Цель {target_label}: "
+            f"<b>{float(payload.get('target_price') or 0):g}</b>\n"
+            f"Начальное ограничение убытка: "
+            f"{float(payload.get('initial_stop_price') or 0):g}\n"
+            f"Защита безубытка после: "
+            f"{float(payload.get('break_even_trigger_price') or 0):g}\n"
+            f"Ожидаемое время: около {expected_at} "
+            f"(обычно {expected_start}–{expected_end})\n"
+            f"Предельный срок: {deadline}\n"
+            f"История правила: цель {historical}, "
+            f"без убытка {historical_non_loss} "
+            f"(осторожная оценка {lower}, "
+            f"{int(payload.get('evidence_sample_count') or 0)} случаев)\n"
+            f"<a href=\"{inv_href}\">Открыть карточку инструмента</a>\n\n"
+            "Исследовательская рекомендация: вероятность не гарантирует результат."
+        )
     # Вложенность <b><a>…</a></b> у Bot API часто даёт 400; допустимо <a><b>…</b></a>.
-    return (
-        f"<a href=\"{term_href}\"><b>{t_esc}</b></a> ({html.escape(signal.class_code)})\n"
-        f"Тип: {type_ru} <code>{type_raw}</code>\n"
-        f"Оценка: <b>{score}</b>/100 ({tier})\n"
+    lines = [
+        f"<a href=\"{term_href}\"><b>{t_esc}</b></a>",
+        f"Тип: {type_ru}",
         f"Терминал: <a href=\"{wterm}\">tbank.ru/terminal</a> · "
-        f"<a href=\"{inv_href}\">карточка инструмента</a>\n\n"
-        f"{summ}"
-    )
+        f"<a href=\"{inv_href}\">карточка инструмента</a>",
+        "",
+    ]
+    if detail:
+        lines.append(detail)
+    if hint:
+        lines.append(hint)
+    return "\n".join(lines)
 
 
 def format_plain_alert_ru(
@@ -206,14 +261,38 @@ def format_plain_alert_ru(
     instrument_page_url: str,
 ) -> str:
     """Простой текст без HTML (fallback для Telegram при ошибках разметки)."""
-    q = signal.payload or {}
-    score = q.get("quality_score", "")
-    tier = q.get("quality_tier_ru", "")
-    head = (
-        f"{signal.ticker} ({signal.class_code}) — {signal_type_ru(signal.signal_type)}\n"
-        f"Терминал: {ticker_terminal_url}\n"
-        f"Карточка: {instrument_page_url}\n"
-    )
-    if score != "":
-        head += f"Оценка: {score}/100 ({tier})\n"
-    return head + "\n" + signal.summary
+    payload = signal.payload or {}
+    interpretation = build_signal_interpretation(signal)
+    detail = str(interpretation.get("headline_ru") or "").strip()
+    hint = str(payload.get("quality_hint_ru") or "").strip()
+    lines = [
+        signal.ticker,
+        f"Тип: {signal_type_ru(signal.signal_type)}",
+        f"Терминал: {ticker_terminal_url} · карточка инструмента: {instrument_page_url}",
+        "",
+    ]
+    if detail:
+        lines.append(detail)
+    if hint:
+        lines.append(hint)
+    return "\n".join(lines)
+
+
+def _percent_ru(value: object) -> str:
+    try:
+        percent = float(value) * 100.0
+    except (TypeError, ValueError):
+        return "—"
+    return f"{percent:.1f}%".replace(".", ",")
+
+
+def _time_ru(value: object) -> str:
+    if value in (None, ""):
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return html.escape(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_MOSCOW)
+    return parsed.astimezone(_MOSCOW).strftime("%H:%M")
