@@ -28,6 +28,19 @@ def test_indicator_change_uses_targeted_scope() -> None:
     assert "indicator component" in reason
 
 
+def test_new_realtime_detector_regression_test_stays_in_indicator_scope() -> None:
+    scope, _ = classify_paths(
+        [
+            "src/tinvest_signal_engine/domain/indicators/microstructure.py",
+            "src/tinvest_signal_engine/detector_core.py",
+            "tests/test_realtime_signal_detectors.py",
+        ],
+        load_config(),
+    )
+
+    assert scope == "indicators"
+
+
 def test_unknown_runtime_change_fails_safe_to_full_scope() -> None:
     scope, reason = classify_paths(
         ["src/tinvest_signal_engine/services/api.py"],
@@ -51,11 +64,14 @@ def test_dependency_change_requires_full_scope() -> None:
 def test_docs_and_release_metadata_have_lightweight_scopes() -> None:
     config = load_config()
     assert classify_paths(["docs/operations.md"], config)[0] == "docs"
-    assert classify_paths(
-        ["CHANGELOG.md", "docs/releases/v1.0.1.md", "pyproject.toml", "uv.lock"],
-        config,
-        version_only_paths={"pyproject.toml", "uv.lock"},
-    )[0] == "metadata"
+    assert (
+        classify_paths(
+            ["CHANGELOG.md", "docs/releases/v1.0.1.md", "pyproject.toml", "uv.lock"],
+            config,
+            version_only_paths={"pyproject.toml", "uv.lock"},
+        )[0]
+        == "metadata"
+    )
 
 
 def test_toml_normalization_ignores_only_project_version() -> None:
@@ -72,7 +88,11 @@ def test_lock_normalization_keeps_dependency_changes_visible() -> None:
     base = {
         "version": 1,
         "package": [
-            {"name": "tinvest-signal-engine", "version": "1.0.0", "dependencies": [{"name": "a"}]},
+            {
+                "name": "tinvest-signal-engine",
+                "version": "1.0.0",
+                "dependencies": [{"name": "a"}],
+            },
             {"name": "a", "version": "1"},
         ],
     }
@@ -84,7 +104,7 @@ def test_lock_normalization_keeps_dependency_changes_visible() -> None:
         dependencies = data["package"][0]["dependencies"]
         deps = ", ".join(f'{{ name = "{item["name"]}" }}' for item in dependencies)
         return (
-            'version = 1\n'
+            "version = 1\n"
             '[[package]]\nname = "tinvest-signal-engine"\n'
             f'version = "{data["package"][0]["version"]}"\n'
             f"dependencies = [{deps}]\n"
@@ -97,7 +117,10 @@ def test_lock_normalization_keeps_dependency_changes_visible() -> None:
 
 
 def test_previous_release_uses_highest_lower_stable_semver() -> None:
-    assert select_previous_release(
-        ["v0.2.0", "v1.0.0", "v1.0.1-rc1", "not-a-release"],
-        "v1.1.0",
-    ) == "v1.0.0"
+    assert (
+        select_previous_release(
+            ["v0.2.0", "v1.0.0", "v1.0.1-rc1", "not-a-release"],
+            "v1.1.0",
+        )
+        == "v1.0.0"
+    )

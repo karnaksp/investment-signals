@@ -67,7 +67,7 @@ def test_combo_score_six_is_delivered(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "combo_score_ge_6"
-    assert out.payload["delivery_policy_version"] == "delivery_v5"
+    assert out.payload["delivery_policy_version"] == "delivery_v6"
     assert out.payload["delivery_priority"] == "high"
     assert out.payload["delivery_channel"] == "realtime"
     assert out.payload["delivery_explanation_ru"]
@@ -284,6 +284,52 @@ def test_experimental_signal_is_admin_only_by_default(monkeypatch) -> None:
     assert out.payload["delivery_reason"] == "experimental_admin_only"
     assert out.payload["delivery_rule"] == "controlled_rollout_admin_only"
     assert out.payload["delivery_channel"] == "admin_only"
+
+
+def test_realtime_rollout_signal_is_delivered_without_instrument_cooldown(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    policy_path = tmp_path / "delivery-notional-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default_min_notional_rub": 40_000_000,
+                "signal_min_notional_rub": {"liquidity_vacuum": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE=str(policy_path),
+            SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS="900",
+            SIGNAL_DELIVERY_MAX_PER_HOUR="10",
+        )
+    )
+    start = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    policy.apply(
+        _signal(
+            detected_at=start,
+            payload={"quality_score": 95},
+            z_score=8.0,
+        )
+    )
+
+    out = policy.apply(
+        _signal(
+            detected_at=start + timedelta(seconds=10),
+            signal_type="liquidity_vacuum",
+            source_event_type="orderbook",
+            payload={"quality_score": 10},
+            z_score=2.5,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "delivered"
+    assert out.payload["delivery_reason"] == "owner_realtime_rollout"
+    assert out.payload["delivery_channel"] == "realtime"
 
 
 def test_custom_rule_can_explicitly_promote_experimental_signal(monkeypatch) -> None:

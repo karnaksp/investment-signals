@@ -44,15 +44,10 @@ from ..models import TriggerSignal
 from ..runtime_info import runtime_fingerprint
 from ..sinks import create_postgres_signal_store_with_retry
 
-_ADMIN_HTML_PATH = (
-    Path(__file__).resolve().parent.parent / "static" / "admin.html"
-)
+_ADMIN_HTML_PATH = Path(__file__).resolve().parent.parent / "static" / "admin.html"
 _ADMIN_JS_PATH = Path(__file__).resolve().parent.parent / "static" / "admin_app.js"
 _ADMIN_CHART_JS_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "static"
-    / "vendor"
-    / "chart.umd.min.js"
+    Path(__file__).resolve().parent.parent / "static" / "vendor" / "chart.umd.min.js"
 )
 
 
@@ -134,7 +129,7 @@ _SIGNAL_TYPE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "source": "orderbook",
         "sources_any": ("orderbook",),
         "config": "obi_dynamics_enabled",
-        "delivery_rule": "default_quality",
+        "delivery_rule": "realtime_signal_rollout_v1",
         "enabled": lambda c: c.obi_dynamics_enabled,
     },
     {
@@ -142,8 +137,32 @@ _SIGNAL_TYPE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "source": "trade",
         "sources_any": ("trade",),
         "config": "trade_burst_enabled",
-        "delivery_rule": "default_quality",
+        "delivery_rule": "realtime_signal_rollout_v1",
         "enabled": lambda c: c.trade_burst_enabled,
+    },
+    {
+        "signal_type": "confirmed_impulse_long",
+        "source": "trade+price",
+        "sources_all": ("trade", "last_price"),
+        "config": "confirmed_impulse_enabled",
+        "delivery_rule": "realtime_signal_rollout_v1",
+        "enabled": lambda c: c.confirmed_impulse_enabled,
+    },
+    {
+        "signal_type": "confirmed_impulse_short",
+        "source": "trade+price",
+        "sources_all": ("trade", "last_price"),
+        "config": "confirmed_impulse_enabled",
+        "delivery_rule": "realtime_signal_rollout_v1",
+        "enabled": lambda c: c.confirmed_impulse_enabled,
+    },
+    {
+        "signal_type": "liquidity_vacuum",
+        "source": "orderbook",
+        "sources_any": ("orderbook",),
+        "config": "liquidity_vacuum_enabled",
+        "delivery_rule": "realtime_signal_rollout_v1",
+        "enabled": lambda c: c.liquidity_vacuum_enabled,
     },
     {
         "signal_type": "orderbook_spoofing_bid_pull",
@@ -171,11 +190,11 @@ _SIGNAL_TYPE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "requires_lead_lag_pairs": True,
     },
     {
-        "signal_type": "open_interest_spike",
-        "source": "open_interest",
-        "sources_any": ("open_interest",),
+        "signal_type": "futures_positioning",
+        "source": "price+open_interest",
+        "sources_all": ("last_price", "open_interest"),
         "config": "open_interest_zscore_threshold",
-        "delivery_rule": "default_quality",
+        "delivery_rule": "realtime_signal_rollout_v1",
         "enabled": lambda c: c.open_interest_zscore_threshold > 0,
     },
     {
@@ -235,7 +254,9 @@ def _configured_signal_catalog(settings: RuntimeSettings) -> dict[str, Any]:
         "orderbook": sum(1 for item in instruments if item.order_book_depth),
         "trading_status": sum(1 for item in instruments if item.info),
         "candle": sum(1 for item in instruments if item.candles),
-        "open_interest": 0,
+        "open_interest": sum(
+            1 for item in instruments if item.trades and item.class_code == "SPBFUT"
+        ),
     }
 
     rows: list[dict[str, Any]] = []
@@ -410,7 +431,11 @@ def _source_health_response(
     for raw_item in catalog.get("items", []):
         item = dict(raw_item)
         iid = str(item.get("instrument_id") or "")
-        subscriptions = item.get("subscriptions") if isinstance(item.get("subscriptions"), dict) else {}
+        subscriptions = (
+            item.get("subscriptions")
+            if isinstance(item.get("subscriptions"), dict)
+            else {}
+        )
         source_status = _instrument_source_status(
             subscriptions,
             last_by_instrument.get(iid, {}),
@@ -692,9 +717,7 @@ class RecentSignalsResponse(BaseModel):
     """Список последних сигналов из таблицы Postgres."""
 
     items: list[dict[str, Any]] = Field(
-        description=(
-            "Записи сигналов в том же виде, что возвращает хранилище."
-        ),
+        description=("Записи сигналов в том же виде, что возвращает хранилище."),
     )
     count: int = Field(description="Длина списка `items`.")
 
@@ -714,9 +737,7 @@ class SignalSummaryResponse(BaseModel):
     """Сводка по типам сигналов за последние `minutes` минут."""
 
     items: list[SignalSummaryRow] = Field(
-        description=(
-            "Строки сводки, отсортированные по убыванию счётчика."
-        ),
+        description=("Строки сводки, отсортированные по убыванию счётчика."),
     )
     minutes: int = Field(
         description="Размер временного окна запроса в минутах.",
@@ -772,6 +793,10 @@ class DeliverySimulationIn(BaseModel):
 
 _ADMIN_ONLY_ROLLOUT_RULES = {
     "candle_range_spike": {"admin_only": True},
+    "confirmed_impulse_long": {"admin_only": True},
+    "confirmed_impulse_short": {"admin_only": True},
+    "liquidity_vacuum": {"admin_only": True},
+    "futures_positioning": {"admin_only": True},
     "obi_dynamics": {"admin_only": True},
     "open_interest_spike": {"admin_only": True},
     "aggressive_trade_burst": {"admin_only": True},
@@ -841,9 +866,7 @@ def _row_to_signal(row: dict[str, Any]) -> TriggerSignal:
             else None
         ),
         source_event_at=_parse_dt(row.get("source_event_at")),
-        signal_schema_version=str(
-            row.get("signal_schema_version") or "1.0.0"
-        ),
+        signal_schema_version=str(row.get("signal_schema_version") or "1.0.0"),
         expectation_catalog_version=(
             str(row["expectation_catalog_version"])
             if row.get("expectation_catalog_version") is not None
@@ -1041,9 +1064,7 @@ def _worker_pipeline_check(
 def require_admin(
     request: Request,
     token: Annotated[str | None, Query(description="Значение ADMIN_API_TOKEN")] = None,
-    x_admin_token: Annotated[
-        str | None, Header(alias="X-Admin-Token")
-    ] = None,
+    x_admin_token: Annotated[str | None, Header(alias="X-Admin-Token")] = None,
 ) -> None:
     """Проверка токена для JSON-эндпоинтов админки."""
     settings: RuntimeSettings = request.app.state.settings
@@ -1210,9 +1231,7 @@ def create_app() -> FastAPI:
         response_model=SignalSummaryResponse,
         responses={
             200: {
-                "description": (
-                    "Группировка COUNT по `signal_type` за окно времени."
-                ),
+                "description": ("Группировка COUNT по `signal_type` за окно времени."),
             },
         },
     )
@@ -1222,10 +1241,7 @@ def create_app() -> FastAPI:
             Query(
                 ge=1,
                 le=1440,
-                description=(
-                    "Окно в минутах от текущего момента "
-                    "(UTC на стороне БД)."
-                ),
+                description=("Окно в минутах от текущего момента (UTC на стороне БД)."),
             ),
         ] = 60,
     ) -> SignalSummaryResponse:
@@ -1403,9 +1419,7 @@ def create_app() -> FastAPI:
             postgres_ok = False
             postgres_detail = f"Postgres недоступен: {type(exc).__name__}: {exc}"
         else:
-            postgres_detail = (
-                "Postgres доступен; detector может сохранять сигналы."
-            )
+            postgres_detail = "Postgres доступен; detector может сохранять сигналы."
         checks.append(
             {
                 "id": "postgres",
@@ -1421,8 +1435,11 @@ def create_app() -> FastAPI:
                 "id": "redis",
                 "label": "Detector state",
                 "status": (
-                    "ok" if redis_ok is True else "warning"
-                    if redis_ok is None else "warning"
+                    "ok"
+                    if redis_ok is True
+                    else "warning"
+                    if redis_ok is None
+                    else "warning"
                 ),
                 "detail": redis_detail,
             }
@@ -1518,7 +1535,9 @@ def create_app() -> FastAPI:
             )
         else:
             delivery_status = "warning"
-            delivery_detail = "Нет generated сигналов, поэтому Telegram-доставка не проверялась."
+            delivery_detail = (
+                "Нет generated сигналов, поэтому Telegram-доставка не проверялась."
+            )
         checks.append(
             {
                 "id": "telegram_delivery",
@@ -1629,9 +1648,7 @@ def create_app() -> FastAPI:
     def admin_calibration(
         minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
     ) -> dict[str, Any]:
-        return fastapi_app.state.signal_store.fetch_admin_calibration(
-            minutes=minutes
-        )
+        return fastapi_app.state.signal_store.fetch_admin_calibration(minutes=minutes)
 
     @fastapi_app.get(
         "/admin/api/feedback/overview",
@@ -1663,9 +1680,7 @@ def create_app() -> FastAPI:
                 "instrument_cooldown_seconds": (
                     s.signal_delivery_instrument_cooldown_seconds
                 ),
-                "type_rules_json_configured": bool(
-                    s.signal_delivery_type_rules_json
-                ),
+                "type_rules_json_configured": bool(s.signal_delivery_type_rules_json),
                 "legacy_signal_min_quality_score": s.signal_min_quality_score,
             },
             "paths": {
@@ -1727,7 +1742,9 @@ def create_app() -> FastAPI:
         }
         instrument = by_id.get(instrument_id)
         if instrument is None:
-            raise HTTPException(status_code=404, detail="Инструмент не найден в конфиге")
+            raise HTTPException(
+                status_code=404, detail="Инструмент не найден в конфиге"
+            )
         if not settings.clickhouse_http_url:
             return {
                 "status": "unavailable",
@@ -1790,7 +1807,9 @@ def create_app() -> FastAPI:
         minutes: Annotated[int, Query(ge=0, le=10_080)] = 0,
         resolve: Annotated[
             bool,
-            Query(description="Resolve FIGI/UID through T-Invest; slower and needs token."),
+            Query(
+                description="Resolve FIGI/UID through T-Invest; slower and needs token."
+            ),
         ] = False,
     ) -> dict[str, Any]:
         settings = request.app.state.settings
@@ -1958,7 +1977,9 @@ def create_app() -> FastAPI:
                 ),
             ),
         ] = "1h",
-        type_of_price: Annotated[str, Query(description="close | open | high | low | avg")] = "close",
+        type_of_price: Annotated[
+            str, Query(description="close | open | high | low | avg")
+        ] = "close",
         length: Annotated[int, Query(ge=1, le=500)] = 14,
         window_minutes: Annotated[
             int,

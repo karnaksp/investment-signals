@@ -17,6 +17,10 @@ from .models import TriggerSignal
 _SIGNAL_TYPE_WEIGHT: dict[str, float] = {
     "microstructure_combo_long": 1.0,
     "microstructure_combo_short": 1.0,
+    "confirmed_impulse_long": 1.0,
+    "confirmed_impulse_short": 1.0,
+    "liquidity_vacuum": 0.95,
+    "futures_positioning": 0.95,
     "lead_lag_divergence": 0.95,
     "orderbook_spoofing_bid_pull": 0.9,
     "orderbook_spoofing_ask_pull": 0.9,
@@ -110,15 +114,7 @@ def compute_signal_quality(signal: TriggerSignal) -> dict[str, Any]:
 
     w = _SIGNAL_TYPE_WEIGHT.get(signal.signal_type, 0.65)
 
-    raw = (
-        100.0
-        * (
-            0.45 * z_norm
-            + 0.20 * mag_norm
-            + 0.22 * sev_norm
-            + 0.13 * w
-        )
-    )
+    raw = 100.0 * (0.45 * z_norm + 0.20 * mag_norm + 0.22 * sev_norm + 0.13 * w)
     score = int(max(0, min(100, round(raw))))
 
     if score >= 72:

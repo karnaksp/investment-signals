@@ -20,6 +20,8 @@ def build_signal_interpretation(signal: TriggerSignal) -> dict[str, Any]:
 
     if st == "price_jump":
         return _price_jump(signal, p)
+    if st in {"confirmed_impulse_long", "confirmed_impulse_short"}:
+        return _confirmed_impulse(signal, p)
     if st == "bond_maturity_convergence":
         return _bond_maturity_convergence(signal, p)
     if st == "volume_spike":
@@ -28,6 +30,8 @@ def build_signal_interpretation(signal: TriggerSignal) -> dict[str, Any]:
         return _trade_rate_spike(signal, p)
     if st == "spread_widening":
         return _spread_widening(signal, p)
+    if st == "liquidity_vacuum":
+        return _liquidity_vacuum(signal, p)
     if st == "orderbook_imbalance":
         return _orderbook_imbalance(signal, p)
     if st == "obi_dynamics":
@@ -48,6 +52,8 @@ def build_signal_interpretation(signal: TriggerSignal) -> dict[str, Any]:
         return _price_near_limit(signal, p)
     if st == "open_interest_spike":
         return _open_interest(signal, p)
+    if st == "futures_positioning":
+        return _futures_positioning(signal, p)
     if st == "candle_range_spike":
         return _candle_range(signal, p)
     if st == "orderbook_snapshot_inconsistent":
@@ -115,6 +121,31 @@ def _price_jump(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     return _pack(signal, headline, facts, direction=direction)
 
 
+def _confirmed_impulse(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
+    direction = str(p.get("direction") or "unknown")
+    direction_ru = "вверх" if direction == "long" else "вниз"
+    move_bps = _num(p.get("price_change_bps"))
+    delta = _num(p.get("signed_delta_qty"))
+    score = _num(p.get("score"), signal.metric_value)
+    max_score = _num(p.get("max_score"))
+    headline = (
+        f"Подтверждённый импульс {direction_ru}: цена {_bps(move_bps)}, "
+        f"дельта {_qty(delta)} лотов."
+    )
+    facts = [
+        _fact("Направление", direction, "direction"),
+        _fact("Движение", _bps(move_bps), "price_change_bps"),
+        _fact("Дельта", _qty(delta), "signed_delta_qty"),
+        _fact("Score", f"{_qty(score)}/{_qty(max_score)}", "score"),
+        _fact(
+            "Стакан подтвердил",
+            "да" if p.get("orderbook_confirmed") else "нет",
+            "orderbook_confirmed",
+        ),
+    ]
+    return _pack(signal, headline, facts, direction=direction)
+
+
 def _bond_maturity_convergence(
     signal: TriggerSignal, p: dict[str, Any]
 ) -> dict[str, Any]:
@@ -154,9 +185,7 @@ def _volume_spike(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     notional = _num(p.get("window_notional"))
     last_price = _num(p.get("last_price"))
     ratio = _ratio(signal.metric_value, signal.baseline_value)
-    headline = (
-        f"Объём за {signal.window_seconds} с: {_qty(lots)} лотов"
-    )
+    headline = f"Объём за {signal.window_seconds} с: {_qty(lots)} лотов"
     if notional is not None:
         headline += f", оборот {_money(notional, signal)}"
     if ratio is not None:
@@ -216,6 +245,28 @@ def _spread_widening(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]
     return _pack(signal, headline, facts, direction="liquidity")
 
 
+def _liquidity_vacuum(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
+    drop = _num(p.get("depth_drop_ratio"), signal.metric_value)
+    spread = _num(p.get("spread_bps"))
+    side = str(p.get("weaker_side") or "both")
+    headline = (
+        f"Глубина стакана сократилась на {_pct(drop * 100 if drop is not None else None)}, "
+        f"спред расширился до {_bps(spread)}."
+    )
+    facts = [
+        _fact(
+            "Падение глубины",
+            _pct(drop * 100 if drop is not None else None),
+            "depth_drop_ratio",
+        ),
+        _fact("Спред", _bps(spread), "spread_bps"),
+        _fact("Слабая сторона", side, "weaker_side"),
+        _fact("Bid сейчас", _qty(_num(p.get("current_bid_qty"))), "current_bid_qty"),
+        _fact("Ask сейчас", _qty(_num(p.get("current_ask_qty"))), "current_ask_qty"),
+    ]
+    return _pack(signal, headline, facts, direction="liquidity")
+
+
 def _orderbook_imbalance(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     ratio = _num(p.get("imbalance_ratio"))
     bid_qty = _num(p.get("top_bid_qty"))
@@ -231,10 +282,18 @@ def _orderbook_imbalance(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, 
     headline += "."
     facts = [
         _fact("Сторона", side, "dominant_side"),
-        _fact("Bid share", _pct((ratio or 0) * 100) if ratio is not None else None, "imbalance_ratio"),
+        _fact(
+            "Bid share",
+            _pct((ratio or 0) * 100) if ratio is not None else None,
+            "imbalance_ratio",
+        ),
         _fact("Bid объём", _qty(bid_qty), "top_bid_qty"),
         _fact("Ask объём", _qty(ask_qty), "top_ask_qty"),
-        _fact("Дисбаланс", _pct(_num(p.get("imbalance_abs"), signal.metric_value) * 100), "imbalance_abs"),
+        _fact(
+            "Дисбаланс",
+            _pct(_num(p.get("imbalance_abs"), signal.metric_value) * 100),
+            "imbalance_abs",
+        ),
     ]
     return _pack(signal, headline, facts, direction=side)
 
@@ -262,7 +321,11 @@ def _microstructure_combo(signal: TriggerSignal, p: dict[str, Any]) -> dict[str,
     score = _num(p.get("score"), signal.metric_value)
     min_score = _num(p.get("min_score"), signal.baseline_value)
     detail = p.get("combo_detail") if isinstance(p.get("combo_detail"), dict) else {}
-    points = detail.get("points_awarded") if isinstance(detail.get("points_awarded"), dict) else {}
+    points = (
+        detail.get("points_awarded")
+        if isinstance(detail.get("points_awarded"), dict)
+        else {}
+    )
     matched = []
     if points.get("spread"):
         matched.append("спред")
@@ -280,7 +343,9 @@ def _microstructure_combo(signal: TriggerSignal, p: dict[str, Any]) -> dict[str,
     facts = [
         _fact("Score", f"{_fmt(score, 0)}/{_fmt(min_score, 0)}", "score"),
         _fact("Imbalance", _fmt(_num(p.get("imbalance_ratio")), 2), "imbalance_ratio"),
-        _fact("Signed delta", _qty(_num(p.get("signed_delta_qty"))), "signed_delta_qty"),
+        _fact(
+            "Signed delta", _qty(_num(p.get("signed_delta_qty"))), "signed_delta_qty"
+        ),
         _fact("Matched", ", ".join(matched), "matched_components"),
     ]
     return _pack(signal, headline, facts, direction=side)
@@ -288,8 +353,7 @@ def _microstructure_combo(signal: TriggerSignal, p: dict[str, Any]) -> dict[str,
 
 def _spoofing_pull(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     side = str(
-        p.get("wall_side")
-        or ("ask" if "ask_pull" in signal.signal_type else "bid")
+        p.get("wall_side") or ("ask" if "ask_pull" in signal.signal_type else "bid")
     )
     side_ru = "аска" if side == "ask" else "бида" if side == "bid" else side
     prev = _num(p.get("prev_wall_qty"))
@@ -313,7 +377,13 @@ def _spoofing_pull(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
 
 def _aggressive_trade_burst(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     direction = str(p.get("direction") or "")
-    direction_ru = "покупок" if direction == "buy" else "продаж" if direction == "sell" else "сделок"
+    direction_ru = (
+        "покупок"
+        if direction == "buy"
+        else "продаж"
+        if direction == "sell"
+        else "сделок"
+    )
     prints = _num(p.get("print_count"), signal.metric_value)
     qty = _num(p.get("abs_qty_sum"))
     units = _num(p.get("abs_units_sum"))
@@ -364,10 +434,22 @@ def _trading_status(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
 
 def _market_access(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     changes = p.get("changes") if isinstance(p.get("changes"), list) else []
-    headline = "Изменился доступ к заявкам: " + (", ".join(map(str, changes)) or "см. payload") + "."
+    headline = (
+        "Изменился доступ к заявкам: "
+        + (", ".join(map(str, changes)) or "см. payload")
+        + "."
+    )
     facts = [
-        _fact("Limit orders", str(p.get("limit_order_available_flag")), "limit_order_available_flag"),
-        _fact("Market orders", str(p.get("market_order_available_flag")), "market_order_available_flag"),
+        _fact(
+            "Limit orders",
+            str(p.get("limit_order_available_flag")),
+            "limit_order_available_flag",
+        ),
+        _fact(
+            "Market orders",
+            str(p.get("market_order_available_flag")),
+            "market_order_available_flag",
+        ),
     ]
     return _pack(signal, headline, facts, direction="status")
 
@@ -402,6 +484,30 @@ def _open_interest(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     return _pack(signal, headline, facts, direction="activity")
 
 
+def _futures_positioning(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
+    regime = str(p.get("regime") or "unknown")
+    direction = str(p.get("direction") or "unknown")
+    labels = {
+        "long_build": "набор длинных позиций",
+        "short_build": "набор коротких позиций",
+        "short_covering": "закрытие коротких позиций",
+        "long_liquidation": "закрытие длинных позиций",
+    }
+    delta = _num(p.get("open_interest_delta"))
+    move = _num(p.get("price_change_bps"))
+    headline = (
+        f"Фьючерс: {labels.get(regime, 'смена позиционирования')}; "
+        f"OI {_signed_number(delta, 0)}, цена {_bps(move)}."
+    )
+    facts = [
+        _fact("Режим", regime, "regime"),
+        _fact("Δ OI", _signed_number(delta, 0), "open_interest_delta"),
+        _fact("Движение цены", _bps(move), "price_change_bps"),
+        _fact("Open interest", _qty(_num(p.get("open_interest"))), "open_interest"),
+    ]
+    return _pack(signal, headline, facts, direction=direction)
+
+
 def _candle_range(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     range_pct = _num(p.get("range_pct"), signal.metric_value / 100.0)
     headline = f"Свеча с широким диапазоном: {_pct(range_pct)} за интервал."
@@ -417,7 +523,12 @@ def _candle_range(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
 
 def _orderbook_inconsistent(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
     headline = f"Биржа пометила снимок стакана как несогласованный; mid={_price(_num(p.get('mid'), signal.metric_value))}."
-    return _pack(signal, headline, [_fact("Mid", _price(_num(p.get("mid"), signal.metric_value)), "mid")], direction="data_quality")
+    return _pack(
+        signal,
+        headline,
+        [_fact("Mid", _price(_num(p.get("mid"), signal.metric_value)), "mid")],
+        direction="data_quality",
+    )
 
 
 def _generic(signal: TriggerSignal) -> dict[str, Any]:

@@ -33,6 +33,7 @@
     "tests/test_detector_state_persist.py",
     "tests/test_market_unary.py",
     "tests/test_market_unary_emitter.py",
+    "tests/test_realtime_signal_detectors.py",
     "tests/test_signal_locale.py",
     "tests/test_signal_provenance.py",
     "tests/test_telegram_delivery_resilience.py"
@@ -47,6 +48,7 @@
     "tests/test_detector_state_persist.py",
     "tests/test_market_unary.py",
     "tests/test_market_unary_emitter.py",
+    "tests/test_realtime_signal_detectors.py",
     "tests/test_signal_locale.py",
     "tests/test_signal_provenance.py",
     "tests/test_telegram_delivery_resilience.py"

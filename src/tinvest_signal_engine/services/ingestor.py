@@ -18,8 +18,11 @@ from tinkoff.invest import (
     Client,
     InfoInstrument,
     LastPriceInstrument,
+    MarketDataRequest,
     OrderBookInstrument,
+    SubscribeTradesRequest,
     SubscriptionInterval,
+    SubscriptionAction,
     TradeInstrument,
 )
 from tinkoff.invest.constants import INVEST_GRPC_API_SANDBOX
@@ -199,7 +202,17 @@ def subscribe_to_stream(stream, instruments) -> None:
         if item.trades
     ]
     if trade_instruments:
-        stream.trades.subscribe(trade_instruments)
+        stream.subscribe(
+            MarketDataRequest(
+                subscribe_trades_request=SubscribeTradesRequest(
+                    subscription_action=(
+                        SubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE
+                    ),
+                    instruments=trade_instruments,
+                    with_open_interest=True,
+                )
+            )
+        )
 
     last_price_instruments = [
         LastPriceInstrument(instrument_id=item.instrument_id)
@@ -232,7 +245,8 @@ def subscribe_to_stream(stream, instruments) -> None:
         CandleInstrument(
             instrument_id=item.instrument_id,
             interval=INTERVAL_MAP.get(
-                item.candle_interval, SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE
+                item.candle_interval,
+                SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE,
             ),
         )
         for item in instruments
@@ -361,13 +375,10 @@ def _recover_session_candles(
     )
     recovery_start = max(
         collection_start,
-        local_now
-        - timedelta(minutes=effective_lookback),
+        local_now - timedelta(minutes=effective_lookback),
     )
     candle_enabled = {
-        (item.ticker, item.class_code)
-        for item in instrument_configs
-        if item.candles
+        (item.ticker, item.class_code) for item in instrument_configs if item.candles
     }
     recovered = 0
     for metadata in registry:
@@ -418,8 +429,7 @@ def _candle_recovery_due(
     interval_seconds: float,
 ) -> bool:
     return interval_seconds > 0 and (
-        last_recovery_at is None
-        or monotonic_now - last_recovery_at >= interval_seconds
+        last_recovery_at is None or monotonic_now - last_recovery_at >= interval_seconds
     )
 
 
@@ -457,9 +467,7 @@ def _recover_missing_trades(
         return 0
 
     trade_enabled = {
-        (item.ticker, item.class_code)
-        for item in instrument_configs
-        if item.trades
+        (item.ticker, item.class_code) for item in instrument_configs if item.trades
     }
     recovered = 0
     latest_recovered_at: datetime | None = None
@@ -486,9 +494,11 @@ def _recover_missing_trades(
                 break
             for trade in response.trades:
                 event = _recovery_trade_event(trade, metadata)
-                if not recovery_start <= event.source_time.astimezone(
-                    schedule.timezone
-                ) <= local_now:
+                if (
+                    not recovery_start
+                    <= event.source_time.astimezone(schedule.timezone)
+                    <= local_now
+                ):
                     continue
                 if event.event_id in seen:
                     continue
@@ -532,9 +542,7 @@ def main() -> None:
     if not settings.tinvest_token:
         raise RuntimeError("TINVEST_TOKEN is required")
 
-    health_store = AtomicJsonIngestorHealthStore(
-        settings.ingestor_health_snapshot_path
-    )
+    health_store = AtomicJsonIngestorHealthStore(settings.ingestor_health_snapshot_path)
     try:
         initial_health = health_store.load()
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -582,9 +590,7 @@ def main() -> None:
         kafka_producer = build_kafka_producer(settings)
         while True:
             try:
-                instrument_configs = load_instrument_configs(
-                    settings.instruments_path
-                )
+                instrument_configs = load_instrument_configs(settings.instruments_path)
                 previous_market_event_at = health.snapshot.last_market_event_at
                 if not schedule.is_collection_active(utc_now()):
                     health.sleeping(
@@ -608,9 +614,7 @@ def main() -> None:
                 health.connecting(
                     configured_instruments=len(instrument_configs),
                     reason_code=(
-                        INGESTOR_RECONNECTING
-                        if reconnecting
-                        else INGESTOR_CONNECTING
+                        INGESTOR_RECONNECTING if reconnecting else INGESTOR_CONNECTING
                     ),
                 )
                 logger.info(

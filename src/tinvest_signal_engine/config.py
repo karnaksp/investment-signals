@@ -52,14 +52,10 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "local_notifier": frozenset(),
     "market_unary_emitter": frozenset({"TINVEST_TOKEN"}),
     "migration": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
-    "observation_worker": frozenset(
-        {"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}
-    ),
+    "observation_worker": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
     "reference_tick_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
     "scientific_candle_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
-    "signal_outcome_worker": frozenset(
-        {"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}
-    ),
+    "signal_outcome_worker": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
     "threshold_cron": frozenset({"TINVEST_TOKEN"}),
 }
 
@@ -219,6 +215,15 @@ class DetectorSettings:
     trade_burst_window_ms: int = 100
     trade_burst_min_trades: int = 50
     trade_burst_min_abs_qty: float = 5.0
+    confirmed_impulse_enabled: bool = False
+    confirmed_impulse_freshness_seconds: int = 60
+    confirmed_impulse_min_move_bps: float = 10.0
+    confirmed_impulse_min_abs_delta_qty: float = 1.0
+    liquidity_vacuum_enabled: bool = False
+    liquidity_vacuum_lookback_seconds: int = 60
+    liquidity_vacuum_min_depth_drop_ratio: float = 0.45
+    liquidity_vacuum_min_spread_zscore: float = 2.5
+    liquidity_vacuum_min_reference_qty: float = 1.0
     lead_lag_enabled: bool = False
     lead_lag_window_seconds: int = 30
     lead_lag_leader_move_bps: float = 8.0
@@ -232,6 +237,7 @@ class DetectorSettings:
     signal_orderbook_inconsistent: bool = False
     # z-score по истории открытого интереса (событие open_interest); 0 = выключено.
     open_interest_zscore_threshold: float = 0.0
+    open_interest_min_price_move_bps: float = 5.0
     # z-score по диапазону свечи (high−low)/open в bps; 0 = выключено.
     candle_range_zscore_threshold: float = 0.0
     # Сигналить смену limit_order_available / market_order_available в trading_status.
@@ -368,31 +374,21 @@ class RuntimeSettings:
     processed_event_purge_batch_size: int
 
     @classmethod
-    def from_env(
-        cls, *, service_name: str | None = None
-    ) -> "RuntimeSettings":
+    def from_env(cls, *, service_name: str | None = None) -> "RuntimeSettings":
         instruments_path = Path(
             os.getenv("INSTRUMENTS_CONFIG", "conf/instruments.yaml")
         )
-        detector_path = Path(
-            os.getenv("DETECTORS_CONFIG", "conf/detectors.yaml")
-        )
+        detector_path = Path(os.getenv("DETECTORS_CONFIG", "conf/detectors.yaml"))
         detector_overrides_path = Path(
-            os.getenv(
-                "DETECTORS_OVERRIDES_CONFIG", "conf/detectors.overrides.yaml"
-            )
+            os.getenv("DETECTORS_OVERRIDES_CONFIG", "conf/detectors.overrides.yaml")
         )
         return cls(
             tinvest_token=load_secret(
                 "TINVEST_TOKEN", default="", service_name=service_name
             )
             or "",
-            tinvest_use_sandbox=_env_bool(
-                "TINVEST_USE_SANDBOX", default=False
-            ),
-            tinvest_app_name=os.getenv(
-                "TINVEST_APP_NAME", "tinvest-signal-engine"
-            ),
+            tinvest_use_sandbox=_env_bool("TINVEST_USE_SANDBOX", default=False),
+            tinvest_app_name=os.getenv("TINVEST_APP_NAME", "tinvest-signal-engine"),
             kafka_bootstrap_servers=os.getenv(
                 "KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092"
             ),
@@ -403,15 +399,9 @@ class RuntimeSettings:
             kafka_raw_unary_topic=(
                 (os.getenv("KAFKA_RAW_UNARY_TOPIC") or "").strip() or None
             ),
-            kafka_signal_topic=os.getenv(
-                "KAFKA_SIGNAL_TOPIC", "marketdata.signals"
-            ),
-            kafka_consumer_group=os.getenv(
-                "KAFKA_CONSUMER_GROUP", "signal-detector"
-            ),
-            kafka_auto_offset_reset=os.getenv(
-                "KAFKA_AUTO_OFFSET_RESET", "latest"
-            ),
+            kafka_signal_topic=os.getenv("KAFKA_SIGNAL_TOPIC", "marketdata.signals"),
+            kafka_consumer_group=os.getenv("KAFKA_CONSUMER_GROUP", "signal-detector"),
+            kafka_auto_offset_reset=os.getenv("KAFKA_AUTO_OFFSET_RESET", "latest"),
             kafka_first_boot_warmup_age_seconds=max(
                 0,
                 int(os.getenv("KAFKA_FIRST_BOOT_WARMUP_AGE_SECONDS", "900")),
@@ -450,9 +440,7 @@ class RuntimeSettings:
                 "TELEGRAM_BOT_TOKEN", service_name=service_name
             )
             or None,
-            telegram_chat_id=load_secret(
-                "TELEGRAM_CHAT_ID", service_name=service_name
-            )
+            telegram_chat_id=load_secret("TELEGRAM_CHAT_ID", service_name=service_name)
             or None,
             telegram_message_thread_id=_secret_optional_int(
                 "TELEGRAM_MESSAGE_THREAD_ID", service_name=service_name
@@ -520,38 +508,29 @@ class RuntimeSettings:
                 or "Europe/Moscow"
             ),
             market_collection_start=(
-                os.getenv("MARKET_COLLECTION_START", "07:00").strip()
-                or "07:00"
+                os.getenv("MARKET_COLLECTION_START", "07:00").strip() or "07:00"
             ),
             market_collection_end=(
-                os.getenv("MARKET_COLLECTION_END", "23:00").strip()
-                or "23:00"
+                os.getenv("MARKET_COLLECTION_END", "23:00").strip() or "23:00"
             ),
             market_signal_start=(
-                os.getenv("MARKET_SIGNAL_START", "07:15").strip()
-                or "07:15"
+                os.getenv("MARKET_SIGNAL_START", "07:15").strip() or "07:15"
             ),
             market_signal_end=(
-                os.getenv("MARKET_SIGNAL_END", "22:45").strip()
-                or "22:45"
+                os.getenv("MARKET_SIGNAL_END", "22:45").strip() or "22:45"
             ),
             threshold_recalc_interval_hours=int(
                 os.getenv("THRESHOLD_RECALC_INTERVAL_HOURS", "24")
             ),
-            threshold_lookback_days=int(
-                os.getenv("THRESHOLD_LOOKBACK_DAYS", "7")
-            ),
+            threshold_lookback_days=int(os.getenv("THRESHOLD_LOOKBACK_DAYS", "7")),
             threshold_hourly_deviation_multiplier=float(
-                os.getenv(
-                    "THRESHOLD_HOURLY_DEVIATION_MULTIPLIER", "1.0"
-                )
+                os.getenv("THRESHOLD_HOURLY_DEVIATION_MULTIPLIER", "1.0")
             ),
             metrics_listen_port=_env_optional_int("METRICS_LISTEN_PORT"),
             kafka_linger_ms=int(os.getenv("KAFKA_LINGER_MS", "5")),
             kafka_batch_bytes=int(os.getenv("KAFKA_BATCH_BYTES", "32768")),
             kafka_compression_codec=(
-                os.getenv("KAFKA_COMPRESSION_CODEC", "lz4").strip().lower()
-                or "lz4"
+                os.getenv("KAFKA_COMPRESSION_CODEC", "lz4").strip().lower() or "lz4"
             ),
             redis_url=(
                 load_secret("REDIS_URL", service_name=service_name) or ""
@@ -562,12 +541,10 @@ class RuntimeSettings:
             ),
             proto_dir=_runtime_proto_dir(),
             kafka_raw_value_format=(
-                os.getenv("KAFKA_RAW_VALUE_FORMAT", "json").strip().lower()
-                or "json"
+                os.getenv("KAFKA_RAW_VALUE_FORMAT", "json").strip().lower() or "json"
             ),
             kafka_signal_value_format=(
-                os.getenv("KAFKA_SIGNAL_VALUE_FORMAT", "json").strip().lower()
-                or "json"
+                os.getenv("KAFKA_SIGNAL_VALUE_FORMAT", "json").strip().lower() or "json"
             ),
             schema_registry_url=(
                 (os.getenv("SCHEMA_REGISTRY_URL") or "").strip() or None
@@ -595,22 +572,15 @@ class RuntimeSettings:
                 (os.getenv("CLICKHOUSE_USERNAME") or "").strip() or None
             ),
             clickhouse_http_password=(
-                load_secret("CLICKHOUSE_PASSWORD", service_name=service_name)
-                or ""
+                load_secret("CLICKHOUSE_PASSWORD", service_name=service_name) or ""
             ).strip()
             or None,
-            signal_min_quality_score=_env_optional_int(
-                "SIGNAL_MIN_QUALITY_SCORE"
-            ),
-            signal_delivery_enabled=_env_bool(
-                "SIGNAL_DELIVERY_ENABLED", default=True
-            ),
+            signal_min_quality_score=_env_optional_int("SIGNAL_MIN_QUALITY_SCORE"),
+            signal_delivery_enabled=_env_bool("SIGNAL_DELIVERY_ENABLED", default=True),
             signal_delivery_min_quality=int(
                 os.getenv("SIGNAL_DELIVERY_MIN_QUALITY", "80")
             ),
-            signal_delivery_min_quality_raw=os.getenv(
-                "SIGNAL_DELIVERY_MIN_QUALITY"
-            ),
+            signal_delivery_min_quality_raw=os.getenv("SIGNAL_DELIVERY_MIN_QUALITY"),
             signal_delivery_max_per_hour=int(
                 os.getenv("SIGNAL_DELIVERY_MAX_PER_HOUR", "6")
             ),
@@ -621,9 +591,7 @@ class RuntimeSettings:
                 os.getenv("SIGNAL_DELIVERY_TYPE_RULES_JSON", "").strip()
             ),
             signal_delivery_default_min_notional_rub=float(
-                os.getenv(
-                    "SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "40000000"
-                )
+                os.getenv("SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "40000000")
             ),
             signal_delivery_notional_policy_path=Path(
                 os.getenv(
@@ -635,9 +603,7 @@ class RuntimeSettings:
             signal_delivery_max_event_age_seconds=int(
                 os.getenv("SIGNAL_DELIVERY_MAX_EVENT_AGE_SECONDS", "120")
             ),
-            market_unary_poll_seconds=int(
-                os.getenv("MARKET_UNARY_POLL_SECONDS", "0")
-            ),
+            market_unary_poll_seconds=int(os.getenv("MARKET_UNARY_POLL_SECONDS", "0")),
             market_unary_single_shot=_env_bool(
                 "MARKET_UNARY_SINGLE_SHOT", default=False
             ),
@@ -659,12 +625,9 @@ class RuntimeSettings:
                 os.getenv("MARKET_UNARY_TECH_INTERVAL", "1h").strip() or "1h"
             ),
             market_unary_tech_type_of_price=(
-                os.getenv("MARKET_UNARY_TECH_TYPE_OF_PRICE", "close").strip()
-                or "close"
+                os.getenv("MARKET_UNARY_TECH_TYPE_OF_PRICE", "close").strip() or "close"
             ),
-            market_unary_tech_length=int(
-                os.getenv("MARKET_UNARY_TECH_LENGTH", "14")
-            ),
+            market_unary_tech_length=int(os.getenv("MARKET_UNARY_TECH_LENGTH", "14")),
             market_unary_tech_window_minutes=int(
                 os.getenv("MARKET_UNARY_TECH_WINDOW_MINUTES", "1440")
             ),
@@ -684,8 +647,7 @@ class RuntimeSettings:
                 os.getenv("ADMIN_API_ALLOWED_IPS", "")
             ),
             expectation_catalog_version=(
-                (os.getenv("EXPECTATION_CATALOG_VERSION") or "").strip()
-                or None
+                (os.getenv("EXPECTATION_CATALOG_VERSION") or "").strip() or None
             ),
             detector_config_version=(
                 (os.getenv("DETECTOR_CONFIG_VERSION") or "").strip() or None
@@ -787,27 +749,19 @@ def _detector_settings_from_mapping(
         baseline_points=int(detector.get("baseline_points", 120)),
         trade_window_seconds=int(detector.get("trade_window_seconds", 60)),
         price_window_seconds=int(detector.get("price_window_seconds", 90)),
-        orderbook_window_seconds=int(
-            detector.get("orderbook_window_seconds", 120)
-        ),
+        orderbook_window_seconds=int(detector.get("orderbook_window_seconds", 120)),
         baseline_volatility_window_seconds=int(
             detector.get("baseline_volatility_window_seconds", 180)
         ),
-        alert_cooldown_seconds=int(
-            detector.get("alert_cooldown_seconds", 120)
-        ),
-        volume_zscore_threshold=float(
-            detector.get("volume_zscore_threshold", 4.0)
-        ),
+        alert_cooldown_seconds=int(detector.get("alert_cooldown_seconds", 120)),
+        volume_zscore_threshold=float(detector.get("volume_zscore_threshold", 4.0)),
         trade_count_zscore_threshold=float(
             detector.get("trade_count_zscore_threshold", 4.0)
         ),
         price_return_zscore_threshold=float(
             detector.get("price_return_zscore_threshold", 3.5)
         ),
-        spread_zscore_threshold=float(
-            detector.get("spread_zscore_threshold", 3.0)
-        ),
+        spread_zscore_threshold=float(detector.get("spread_zscore_threshold", 3.0)),
         imbalance_zscore_threshold=float(
             detector.get("imbalance_zscore_threshold", 3.0)
         ),
@@ -818,20 +772,14 @@ def _detector_settings_from_mapping(
             detector.get("price_move_absolute_threshold_bps", 0.0)
         ),
         combo_enabled=bool(detector.get("combo_enabled", False)),
-        combo_freshness_seconds=int(
-            detector.get("combo_freshness_seconds", 15)
-        ),
+        combo_freshness_seconds=int(detector.get("combo_freshness_seconds", 15)),
         combo_min_score=int(detector.get("combo_min_score", 6)),
         combo_alert_cooldown_seconds=int(
             detector.get("combo_alert_cooldown_seconds", 180)
         ),
         combo_spread_points=int(detector.get("combo_spread_points", 1)),
-        combo_imbalance_points=int(
-            detector.get("combo_imbalance_points", 1)
-        ),
-        combo_tick_rate_points=int(
-            detector.get("combo_tick_rate_points", 2)
-        ),
+        combo_imbalance_points=int(detector.get("combo_imbalance_points", 1)),
+        combo_tick_rate_points=int(detector.get("combo_tick_rate_points", 2)),
         combo_delta_points=int(detector.get("combo_delta_points", 2)),
         combo_imbalance_long_threshold=float(
             detector.get("combo_imbalance_long_threshold", 0.80)
@@ -839,26 +787,14 @@ def _detector_settings_from_mapping(
         combo_imbalance_short_threshold=float(
             detector.get("combo_imbalance_short_threshold", 0.20)
         ),
-        combo_delta_min_abs_qty=float(
-            detector.get("combo_delta_min_abs_qty", 1.0)
-        ),
+        combo_delta_min_abs_qty=float(detector.get("combo_delta_min_abs_qty", 1.0)),
         spoofing_enabled=bool(detector.get("spoofing_enabled", False)),
         spoofing_wall_ratio=float(detector.get("spoofing_wall_ratio", 2.5)),
-        spoofing_qty_drop_ratio=float(
-            detector.get("spoofing_qty_drop_ratio", 0.55)
-        ),
-        spoofing_max_mid_move_bps=float(
-            detector.get("spoofing_max_mid_move_bps", 3.0)
-        ),
-        spoofing_max_gap_seconds=float(
-            detector.get("spoofing_max_gap_seconds", 2.0)
-        ),
-        spoofing_min_wall_qty=float(
-            detector.get("spoofing_min_wall_qty", 500.0)
-        ),
-        spoofing_lookback_seconds=float(
-            detector.get("spoofing_lookback_seconds", 5.0)
-        ),
+        spoofing_qty_drop_ratio=float(detector.get("spoofing_qty_drop_ratio", 0.55)),
+        spoofing_max_mid_move_bps=float(detector.get("spoofing_max_mid_move_bps", 3.0)),
+        spoofing_max_gap_seconds=float(detector.get("spoofing_max_gap_seconds", 2.0)),
+        spoofing_min_wall_qty=float(detector.get("spoofing_min_wall_qty", 500.0)),
+        spoofing_lookback_seconds=float(detector.get("spoofing_lookback_seconds", 5.0)),
         order_book_depth_levels=int(detector.get("order_book_depth_levels", 5)),
         obi_dynamics_enabled=bool(detector.get("obi_dynamics_enabled", False)),
         obi_delta_absolute_threshold=float(
@@ -870,37 +806,53 @@ def _detector_settings_from_mapping(
         trade_burst_enabled=bool(detector.get("trade_burst_enabled", False)),
         trade_burst_window_ms=int(detector.get("trade_burst_window_ms", 100)),
         trade_burst_min_trades=int(detector.get("trade_burst_min_trades", 50)),
-        trade_burst_min_abs_qty=float(
-            detector.get("trade_burst_min_abs_qty", 5.0)
+        trade_burst_min_abs_qty=float(detector.get("trade_burst_min_abs_qty", 5.0)),
+        confirmed_impulse_enabled=bool(
+            detector.get("confirmed_impulse_enabled", False)
+        ),
+        confirmed_impulse_freshness_seconds=int(
+            detector.get("confirmed_impulse_freshness_seconds", 60)
+        ),
+        confirmed_impulse_min_move_bps=float(
+            detector.get("confirmed_impulse_min_move_bps", 10.0)
+        ),
+        confirmed_impulse_min_abs_delta_qty=float(
+            detector.get("confirmed_impulse_min_abs_delta_qty", 1.0)
+        ),
+        liquidity_vacuum_enabled=bool(detector.get("liquidity_vacuum_enabled", False)),
+        liquidity_vacuum_lookback_seconds=int(
+            detector.get("liquidity_vacuum_lookback_seconds", 60)
+        ),
+        liquidity_vacuum_min_depth_drop_ratio=float(
+            detector.get("liquidity_vacuum_min_depth_drop_ratio", 0.45)
+        ),
+        liquidity_vacuum_min_spread_zscore=float(
+            detector.get("liquidity_vacuum_min_spread_zscore", 2.5)
+        ),
+        liquidity_vacuum_min_reference_qty=float(
+            detector.get("liquidity_vacuum_min_reference_qty", 1.0)
         ),
         lead_lag_enabled=bool(detector.get("lead_lag_enabled", False)),
-        lead_lag_window_seconds=int(
-            detector.get("lead_lag_window_seconds", 30)
-        ),
-        lead_lag_leader_move_bps=float(
-            detector.get("lead_lag_leader_move_bps", 8.0)
-        ),
-        lead_lag_follower_max_bps=float(
-            detector.get("lead_lag_follower_max_bps", 2.0)
-        ),
+        lead_lag_window_seconds=int(detector.get("lead_lag_window_seconds", 30)),
+        lead_lag_leader_move_bps=float(detector.get("lead_lag_leader_move_bps", 8.0)),
+        lead_lag_follower_max_bps=float(detector.get("lead_lag_follower_max_bps", 2.0)),
         min_relative_metric_excursion=float(
             detector.get("min_relative_metric_excursion", 0.0)
         ),
-        limit_band_warning_bps=float(
-            detector.get("limit_band_warning_bps", 0.0)
-        ),
+        limit_band_warning_bps=float(detector.get("limit_band_warning_bps", 0.0)),
         signal_orderbook_inconsistent=bool(
             detector.get("signal_orderbook_inconsistent", False)
         ),
         open_interest_zscore_threshold=float(
             detector.get("open_interest_zscore_threshold", 0.0)
         ),
+        open_interest_min_price_move_bps=float(
+            detector.get("open_interest_min_price_move_bps", 5.0)
+        ),
         candle_range_zscore_threshold=float(
             detector.get("candle_range_zscore_threshold", 0.0)
         ),
-        track_market_access_flags=bool(
-            detector.get("track_market_access_flags", True)
-        ),
+        track_market_access_flags=bool(detector.get("track_market_access_flags", True)),
         attach_unary_context_to_signals=bool(
             detector.get("attach_unary_context_to_signals", True)
         ),
@@ -916,9 +868,7 @@ def load_instrument_configs(path: Path) -> list[InstrumentSubscriptionConfig]:
     result: list[InstrumentSubscriptionConfig] = []
     for item in instruments:
         if not isinstance(item, dict):
-            raise ValueError(
-                f"Instrument config items in {path} must be mappings"
-            )
+            raise ValueError(f"Instrument config items in {path} must be mappings")
         subscriptions = item.get("subscriptions", {}) or {}
         if not isinstance(subscriptions, dict):
             raise ValueError(
@@ -942,9 +892,7 @@ def load_instrument_configs(path: Path) -> list[InstrumentSubscriptionConfig]:
                     else None
                 ),
                 candles=bool(subscriptions.get("candles", False)),
-                candle_interval=str(
-                    subscriptions.get("candle_interval", "1m")
-                ),
+                candle_interval=str(subscriptions.get("candle_interval", "1m")),
             )
         )
     return result
@@ -963,15 +911,11 @@ def load_detector_config(
         override_raw = _read_yaml(overrides_path)
         override_detector = override_raw.get("detector") or {}
         if override_detector and not isinstance(override_detector, dict):
-            raise ValueError(
-                f"'detector' in {overrides_path} must be a mapping"
-            )
+            raise ValueError(f"'detector' in {overrides_path} must be a mapping")
         detector_block = {**detector_block, **override_detector}
         override_per_raw = override_raw.get("per_instrument") or {}
         if override_per_raw and not isinstance(override_per_raw, dict):
-            raise ValueError(
-                f"'per_instrument' in {overrides_path} must be a mapping"
-            )
+            raise ValueError(f"'per_instrument' in {overrides_path} must be a mapping")
         per_raw = {**per_raw, **override_per_raw}
     base_settings = _detector_settings_from_mapping(detector_block)
     if per_raw and not isinstance(per_raw, dict):
@@ -982,9 +926,7 @@ def load_detector_config(
         if not key:
             continue
         if not isinstance(overrides, dict):
-            raise ValueError(
-                f"per_instrument['{key}'] in {path} must be a mapping"
-            )
+            raise ValueError(f"per_instrument['{key}'] in {path} must be a mapping")
         merged = {**detector_block, **overrides}
         per_instrument[key] = _detector_settings_from_mapping(merged)
 

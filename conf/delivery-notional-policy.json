@@ -1,0 +1,12 @@
+{
+  "default_min_notional_rub": 40000000,
+  "signal_min_notional_rub": {
+    "aggressive_trade_burst": 0,
+    "confirmed_impulse_long": 0,
+    "confirmed_impulse_short": 0,
+    "futures_positioning": 0,
+    "liquidity_vacuum": 0,
+    "obi_dynamics": 0,
+    "open_interest_spike": 0
+  }
+}

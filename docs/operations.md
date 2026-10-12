@@ -121,14 +121,19 @@ Report группирует forward VWAP metrics по signal type, ticker, quali
 
 ## Controlled Rollout
 
-Новые или ранее отключенные signals должны начинаться как storage/admin-only data:
+Для v1.1 владелец явно выбрал прямое Telegram-наблюдение следующих типов:
 
-| Stage | Signal type | Initial channel |
+| Stage | Signal type | Текущий channel |
 |---|---|---|
 | 1 | `candle_range_spike` на 5-10 liquid TQBR instruments с включенными candles | `admin_only` |
-| 2 | `obi_dynamics` на core equities/futures со стабильным orderbook | `admin_only` |
-| 3 | `open_interest_spike` только для futures с реальными source data | `admin_only` |
-| 4 | `aggressive_trade_burst` на самых liquid instruments | `admin_only` |
-| 5 | `lead_lag_divergence` только для явно настроенных pairs | `admin_only` |
+| 2 | `confirmed_impulse_long/short` | `realtime` |
+| 3 | `liquidity_vacuum` и `obi_dynamics` | `realtime` |
+| 4 | `futures_positioning` только для futures с OI | `realtime` |
+| 5 | `aggressive_trade_burst` | `realtime` |
+| 6 | `lead_lag_divergence` только для явно настроенных pairs | `admin_only` |
 
-Продвигайте signal из admin-only в digest или realtime только после того, как source health, feedback и accuracy data подтверждают изменение.
+Realtime rollout предназначен для ручной оценки через Telegram. Если тип даёт
+шум, немедленно задайте ему `{"admin_only": true}` в
+`SIGNAL_DELIVERY_TYPE_RULES_JSON`; custom rule имеет приоритет над встроенным
+rollout. После feedback/accuracy review тип можно оставить, вернуть в digest
+или отключить в `conf/detectors.yaml`.

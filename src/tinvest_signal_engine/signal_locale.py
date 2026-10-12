@@ -17,9 +17,12 @@ _SIGNAL_TYPE_RU: dict[str, str] = {
     "trade_rate_spike": "Всплеск частоты сделок",
     "trade_count_spike": "Всплеск числа сделок",
     "price_jump": "Сильное движение цены",
+    "confirmed_impulse_long": "Подтверждённый импульс вверх",
+    "confirmed_impulse_short": "Подтверждённый импульс вниз",
     "price_move_spike": "Резкое движение цены",
     "spread_widening": "Расширение спреда",
     "spread_spike": "Расширение спреда",
+    "liquidity_vacuum": "Вакуум ликвидности",
     "orderbook_imbalance": "Дисбаланс стакана",
     "imbalance_spike": "Дисбаланс стакана",
     "obi_dynamics": "Скачок индикатора OBI",
@@ -35,6 +38,7 @@ _SIGNAL_TYPE_RU: dict[str, str] = {
     "orderbook_snapshot_inconsistent": "Несогласованный снимок стакана",
     "price_near_limit_band": "Близко к лимиту цены дня",
     "open_interest_spike": "Всплеск открытого интереса",
+    "futures_positioning": "Изменение позиций во фьючерсе",
     "candle_range_spike": "Широкий диапазон свечи",
     "bond_maturity_convergence": "Схождение облигации к номиналу",
     "morning_retracement_recommendation": "Вероятный утренний возврат цены",
@@ -100,10 +104,24 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
             f"Диапазон движения цены за ~{win} с выбивается из недавней волатильности "
             f"(|z|≈{z:.1f}): резкий сдвиг котировок относительно базы."
         )
+    if st in {"confirmed_impulse_long", "confirmed_impulse_short"}:
+        direction = "вверх" if st.endswith("long") else "вниз"
+        delta = float(p.get("signed_delta_qty") or 0.0)
+        return (
+            f"Движение цены {direction} подтверждено повышенной торговой активностью "
+            f"и согласованной дельтой агрессивных сделок ({delta:.1f} лота)."
+        )
     if st == "spread_widening":
         return (
             f"Спред bid/ask в базисных пунктах за окно ~{win} с вырос относительно нормы "
             f"(|z|≈{z:.1f}): ликвидность на лучших ценах могла ухудшиться."
+        )
+    if st == "liquidity_vacuum":
+        drop = float(p.get("depth_drop_ratio") or 0.0) * 100.0
+        side = str(p.get("weaker_side") or "both")
+        return (
+            f"Глубина верхних уровней стакана сократилась примерно на {drop:.0f}% "
+            f"одновременно с аномальным расширением спреда; слабая сторона: {side}."
         )
     if st == "orderbook_imbalance":
         return (
@@ -126,16 +144,39 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
         )
     if st == "aggressive_trade_burst":
         d = str(p.get("direction", "")).lower()
-        dr = "покупок" if d == "buy" else "продаж" if d == "sell" else d or "одной стороны"
+        dr = (
+            "покупок"
+            if d == "buy"
+            else "продаж"
+            if d == "sell"
+            else d or "одной стороны"
+        )
         n = int(p.get("print_count") or signal.metric_value)
         return (
             f"За короткое окно зафиксирована плотная серия сделок в сторону {dr} "
             f"({n} тиков): агрессивный поток одного направления."
         )
+    if st == "futures_positioning":
+        regime_labels = {
+            "long_build": "набор длинных позиций",
+            "short_build": "набор коротких позиций",
+            "short_covering": "закрытие коротких позиций",
+            "long_liquidation": "закрытие длинных позиций",
+        }
+        regime = regime_labels.get(str(p.get("regime")), "смена позиционирования")
+        return (
+            f"Цена и открытый интерес указывают на режим «{regime}»: "
+            f"изменение OI {float(p.get('open_interest_delta') or 0.0):+.0f}, "
+            f"цена {float(p.get('price_change_bps') or 0.0):+.1f} bps."
+        )
     if st in {"microstructure_combo_long", "microstructure_combo_short"}:
         bias = "лонговая" if "long" in st else "шортовая"
         cd = p.get("combo_detail") if isinstance(p.get("combo_detail"), dict) else {}
-        pa = cd.get("points_awarded") if isinstance(cd.get("points_awarded"), dict) else {}
+        pa = (
+            cd.get("points_awarded")
+            if isinstance(cd.get("points_awarded"), dict)
+            else {}
+        )
         bits = []
         if pa.get("spread"):
             bits.append("спред")
@@ -155,8 +196,7 @@ def build_plain_explanation_ru(signal: TriggerSignal) -> str:
         suf = f" (лидер: {leader})" if leader else ""
         return (
             "Лидер в паре сильно пошёл в цене, а этот инструмент почти не отреагировал "
-            "в том же окне — возможное запаздывание или расхождение корреляции."
-            + suf
+            "в том же окне — возможное запаздывание или расхождение корреляции." + suf
         )
     # Универсальный fallback
     return (
@@ -198,9 +238,7 @@ def build_telegram_html(
     wterm = html.escape(t_invest_web_terminal_url(), quote=True)
     if signal.signal_type == "morning_retracement_recommendation":
         payload = signal.payload or {}
-        direction = (
-            "ВВЕРХ" if payload.get("expected_direction") == "up" else "ВНИЗ"
-        )
+        direction = "ВВЕРХ" if payload.get("expected_direction") == "up" else "ВНИЗ"
         probability = _percent_ru(
             payload.get("target_probability", payload.get("model_probability"))
         )
@@ -217,7 +255,7 @@ def build_telegram_html(
         expected_end = _time_ru(payload.get("expected_hit_window_end"))
         deadline = _time_ru(payload.get("deadline_at"))
         return (
-            f"<a href=\"{term_href}\"><b>{t_esc}</b></a> · "
+            f'<a href="{term_href}"><b>{t_esc}</b></a> · '
             f"<b>ВОЗВРАТ {direction}</b>\n"
             f"Вероятность цели {target_label}: <b>{probability}</b>\n"
             f"Вероятность результата без убытка: "
@@ -236,15 +274,15 @@ def build_telegram_html(
             f"без убытка {historical_non_loss} "
             f"(осторожная оценка {lower}, "
             f"{int(payload.get('evidence_sample_count') or 0)} случаев)\n"
-            f"<a href=\"{inv_href}\">Открыть карточку инструмента</a>\n\n"
+            f'<a href="{inv_href}">Открыть карточку инструмента</a>\n\n'
             "Исследовательская рекомендация: вероятность не гарантирует результат."
         )
     # Вложенность <b><a>…</a></b> у Bot API часто даёт 400; допустимо <a><b>…</b></a>.
     lines = [
-        f"<a href=\"{term_href}\"><b>{t_esc}</b></a>",
+        f'<a href="{term_href}"><b>{t_esc}</b></a>',
         f"Тип: {type_ru}",
-        f"Терминал: <a href=\"{wterm}\">tbank.ru/terminal</a> · "
-        f"<a href=\"{inv_href}\">карточка инструмента</a>",
+        f'Терминал: <a href="{wterm}">tbank.ru/terminal</a> · '
+        f'<a href="{inv_href}">карточка инструмента</a>',
         "",
     ]
     if detail:
