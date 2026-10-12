@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "release_metadata_paths": [
+    "CHANGELOG.md",
+    "docs/release_notes.md",
+    "docs/releases/**"
+  ],
+  "documentation_paths": [
+    "*.md",
+    "docs/**"
+  ],
+  "indicator_paths": [
+    "conf/detectors.yaml",
+    "conf/detectors.overrides.yaml",
+    "src/tinvest_signal_engine/detector_core.py",
+    "src/tinvest_signal_engine/delivery_policy.py",
+    "src/tinvest_signal_engine/market_unary.py",
+    "src/tinvest_signal_engine/signal_enrichment.py",
+    "src/tinvest_signal_engine/signal_interpretation.py",
+    "src/tinvest_signal_engine/signal_locale.py",
+    "src/tinvest_signal_engine/signal_quality.py",
+    "src/tinvest_signal_engine/services/market_unary_emitter.py",
+    "src/tinvest_signal_engine/domain/indicators/**",
+    "src/tinvest_signal_engine/application/indicators/**",
+    "src/tinvest_signal_engine/adapters/indicators/**",
+    "tests/indicators/**",
+    "tests/test_api_admin.py",
+    "tests/test_delivery_policy.py",
+    "tests/test_delivery_recovery.py",
+    "tests/test_detector.py",
+    "tests/test_detector_config.py",
+    "tests/test_detector_observations.py",
+    "tests/test_detector_state_persist.py",
+    "tests/test_market_unary.py",
+    "tests/test_market_unary_emitter.py",
+    "tests/test_signal_locale.py",
+    "tests/test_signal_provenance.py",
+    "tests/test_telegram_delivery_resilience.py"
+  ],
+  "indicator_tests": [
+    "tests/test_api_admin.py",
+    "tests/test_delivery_policy.py",
+    "tests/test_delivery_recovery.py",
+    "tests/test_detector.py",
+    "tests/test_detector_config.py",
+    "tests/test_detector_observations.py",
+    "tests/test_detector_state_persist.py",
+    "tests/test_market_unary.py",
+    "tests/test_market_unary_emitter.py",
+    "tests/test_signal_locale.py",
+    "tests/test_signal_provenance.py",
+    "tests/test_telegram_delivery_resilience.py"
+  ]
+}

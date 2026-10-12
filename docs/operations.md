@@ -17,8 +17,9 @@ Signal Cockpit показывает этот fingerprint в верхней statu
 Docker builds могут передавать:
 
 ```bash
+APP_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 docker build \
-  --build-arg APP_VERSION=1.0.0 \
+  --build-arg APP_VERSION="${APP_VERSION}" \
   --build-arg APP_COMMIT_SHA="$(git rev-parse --short=12 HEAD)" \
   --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t tinvest-signal-engine .

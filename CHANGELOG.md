@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- CI и tag-driven release стали change-aware: правки индикаторов запускают
+  целевой набор тестов и lightweight package smoke без пересборки Docker-стека;
+  зависимости, миграции, инфраструктура и неизвестные пути по-прежнему требуют
+  полный test suite и production image smoke.
+- Версия локального runtime больше не дублируется вручную в Dockerfile, API и
+  Admin Cockpit: релиз получает её из тега/build argument, установленный пакет
+  — из package metadata, а исходники без установки показывают local-version.
+
 ## 1.0.0 - 2026-10-12
 
 - Зафиксирован первый стабильный контракт production-oriented движка:
