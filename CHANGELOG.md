@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.1.2 - 2026-10-12
+
+- Added the durable delivery worker to the default Compose stack so realtime
+  rollout signals are actually drained from the outbox to Telegram/webhooks.
+- Exposed delivery-worker health and Prometheus metrics to the existing
+  operations surfaces.
+
 ## 1.1.1 - 2026-10-12
 
 - Added a one-shot Compose migration gate so PostgreSQL and ClickHouse upgrades

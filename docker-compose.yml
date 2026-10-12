@@ -218,6 +218,27 @@ services:
     expose:
       - "9108"
 
+  # Durable outbox -> Telegram/webhook. Runs independently from detection so
+  # transient delivery failures cannot stop market processing.
+  delivery-worker:
+    build: *app-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DELIVERY_WORKER_METRICS_LISTEN_PORT: "${DELIVERY_WORKER_METRICS_LISTEN_PORT:-9111}"
+      DELIVERY_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/delivery-worker.json
+    volumes:
+      - ./var/runtime-health:/app/var/runtime-health
+    command: ["tinvest-delivery-worker"]
+    restart: unless-stopped
+    expose:
+      - "9111"
+
   # Метрики из JSON выхода duckdb_label_signals (mount ./var/accuracy).
   accuracy-metrics:
     build: *app-build
@@ -406,6 +427,7 @@ services:
     depends_on:
       - redpanda
       - detector
+      - delivery-worker
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
