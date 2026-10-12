@@ -8,6 +8,10 @@ name: Tagged release
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify-and-release:
     runs-on: ubuntu-latest
@@ -38,12 +42,32 @@ jobs:
 
           with open("pyproject.toml", "rb") as source:
               version = tomllib.load(source)["project"]["version"]
+          with open("uv.lock", "rb") as source:
+              packages = tomllib.load(source)["package"]
+          lock_version = next(
+              package["version"]
+              for package in packages
+              if package["name"] == "tinvest-signal-engine"
+          )
           expected = f"v{version}"
           if os.environ["RELEASE_TAG"] != expected:
               raise SystemExit(
                   f"tag {os.environ['RELEASE_TAG']!r} does not match {expected!r}"
               )
+          if lock_version != version:
+              raise SystemExit(
+                  f"uv.lock package version {lock_version!r} does not match {version!r}"
+              )
           PY
+
+      - name: Select release verification scope
+        run: |
+          python scripts/release_scope.py \
+            --previous-release \
+            --current-tag "$GITHUB_REF_NAME" \
+            --head "$GITHUB_SHA" \
+            --github-env "$GITHUB_ENV" \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Sync T-Invest SDK
         run: python scripts/sync_invest_sdk.py
@@ -51,15 +75,16 @@ jobs:
       - name: Install verification dependencies
         run: python -m pip install --upgrade build ".[dev,docs,backtest]"
 
-      - name: Run release gates
+      - name: Run scoped release gates
         run: |
-          python -m pytest -q
+          python scripts/release_scope.py --run-tests "$RELEASE_SCOPE"
           python scripts/check_architecture.py
           node --check src/tinvest_signal_engine/static/admin_app.js
           python -m mkdocs build --strict
           python -m build
 
       - name: Build and smoke production image
+        if: env.RELEASE_DOCKER_REQUIRED == 'true'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_SHA: ${{ github.sha }}
@@ -73,6 +98,24 @@ jobs:
             -t tinvest-signal-engine:release .
           docker run --rm tinvest-signal-engine:release python -c \
             "from tinvest_signal_engine.runtime_info import runtime_fingerprint; print(runtime_fingerprint())"
+
+      - name: Smoke lightweight package
+        if: env.RELEASE_DOCKER_REQUIRED != 'true'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -m venv /tmp/tinvest-release-smoke
+          /tmp/tinvest-release-smoke/bin/pip install --no-deps dist/*.whl
+          /tmp/tinvest-release-smoke/bin/python - <<'PY'
+          import importlib.metadata
+          import os
+
+          expected = os.environ["RELEASE_TAG"].removeprefix("v")
+          actual = importlib.metadata.version("tinvest-signal-engine")
+          if actual != expected:
+              raise SystemExit(f"built package {actual!r} does not match {expected!r}")
+          print(f"lightweight package smoke: {actual}")
+          PY
 
       - name: Publish GitHub release
         env:

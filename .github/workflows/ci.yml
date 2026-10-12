@@ -13,6 +13,10 @@ name: CI
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     name: Tests and static checks
@@ -20,12 +24,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+
+      - name: Select verification scope
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base_sha="$EVENT_BASE_SHA"
+          if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]]; then
+            base_sha="$(git rev-parse HEAD^)"
+          fi
+          python scripts/release_scope.py \
+            --base "$base_sha" \
+            --head "$GITHUB_SHA" \
+            --github-env "$GITHUB_ENV" \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -38,8 +58,8 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -e ".[dev,docs,backtest]"
 
-      - name: Run pytest
-        run: python -m pytest -q
+      - name: Run scope-specific tests
+        run: python scripts/release_scope.py --run-tests "$RELEASE_SCOPE"
 
       - name: Check Clean Architecture boundaries
         run: python scripts/check_architecture.py
@@ -51,6 +71,7 @@ jobs:
         run: python -m mkdocs build --strict
 
       - name: Build Docker image and smoke runtime
+        if: env.RELEASE_DOCKER_REQUIRED == 'true'
         run: |
           cp .env.example .env
           docker compose config --quiet

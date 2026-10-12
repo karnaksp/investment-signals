@@ -81,6 +81,7 @@ nav:
   - Решение проблем: troubleshooting.md
   - Signal Cockpit: admin_cockpit.md
   - Operations and rollout: operations.md
+  - Выпуск релизов: releasing.md
   - Release notes: release_notes.md
   - Roadmap: roadmap.md
   - Price prediction research: price_prediction_research.md

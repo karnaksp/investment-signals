@@ -38,7 +38,7 @@ def _app_version() -> str:
     try:
         return metadata.version("tinvest-signal-engine")
     except metadata.PackageNotFoundError:
-        return "1.0.0"
+        return "0.0.0+local"
 
 
 def _first_env(*names: str) -> str | None:
