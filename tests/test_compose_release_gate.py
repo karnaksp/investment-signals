@@ -39,3 +39,20 @@ def test_dagster_uses_its_writable_volume_as_home() -> None:
         environment = services[service_name]["environment"]
         assert environment["DAGSTER_HOME"] == "/opt/dagster/dagster_home"
         assert environment["HOME"] == environment["DAGSTER_HOME"]
+
+
+def test_default_stack_runs_the_durable_delivery_worker() -> None:
+    services = _compose()["services"]
+    worker = services["delivery-worker"]
+
+    assert worker["command"] == ["tinvest-delivery-worker"]
+    assert worker["restart"] == "unless-stopped"
+    assert (
+        worker["depends_on"]["migrate"]["condition"]
+        == "service_completed_successfully"
+    )
+    assert worker["depends_on"]["postgres"]["condition"] == "service_healthy"
+    assert worker["environment"]["DELIVERY_HEALTH_SNAPSHOT_PATH"] == (
+        "/app/var/runtime-health/delivery-worker.json"
+    )
+    assert "delivery-worker" in services["prometheus"]["depends_on"]

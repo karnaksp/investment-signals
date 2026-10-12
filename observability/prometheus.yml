@@ -12,6 +12,10 @@ scrape_configs:
     static_configs:
       - targets: ["detector:9108"]
 
+  - job_name: delivery_worker
+    static_configs:
+      - targets: ["delivery-worker:9111"]
+
   - job_name: accuracy_metrics
     static_configs:
       - targets: ["accuracy-metrics:9110"]
