@@ -126,8 +126,8 @@ detector:
 
   trade_burst_enabled: true
   trade_burst_window_ms: 500
-  trade_burst_min_trades: 24
-  trade_burst_min_abs_qty: 1000.0
+  trade_burst_min_trades: 50
+  trade_burst_min_abs_qty: 5000.0
 
   # Цена + повышенная активность + согласованная дельта агрессоров.
   confirmed_impulse_enabled: true
