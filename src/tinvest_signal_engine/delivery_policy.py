@@ -17,7 +17,7 @@ from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
 
-POLICY_VERSION = "delivery_v5"
+POLICY_VERSION = "delivery_v6"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
@@ -36,11 +36,17 @@ _ACTIVITY_CONTEXT_TYPES = {
 }
 _MOMENTUM_TYPES = {"volume_spike", "trade_rate_spike", "price_jump"}
 _LIQUIDITY_TYPES = {"spread_widening", "orderbook_imbalance"}
+_REALTIME_ROLLOUT_TYPES = {
+    "confirmed_impulse_long",
+    "confirmed_impulse_short",
+    "liquidity_vacuum",
+    "futures_positioning",
+    "open_interest_spike",
+    "obi_dynamics",
+    "aggressive_trade_burst",
+}
 _EXPERIMENTAL_ADMIN_ONLY_TYPES = {
     "candle_range_spike",
-    "obi_dynamics",
-    "open_interest_spike",
-    "aggressive_trade_burst",
     "lead_lag_divergence",
 }
 
@@ -280,6 +286,15 @@ class DeliveryPolicy:
         quality = _quality(signal)
         abs_z = abs(float(signal.z_score))
 
+        if st in _REALTIME_ROLLOUT_TYPES:
+            return DeliveryDecision(
+                status=DELIVERY_DELIVERED,
+                reason="owner_realtime_rollout",
+                rule="realtime_signal_rollout_v1",
+                delivered_at=now,
+                channel="realtime",
+            )
+
         if st in _ALWAYS_TYPES:
             key = (signal.instrument_id, st)
             last = self._last_status_delivery.get(key)
@@ -477,6 +492,7 @@ class DeliveryPolicy:
             self.instrument_cooldown <= 0
             or signal.signal_type in _ALWAYS_TYPES
             or signal.signal_type in _COMBO_TYPES
+            or signal.signal_type in _REALTIME_ROLLOUT_TYPES
         ):
             return None
         since = now - timedelta(seconds=self.instrument_cooldown)
@@ -642,6 +658,7 @@ def _finite_number_or_none(value: object) -> float | None:
 
 
 _REASON_RU: dict[str, str] = {
+    "owner_realtime_rollout": "Тип включён владельцем в realtime-наблюдение и сразу отправлен в Telegram.",
     "validated_bond_convergence": "Историческая проверка сигнала схождения облигации к номиналу прошла заданный порог; уведомление отправлено сразу.",
     "bond_convergence_evidence_below_gate": "Сигнал схождения облигации сохранён, но историческая проверка не прошла заданный порог.",
     "combo_score_ge_6": "Комбо-сигнал набрал проходной score и отправлен в realtime.",

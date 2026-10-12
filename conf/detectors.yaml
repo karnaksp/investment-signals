@@ -50,8 +50,10 @@ detector:
   limit_band_warning_bps: 0
   # Алерт при is_consistent=false в снимке стакана.
   signal_orderbook_inconsistent: false
-  # z-score по потоку open_interest (фьючерсы); 0 = выключено.
-  open_interest_zscore_threshold: 0
+  # z-score по абсолютному изменению open_interest (фьючерсы).
+  # Сигнал дополнительно классифицирует price+OI режим: набор/закрытие позиций.
+  open_interest_zscore_threshold: 3.5
+  open_interest_min_price_move_bps: 5.0
   # z-score по (high−low)/open в bps на закрытых свечах; 0 = выключено (нужны candles в instruments).
   candle_range_zscore_threshold: 0
   # Сигнал market_access_changed при смене limit_order_available / market_order_available.
@@ -114,14 +116,30 @@ detector:
   # spoofing_min_wall_qty: 500.0     # минимальный объём стены (лоты, сумма 3 уровней)
   # spoofing_lookback_seconds: 5.0   # хвост истории снапшотов
 
-  # order_book_depth_levels: 5     # L2: сколько уровней суммировать для imbalance / OBI / spoofing
-  # obi_dynamics_enabled: false
-  # obi_delta_absolute_threshold: 0.12
-  # obi_delta_zscore_threshold: 2.5
-  # trade_burst_enabled: false
-  # trade_burst_window_ms: 100
-  # trade_burst_min_trades: 50
-  # trade_burst_min_abs_qty: 5.0
+  # --- Realtime rollout v1.1: новые типы сразу отправляются в Telegram ---
+  order_book_depth_levels: 5
+  obi_dynamics_enabled: true
+  obi_delta_absolute_threshold: 0.15
+  obi_delta_zscore_threshold: 3.0
+
+  trade_burst_enabled: true
+  trade_burst_window_ms: 500
+  trade_burst_min_trades: 12
+  trade_burst_min_abs_qty: 10.0
+
+  # Цена + повышенная активность + согласованная дельта агрессоров.
+  confirmed_impulse_enabled: true
+  confirmed_impulse_freshness_seconds: 60
+  confirmed_impulse_min_move_bps: 10.0
+  confirmed_impulse_min_abs_delta_qty: 5.0
+
+  # Одновременное расширение спреда и исчезновение суммарной глубины L5.
+  liquidity_vacuum_enabled: true
+  liquidity_vacuum_lookback_seconds: 60
+  liquidity_vacuum_min_depth_drop_ratio: 0.45
+  liquidity_vacuum_min_spread_zscore: 2.5
+  liquidity_vacuum_min_reference_qty: 10.0
+
   # lead_lag_enabled: false
   # lead_lag_window_seconds: 30
   # lead_lag_leader_move_bps: 8.0

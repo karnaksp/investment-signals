@@ -18,7 +18,7 @@
 
 Опционально в рантайме детектора: delivery policy (`SIGNAL_DELIVERY_*`) решает, отправлять ли сигнал во внешний webhook/Telegram. В Postgres/Kafka записываются все обогащённые сигналы; в payload добавляются `delivery_status`, `delivery_reason` и `delivery_rule`.
 
-Текущий Telegram-gate намеренно строже записи в хранилище: `volume_spike` и `trade_rate_spike` требуют качества и z-score одновременно, `price_jump` требует extreme quality/z или подтверждения nearby trade activity, а standalone liquidity-сигналы подавляются без соседнего volume/trade/combo. `SIGNAL_DELIVERY_MAX_PER_HOUR` и `SIGNAL_DELIVERY_INSTRUMENT_COOLDOWN_SECONDS` проверяются по Postgres history и in-memory state, поэтому рестарт detector не сбрасывает throttle.
+Текущий Telegram-gate намеренно строже записи в хранилище: `volume_spike` и `trade_rate_spike` требуют качества и z-score одновременно, `price_jump` требует extreme quality/z или подтверждения nearby trade activity, а standalone liquidity-сигналы подавляются без соседнего volume/trade/combo. Типы rollout v1.1 (`confirmed_impulse_*`, `liquidity_vacuum`, `futures_positioning`, `obi_dynamics`, `aggressive_trade_burst`) отправляются в realtime и не блокируют друг друга общим cooldown по инструменту, но остаются под глобальным `SIGNAL_DELIVERY_MAX_PER_HOUR`. Явный custom rule `admin_only` имеет приоритет над rollout. Throttle проверяется по Postgres history и in-memory state, поэтому рестарт detector его не сбрасывает.
 
 ## Человекочитаемая интерпретация
 
@@ -49,7 +49,7 @@
 | `last_price` | Последняя цена без полной ленты | Только траектория цены в `price_window` → движение в bps |
 | `orderbook` | Снимок стакана | Лучший bid/ask, объёмы на верхних уровнях → спред и имбаланс |
 | `trading_status` | Режим торгов инструмента | Дискретное изменение статуса (аукцион, остановка и т.п. — в терминах API) |
-| `open_interest` | ОИ по инструменту | История OI → `open_interest_spike` при ненулевом пороге |
+| `open_interest` | ОИ по фьючерсу из trade subscription | Изменение OI + движение цены → `futures_positioning` |
 | `candle` | Закрытая свеча | Диапазон свечи в bps → `candle_range_spike` при ненулевом пороге |
 | `market_values` | Unary `GetMarketValues` (эмиттер / тот же raw-топик) | Не даёт сигналов; обновляет последний снимок для `unary_context` в payload сигнала, если `attach_unary_context_to_signals: true` |
 | `tech_analysis` | Unary `GetTechAnalysis` | То же, что `market_values` |
@@ -100,6 +100,20 @@
 
 **Интерпретация:** классический **импульс / гэп внутри сессии / резкий рерайт котировок**. Направление в summary не разводится отдельно — метрика симметрична по модулю.
 
+### 3a. `confirmed_impulse_long/short` — подтверждённый импульс
+
+**Торговый паттерн:** `price_jump` дополнительно подтверждён свежим
+`volume_spike` или `trade_rate_spike` и направленной дельтой агрессивных
+сделок. Положительная дельта должна совпасть с ростом цены, отрицательная — с
+падением. Согласованный OBI повышает score, но не является обязательным.
+
+**Пороги:** `confirmed_impulse_min_move_bps`,
+`confirmed_impulse_min_abs_delta_qty` и окно свежести
+`confirmed_impulse_freshness_seconds`.
+
+**Интерпретация:** это направленный сигнал продолжения, где ценовое движение
+не остаётся одиночным статистическим выбросом.
+
 ---
 
 ### 4. `spread_widening` — расширение спреда
@@ -117,6 +131,19 @@
 **Порог:** z-score ≥ `spread_zscore_threshold` (значение в YAML).
 
 **Интерпретация:** часто **падает ликвидность**, участники убирают лимитки перед новостью, повышается неопределённость, возможен **рыночный стресс**. Для отдельных инструментов широкий спред может быть нормой — поэтому используется именно **относительный** z-score к своей истории.
+
+### 4a. `liquidity_vacuum` — вакуум ликвидности
+
+**Торговый паттерн:** суммарная глубина первых N уровней bid+ask резко
+сокращается относительно среднего за `liquidity_vacuum_lookback_seconds`, и
+одновременно spread проходит `liquidity_vacuum_min_spread_zscore`.
+
+**Порог:** доля исчезнувшей глубины не меньше
+`liquidity_vacuum_min_depth_drop_ratio`; слишком маленькая reference depth
+отсекается через `liquidity_vacuum_min_reference_qty`.
+
+**Интерпретация:** участники одновременно отступили от рынка: широкий спред
+подтверждён не одной котировкой, а реальным исчезновением глубины.
 
 ---
 
@@ -176,11 +203,20 @@
 
 ---
 
-### 5e. `open_interest_spike` — всплеск открытого интереса (фьючерсы)
+### 5e. `futures_positioning` — режим цены и открытого интереса
 
-**Источник:** поток `open_interest` в нормализованных событиях (если брокер отдаёт).
+**Источник:** trade subscription запрашивает `with_open_interest=true`; детектор
+сопоставляет изменение OI с движением цены за `price_window_seconds`.
 
-**Порог:** z-score ≥ `open_interest_zscore_threshold` в YAML; **0** — детектор не обрабатывает этот тип.
+**Метрика:** абсолютное изменение OI между последовательными сэмплами. Baseline
+строится по изменениям, а не по нестационарному абсолютному уровню.
+
+**Порог:** z-score ≥ `open_interest_zscore_threshold` и модуль движения цены ≥
+`open_interest_min_price_move_bps`.
+
+**Режимы:** рост цены + рост OI — `long_build`; падение цены + рост OI —
+`short_build`; рост цены + падение OI — `short_covering`; падение обоих —
+`long_liquidation`.
 
 ---
 

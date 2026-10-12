@@ -122,6 +122,7 @@ def _serialize_instrument_state(st: Any) -> dict[str, Any] | None:
             st.microburst_ticks,
             st.obi_delta_history,
             st.open_interest_history,
+            st.last_open_interest is not None,
             st.candle_range_history,
             bool(st.last_sample_at),
             bool(st.last_active_at),
@@ -170,7 +171,8 @@ def _serialize_instrument_state(st: Any) -> dict[str, Any] | None:
         ],
         "obi_delta_history": list(st.obi_delta_history),
         "last_sampled_obi": st.last_sampled_obi,
-        "open_interest_history": list(st.open_interest_history),
+        "open_interest_delta_history": list(st.open_interest_history),
+        "last_open_interest": st.last_open_interest,
         "candle_range_history": list(st.candle_range_history),
         "last_limit_order_available": st.last_limit_order_available,
         "last_market_order_available": st.last_market_order_available,
@@ -304,11 +306,19 @@ def _deserialize_instrument_state(blob: dict[str, Any]) -> InstrumentState:
             st.last_sampled_obi = float(lso)
         except (TypeError, ValueError):
             pass
-    for v in blob.get("open_interest_history") or []:
+    # v1.0 stored absolute OI levels under ``open_interest_history``. They are
+    # intentionally not reused as the v1.1 baseline of absolute OI changes.
+    for v in blob.get("open_interest_delta_history") or []:
         try:
             st.open_interest_history.append(float(v))
         except (TypeError, ValueError):
             continue
+    last_open_interest = blob.get("last_open_interest")
+    if last_open_interest is not None:
+        try:
+            st.last_open_interest = float(last_open_interest)
+        except (TypeError, ValueError):
+            pass
     for v in blob.get("candle_range_history") or []:
         try:
             st.candle_range_history.append(float(v))

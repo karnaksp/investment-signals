@@ -54,3 +54,17 @@ class DetectorStatePersistTest(unittest.TestCase):
         self.assertEqual(restored.trade_points[-1].quantity, 10.0)
         self.assertEqual(restored.last_alert_at["price_jump"], ts)
         self.assertEqual(target._mid_track["SBER_TQBR"][-1], (ts, 101.5))
+
+    def test_open_interest_delta_baseline_survives_restart(self) -> None:
+        source = SignalDetector(DetectorSettings())
+        state = source._states["SiZ6_SPBFUT"]
+        state.open_interest_history.extend((2.0, 3.0, 5.0))
+        state.last_open_interest = 10_000.0
+
+        blob = export_window_state(source)
+        target = SignalDetector(DetectorSettings())
+        hydrate_window_state(target, blob)
+
+        restored = target._states["SiZ6_SPBFUT"]
+        self.assertEqual(list(restored.open_interest_history), [2.0, 3.0, 5.0])
+        self.assertEqual(restored.last_open_interest, 10_000.0)

@@ -106,11 +106,11 @@ flowchart LR
 
 | `event_type` | Что учитывается | Типичные сигналы |
 |--------------|-----------------|------------------|
-| `trade` | объём, число сделок, окно цен | `volume_spike`, `trade_rate_spike`, `price_jump`, combo |
-| `last_price` | движение цены в окне | `price_jump` |
-| `orderbook` | спред bps, дисбаланс верхних уровней, снапшоты L3 | `spread_widening`, `orderbook_imbalance`, `orderbook_spoofing_*`, combo |
+| `trade` | объём, число сделок, окно цен, направленная дельта | `volume_spike`, `trade_rate_spike`, `price_jump`, `aggressive_trade_burst`, `confirmed_impulse_*`, combo |
+| `last_price` | движение цены в окне | `price_jump`, `confirmed_impulse_*` |
+| `orderbook` | спред bps, дисбаланс и глубина верхних уровней | `spread_widening`, `orderbook_imbalance`, `obi_dynamics`, `liquidity_vacuum`, `orderbook_spoofing_*`, combo |
 | `trading_status` | смена статуса | `trading_status_changed` |
-| `open_interest` | открытый интерес (фьючерсы) | `open_interest_spike` (если порог > 0) |
+| `open_interest` | изменение открытого интереса + движение цены фьючерса | `futures_positioning` (если порог > 0) |
 | `candle` | закрытая свеча | `candle_range_spike` (если порог > 0) |
 | `market_values`, `tech_analysis` | unary-снимки (эмиттер или тот же топик) | новых сигналов не дают; при `attach_unary_context_to_signals` последний снимок попадает в `payload.unary_context` итогового сигнала |
 

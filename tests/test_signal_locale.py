@@ -358,3 +358,48 @@ def test_instrument_url_tqbr() -> None:
     u = t_invest_instrument_url(ticker="SBER", class_code="TQBR")
     assert "SBER" in u
     assert "stocks" in u
+
+
+def test_realtime_rollout_interpretations_are_specific() -> None:
+    impulse = build_signal_interpretation(
+        _signal(
+            signal_type="confirmed_impulse_long",
+            metric_value=6,
+            payload={
+                "direction": "long",
+                "price_change_bps": 18.0,
+                "signed_delta_qty": 25.0,
+                "score": 6,
+                "max_score": 7,
+            },
+        )
+    )
+    vacuum = build_signal_interpretation(
+        _signal(
+            signal_type="liquidity_vacuum",
+            metric_value=0.75,
+            source_event_type="orderbook",
+            payload={
+                "depth_drop_ratio": 0.75,
+                "spread_bps": 12.0,
+                "weaker_side": "bid",
+            },
+        )
+    )
+    positioning = build_signal_interpretation(
+        _signal(
+            signal_type="futures_positioning",
+            metric_value=50,
+            source_event_type="open_interest",
+            payload={
+                "regime": "long_build",
+                "direction": "long",
+                "open_interest_delta": 50,
+                "price_change_bps": 10,
+            },
+        )
+    )
+
+    assert "Подтверждённый импульс" in impulse["headline_ru"]
+    assert "Глубина стакана" in vacuum["headline_ru"]
+    assert "набор длинных позиций" in positioning["headline_ru"]

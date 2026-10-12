@@ -18,6 +18,11 @@ from .domain.detector_observations import (
     DetectorObservation,
     deterministic_observation_id,
 )
+from .domain.indicators import (
+    classify_futures_positioning,
+    detect_confirmed_impulse,
+    detect_liquidity_vacuum,
+)
 from .domain.bond_convergence import (
     HISTORICAL_EVIDENCE,
     PAR_PRICE,
@@ -83,6 +88,7 @@ class InstrumentState:
     obi_delta_history: deque[float] = field(default_factory=deque)
     last_sampled_obi: float | None = None
     open_interest_history: deque[float] = field(default_factory=deque)
+    last_open_interest: float | None = None
     candle_range_history: deque[float] = field(default_factory=deque)
     last_limit_order_available: bool | None = None
     last_market_order_available: bool | None = None
@@ -455,6 +461,11 @@ class SignalDetector:
 
         mid = (best_bid + best_ask) / 2.0
         self._push_mid(event.instrument_id, event.source_time, mid, cfg)
+        liquidity_reference = self._liquidity_reference(
+            state,
+            event.source_time,
+            cfg,
+        )
         self._record_orderbook_snapshot(
             state,
             OrderBookDepthSnapshot(
@@ -487,6 +498,11 @@ class SignalDetector:
             return signals
 
         spread_bps = ((best_ask - best_bid) / mid) * 10_000
+        spread_baseline, spread_z_score = (
+            _z_score(state.spread_history, spread_bps)
+            if state.spread_history
+            else (0.0, 0.0)
+        )
         imbalance_abs = abs((top_bids_qty - top_asks_qty) / total_qty)
         imbalance_ratio = top_bids_qty / total_qty
         volatility_context = self._baseline_volatility_context(event, cfg)
@@ -518,6 +534,24 @@ class SignalDetector:
                     "top_ask_qty": top_asks_qty,
                     **volatility_context,
                 },
+            )
+        )
+
+        signals.extend(
+            self._maybe_emit_liquidity_vacuum(
+                event=event,
+                state=state,
+                cfg=cfg,
+                reference=liquidity_reference,
+                current_bid_qty=top_bids_qty,
+                current_ask_qty=top_asks_qty,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                mid=mid,
+                spread_bps=spread_bps,
+                spread_baseline=spread_baseline,
+                spread_z_score=spread_z_score,
+                volatility_context=volatility_context,
             )
         )
 
@@ -760,6 +794,11 @@ class SignalDetector:
             or move_bps >= cfg.price_move_absolute_threshold_bps
         )
         volatility_context = self._baseline_volatility_context(event, cfg)
+        price_baseline, price_z_score = (
+            _z_score(state.return_history, move_bps)
+            if state.return_history
+            else (0.0, 0.0)
+        )
         signals = self._maybe_emit_from_history(
             event=event,
             state=state,
@@ -787,6 +826,74 @@ class SignalDetector:
             },
             absolute_gate_passed=absolute_gate_passed,
         )
+
+        if (
+            cfg.confirmed_impulse_enabled
+            and state.last_active_at.get("price_jump") == event.source_time
+        ):
+            freshness_cutoff = event.source_time - timedelta(
+                seconds=cfg.confirmed_impulse_freshness_seconds
+            )
+
+            def is_fresh(signal_type: str) -> bool:
+                observed = state.last_active_at.get(signal_type)
+                return observed is not None and observed >= freshness_cutoff
+
+            signed_delta_qty = sum(
+                point.signed_quantity for point in state.signed_trade_points
+            )
+            impulse = detect_confirmed_impulse(
+                signed_move_bps=signed_move_bps,
+                signed_delta_qty=signed_delta_qty,
+                volume_active=is_fresh("volume_spike"),
+                trade_rate_active=is_fresh("trade_rate_spike"),
+                orderbook_imbalance_ratio=state.last_orderbook_imbalance_ratio,
+                min_move_bps=cfg.confirmed_impulse_min_move_bps,
+                min_abs_delta_qty=cfg.confirmed_impulse_min_abs_delta_qty,
+            )
+            if impulse is not None:
+                signal_type = f"confirmed_impulse_{impulse.direction}"
+                state.last_active_at[signal_type] = event.source_time
+                if self._is_alert_ready(state, signal_type, event.source_time, cfg):
+                    state.last_alert_at[signal_type] = event.source_time
+                    signals.append(
+                        TriggerSignal(
+                            signal_id=str(uuid4()),
+                            detected_at=utc_now(),
+                            instrument_id=event.instrument_id,
+                            ticker=event.ticker,
+                            class_code=event.class_code,
+                            alias=event.alias,
+                            source_event_type=event.event_type,
+                            signal_type=signal_type,
+                            severity=3 if impulse.score >= 6 else 2,
+                            metric_value=float(impulse.score),
+                            baseline_value=5.0,
+                            z_score=price_z_score,
+                            window_seconds=cfg.price_window_seconds,
+                            summary=(
+                                f"{event.ticker} confirmed {impulse.direction} impulse: "
+                                f"{signed_move_bps:.2f} bps, delta "
+                                f"{signed_delta_qty:.2f}, score "
+                                f"{impulse.score}/{impulse.max_score}."
+                            ),
+                            payload={
+                                "direction": impulse.direction,
+                                "score": impulse.score,
+                                "max_score": impulse.max_score,
+                                "activity_sources": list(impulse.activity_sources),
+                                "orderbook_confirmed": impulse.orderbook_confirmed,
+                                "orderbook_imbalance_ratio": state.last_orderbook_imbalance_ratio,
+                                "signed_delta_qty": signed_delta_qty,
+                                "start_price": oldest_price,
+                                "current_price": current_price,
+                                "price_change_bps": signed_move_bps,
+                                "abs_price_change_bps": move_bps,
+                                "price_baseline_bps": price_baseline,
+                                **volatility_context,
+                            },
+                        )
+                    )
 
         state.return_history.append(move_bps)
         state.last_sample_at["price_window"] = event.source_time
@@ -979,10 +1086,109 @@ class SignalDetector:
         cfg: DetectorSettings,
     ) -> None:
         dq = state.orderbook_depth_snapshots
-        cutoff = snapshot.ts - timedelta(seconds=cfg.spoofing_lookback_seconds)
+        cutoff = snapshot.ts - timedelta(
+            seconds=max(
+                cfg.spoofing_lookback_seconds,
+                cfg.liquidity_vacuum_lookback_seconds,
+            )
+        )
         while dq and dq[0].ts < cutoff:
             dq.popleft()
         dq.append(snapshot)
+
+    @staticmethod
+    def _liquidity_reference(
+        state: InstrumentState,
+        now: datetime,
+        cfg: DetectorSettings,
+    ) -> tuple[float, float] | None:
+        if not cfg.liquidity_vacuum_enabled:
+            return None
+        cutoff = now - timedelta(seconds=cfg.liquidity_vacuum_lookback_seconds)
+        snapshots = [
+            snap for snap in state.orderbook_depth_snapshots if snap.ts >= cutoff
+        ]
+        if len(snapshots) < 2:
+            return None
+        return (
+            fmean(snap.bid_l3_qty for snap in snapshots),
+            fmean(snap.ask_l3_qty for snap in snapshots),
+        )
+
+    def _maybe_emit_liquidity_vacuum(
+        self,
+        *,
+        event: NormalizedEvent,
+        state: InstrumentState,
+        cfg: DetectorSettings,
+        reference: tuple[float, float] | None,
+        current_bid_qty: float,
+        current_ask_qty: float,
+        best_bid: float,
+        best_ask: float,
+        mid: float,
+        spread_bps: float,
+        spread_baseline: float,
+        spread_z_score: float,
+        volatility_context: dict[str, Any],
+    ) -> list[TriggerSignal]:
+        if not cfg.liquidity_vacuum_enabled or reference is None:
+            return []
+        decision = detect_liquidity_vacuum(
+            current_bid_qty=current_bid_qty,
+            current_ask_qty=current_ask_qty,
+            reference_bid_qty=reference[0],
+            reference_ask_qty=reference[1],
+            spread_z_score=spread_z_score,
+            min_spread_z_score=cfg.liquidity_vacuum_min_spread_zscore,
+            min_depth_drop_ratio=cfg.liquidity_vacuum_min_depth_drop_ratio,
+            min_reference_qty=cfg.liquidity_vacuum_min_reference_qty,
+        )
+        if decision is None:
+            return []
+        state.last_active_at["liquidity_vacuum"] = event.source_time
+        if not self._is_alert_ready(state, "liquidity_vacuum", event.source_time, cfg):
+            return []
+        state.last_alert_at["liquidity_vacuum"] = event.source_time
+        return [
+            TriggerSignal(
+                signal_id=str(uuid4()),
+                detected_at=utc_now(),
+                instrument_id=event.instrument_id,
+                ticker=event.ticker,
+                class_code=event.class_code,
+                alias=event.alias,
+                source_event_type="orderbook",
+                signal_type="liquidity_vacuum",
+                severity=3 if decision.depth_drop_ratio >= 0.70 else 2,
+                metric_value=decision.depth_drop_ratio,
+                baseline_value=cfg.liquidity_vacuum_min_depth_drop_ratio,
+                z_score=spread_z_score,
+                window_seconds=cfg.liquidity_vacuum_lookback_seconds,
+                summary=(
+                    f"{event.ticker} liquidity depth fell "
+                    f"{decision.depth_drop_ratio:.0%} while spread reached "
+                    f"{spread_bps:.2f} bps (z={spread_z_score:.2f})."
+                ),
+                payload={
+                    "depth_drop_ratio": decision.depth_drop_ratio,
+                    "bid_drop_ratio": decision.bid_drop_ratio,
+                    "ask_drop_ratio": decision.ask_drop_ratio,
+                    "weaker_side": decision.weaker_side,
+                    "reference_bid_qty": reference[0],
+                    "reference_ask_qty": reference[1],
+                    "current_bid_qty": current_bid_qty,
+                    "current_ask_qty": current_ask_qty,
+                    "spread_bps": spread_bps,
+                    "spread_baseline_bps": spread_baseline,
+                    "spread_z_score": spread_z_score,
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "mid": mid,
+                    **volatility_context,
+                },
+            )
+        ]
 
     def _maybe_emit_orderbook_spoofing(
         self,
@@ -1535,28 +1741,54 @@ class SignalDetector:
             return []
         if not self._should_sample(state, "open_interest", event.source_time, cfg):
             return []
-        signals = self._maybe_emit_from_history(
-            event=event,
-            state=state,
-            cfg=cfg,
-            signal_type="open_interest_spike",
-            source_event_type="open_interest",
-            history=state.open_interest_history,
-            threshold=cfg.open_interest_zscore_threshold,
-            value=oi,
-            baseline_label="open interest",
-            window_seconds=cfg.trade_window_seconds,
-            summary_template=(
-                "{ticker} open interest {metric:.0f} vs baseline {baseline:.0f} "
-                "(z={z_score:.2f})."
-            ),
-            payload_extra={
-                "open_interest": oi,
-                **self._baseline_volatility_context(event, cfg),
-            },
-        )
-        state.open_interest_history.append(oi)
+        previous = state.last_open_interest
+        state.last_open_interest = oi
         state.last_sample_at["open_interest"] = event.source_time
+        if previous is None:
+            return []
+        delta = oi - previous
+        abs_delta = abs(delta)
+        signed_price_move_bps = 0.0
+        if len(state.price_points) >= 2 and state.price_points[0].price > 0:
+            signed_price_move_bps = (
+                (state.price_points[-1].price - state.price_points[0].price)
+                / state.price_points[0].price
+                * 10_000
+            )
+        positioning = classify_futures_positioning(
+            open_interest_delta=delta,
+            signed_price_move_bps=signed_price_move_bps,
+            min_price_move_bps=cfg.open_interest_min_price_move_bps,
+        )
+        signals: list[TriggerSignal] = []
+        if positioning is not None:
+            signals = self._maybe_emit_from_history(
+                event=event,
+                state=state,
+                cfg=cfg,
+                signal_type="futures_positioning",
+                source_event_type="open_interest",
+                history=state.open_interest_history,
+                threshold=cfg.open_interest_zscore_threshold,
+                value=abs_delta,
+                baseline_label="absolute open interest change",
+                window_seconds=cfg.price_window_seconds,
+                summary_template=(
+                    "{ticker} futures positioning change {metric:.0f} vs "
+                    "baseline {baseline:.0f} (z={z_score:.2f})."
+                ),
+                payload_extra={
+                    "open_interest": oi,
+                    "previous_open_interest": previous,
+                    "open_interest_delta": delta,
+                    "abs_open_interest_delta": abs_delta,
+                    "price_change_bps": signed_price_move_bps,
+                    "regime": positioning.regime,
+                    "direction": positioning.direction,
+                    **self._baseline_volatility_context(event, cfg),
+                },
+            )
+        state.open_interest_history.append(abs_delta)
         self._trim_histories(state, cfg)
         return signals
 

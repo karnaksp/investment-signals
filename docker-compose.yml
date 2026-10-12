@@ -18,6 +18,13 @@
 # подхватываются за счёт volume + TINVEST_API_RELOAD (uvicorn --reload).
 # ============================================================================
 
+x-app-build: &app-build
+  context: .
+  args: &app-build-args
+    APP_VERSION: "${APP_VERSION:-0.0.0+local}"
+    APP_COMMIT_SHA: "${APP_COMMIT_SHA:-unknown}"
+    APP_BUILD_TIME: "${APP_BUILD_TIME:-unknown}"
+
 services:
   # Kafka-совместимый брокер; лимиты диска см. redpanda-init (сырьё коротко, сигналы дольше).
   # Память: --memory — куча Seastar; mmap сегментов логов живёт вне неё → нужен mem_limit > --memory (см. .env.example).
@@ -145,8 +152,7 @@ services:
 
   # Поток T-Invest → Kafka (сырые события); читает conf/instruments.yaml.
   ingestor:
-    build:
-      context: .
+    build: *app-build
     depends_on:
       redpanda:
         condition: service_started
@@ -163,8 +169,7 @@ services:
 
   # Kafka → детектор → Postgres + Kafka (сигналы); читает detectors.yaml и overrides.
   detector:
-    build:
-      context: .
+    build: *app-build
     depends_on:
       redpanda:
         condition: service_started
@@ -192,8 +197,7 @@ services:
 
   # Метрики из JSON выхода duckdb_label_signals (mount ./var/accuracy).
   accuracy-metrics:
-    build:
-      context: .
+    build: *app-build
     env_file:
       - .env
     environment:
@@ -211,8 +215,7 @@ services:
   # Устаревший режим: бесконечный цикл вместо Dagster. По умолчанию не поднимается.
   threshold-cron:
     profiles: ["legacy-threshold-cron"]
-    build:
-      context: .
+    build: *app-build
     env_file:
       - .env
     volumes:
@@ -226,8 +229,9 @@ services:
     # dagster-daemon, поэтому постоянный web-процесс не расходует память.
     profiles: ["orchestration-ui"]
     build:
-      context: .
+      <<: *app-build
       args:
+        <<: *app-build-args
         APP_EXTRAS: orchestration,replay
     depends_on:
       redpanda-init:
@@ -255,8 +259,9 @@ services:
 
   dagster-daemon:
     build:
-      context: .
+      <<: *app-build
       args:
+        <<: *app-build-args
         APP_EXTRAS: orchestration,replay
     depends_on:
       redpanda-init:
@@ -284,8 +289,7 @@ services:
   # Unary GetMarketValues / GetTechAnalysis → тот же raw-топик (детектор их игнорирует).
   market-unary-emitter:
     profiles: ["unary"]
-    build:
-      context: .
+    build: *app-build
     depends_on:
       redpanda:
         condition: service_started
@@ -421,8 +425,7 @@ services:
 
   # HTTP API поверх Postgres (история сигналов).
   api:
-    build:
-      context: .
+    build: *app-build
     depends_on:
       postgres:
         condition: service_healthy
