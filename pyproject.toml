@@ -95,7 +95,7 @@ research = [
   "lightgbm>=4.0",
 ]
 proto = [
-  "grpcio-tools>=1.62,<1.82",
+  "grpcio-tools>=1.62,<1.84",
 ]
 
 [project.urls]
