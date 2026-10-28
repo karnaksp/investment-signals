@@ -208,11 +208,14 @@ services:
       METRICS_LISTEN_PORT: "${METRICS_LISTEN_PORT:-9108}"
       PROTO_DIR: /app/proto
       DETECTOR_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/detector.json
+      # Stable import path for the read-only source mount below. Do not bind to
+      # the image's Python minor-version-specific site-packages directory.
+      PYTHONPATH: /app/live-src
     volumes:
       - ./conf:/app/conf:ro
       - ./var/runtime-health:/app/var/runtime-health
-      # Тот же пакет, что в образе — правки в ./src без пересборки detector.
-      - ./src/tinvest_signal_engine:/usr/local/lib/python3.12/site-packages/tinvest_signal_engine:ro
+      # Правки в ./src применяются после recreate detector без пересборки образа.
+      - ./src:/app/live-src:ro
     command: ["tinvest-detector"]
     restart: unless-stopped
     expose:
