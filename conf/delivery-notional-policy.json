@@ -11,6 +11,9 @@
     "volume_spike": 500000000
   },
   "class_signal_min_notional_rub": {
+    "SPBFUT": {
+      "aggressive_trade_burst": 20000000
+    },
     "TQBR": {
       "aggressive_trade_burst": 20000000
     }

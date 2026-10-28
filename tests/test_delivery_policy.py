@@ -516,7 +516,7 @@ def test_tqbr_aggressive_trade_burst_at_turnover_floor_is_realtime(
     assert out.payload["delivery_observed_notional_rub"] == 20_000_000.0
 
 
-def test_spbfut_aggressive_trade_burst_does_not_use_tqbr_ruble_floor(
+def test_spbfut_aggressive_trade_burst_below_turnover_floor_is_suppressed(
     monkeypatch,
 ) -> None:
     policy = DeliveryPolicy(
@@ -532,14 +532,42 @@ def test_spbfut_aggressive_trade_burst_does_not_use_tqbr_ruble_floor(
             ticker="SiZ6",
             class_code="SPBFUT",
             signal_type="aggressive_trade_burst",
-            payload={"quality_score": 1, "estimated_notional": 10_000.0},
+            payload={"quality_score": 99, "estimated_notional": 19_999_999.0},
+            z_score=0.0,
+        )
+    )
+
+    assert out.payload["delivery_status"] == "suppressed"
+    assert out.payload["delivery_reason"] == "notional_below_delivery_threshold"
+    assert out.payload["delivery_min_notional_rub"] == 20_000_000.0
+    assert out.payload["delivery_notional_field"] == "estimated_notional"
+    assert out.payload["delivery_observed_notional_rub"] == 19_999_999.0
+
+
+def test_spbfut_aggressive_trade_burst_at_turnover_floor_is_realtime(
+    monkeypatch,
+) -> None:
+    policy = DeliveryPolicy(
+        _settings(
+            monkeypatch,
+            SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE="conf/delivery-notional-policy.json",
+        )
+    )
+
+    out = policy.apply(
+        _signal(
+            instrument_id="SiZ6_SPBFUT",
+            ticker="SiZ6",
+            class_code="SPBFUT",
+            signal_type="aggressive_trade_burst",
+            payload={"quality_score": 1, "estimated_notional": 20_000_000.0},
             z_score=0.0,
         )
     )
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "owner_realtime_rollout"
-    assert out.payload["delivery_min_notional_rub"] == 0.0
+    assert out.payload["delivery_min_notional_rub"] == 20_000_000.0
     assert out.payload["delivery_notional_field"] == "estimated_notional"
 
 
