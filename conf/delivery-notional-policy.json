@@ -9,5 +9,13 @@
     "obi_dynamics": 0,
     "open_interest_spike": 0,
     "volume_spike": 500000000
+  },
+  "class_signal_min_notional_rub": {
+    "TQBR": {
+      "aggressive_trade_burst": 20000000
+    }
+  },
+  "signal_notional_field": {
+    "aggressive_trade_burst": "estimated_notional"
   }
 }

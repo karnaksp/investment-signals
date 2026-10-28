@@ -17,12 +17,12 @@ from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
 
-POLICY_VERSION = "delivery_v6"
+POLICY_VERSION = "delivery_v7"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
 
-_NOTIONAL_DELIVERY_RULE = "signal_window_notional_gt_configured_threshold"
+_NOTIONAL_DELIVERY_RULE = "signal_notional_gte_configured_threshold"
 
 _ALWAYS_TYPES = {"trading_status_changed", "market_access_changed"}
 _COMBO_TYPES = {"microstructure_combo_long", "microstructure_combo_short"}
@@ -67,8 +67,9 @@ class DeliveryDecision:
 class DeliveryNotionalThresholds:
     """Hot-reloaded external-delivery turnover thresholds.
 
-    A zero threshold disables this gate for one signal type.  Invalid runtime
-    files never replace the last known-good policy.
+    Thresholds may be specialized by market class and may read a signal-specific
+    payload field. A zero threshold disables this gate for one signal type.
+    Invalid runtime files never replace the last known-good policy.
     """
 
     def __init__(self, settings: RuntimeSettings) -> None:
@@ -80,6 +81,8 @@ class DeliveryNotionalThresholds:
         )
         self._default = self._fallback_default
         self._overrides: dict[str, float] = {}
+        self._class_overrides: dict[tuple[str, str], float] = {}
+        self._notional_fields: dict[str, str] = {}
         self._path = Path(settings.signal_delivery_notional_policy_path)
         self._reload_interval = max(0.0, float(settings.config_reload_interval_seconds))
         self._last_poll = 0.0
@@ -97,6 +100,8 @@ class DeliveryNotionalThresholds:
             if self._loaded_mtime_ns is not None:
                 self._default = self._fallback_default
                 self._overrides = {}
+                self._class_overrides = {}
+                self._notional_fields = {}
                 self._loaded_mtime_ns = None
             return
         except OSError:
@@ -122,23 +127,88 @@ class DeliveryNotionalThresholds:
                 for signal_type, value in overrides_raw.items()
                 if str(signal_type).strip()
             }
+            class_overrides_raw = raw.get("class_signal_min_notional_rub", {})
+            if not isinstance(class_overrides_raw, dict):
+                raise ValueError("class_signal_min_notional_rub must be an object")
+            class_overrides: dict[tuple[str, str], float] = {}
+            for class_code, signal_overrides_raw in class_overrides_raw.items():
+                normalized_class_code = str(class_code).strip().upper()
+                if not normalized_class_code:
+                    continue
+                if not isinstance(signal_overrides_raw, dict):
+                    raise ValueError(
+                        f"class_signal_min_notional_rub.{class_code} must be an object"
+                    )
+                for signal_type, value in signal_overrides_raw.items():
+                    normalized_signal_type = str(signal_type).strip()
+                    if not normalized_signal_type:
+                        continue
+                    class_overrides[
+                        (normalized_class_code, normalized_signal_type)
+                    ] = _nonnegative_finite_number(
+                        value,
+                        field=(
+                            "class_signal_min_notional_rub."
+                            f"{class_code}.{signal_type}"
+                        ),
+                    )
+            notional_fields_raw = raw.get("signal_notional_field", {})
+            if not isinstance(notional_fields_raw, dict):
+                raise ValueError("signal_notional_field must be an object")
+            notional_fields: dict[str, str] = {}
+            for signal_type, field_name in notional_fields_raw.items():
+                normalized_signal_type = str(signal_type).strip()
+                normalized_field_name = str(field_name).strip()
+                if not normalized_signal_type:
+                    continue
+                if not normalized_field_name:
+                    raise ValueError(
+                        f"signal_notional_field.{signal_type} must be non-empty"
+                    )
+                notional_fields[normalized_signal_type] = normalized_field_name
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             logger.exception("Ignored invalid delivery notional policy")
             return
         self._default = default
         self._overrides = overrides
+        self._class_overrides = class_overrides
+        self._notional_fields = notional_fields
         self._loaded_mtime_ns = mtime_ns
 
-    def minimum_for(self, signal_type: str) -> float:
+    def minimum_for(self, signal_type: str, class_code: str | None = None) -> float:
         self.refresh()
+        normalized_class_code = (class_code or "").strip().upper()
+        if normalized_class_code:
+            class_override = self._class_overrides.get(
+                (normalized_class_code, signal_type)
+            )
+            if class_override is not None:
+                return class_override
         return self._overrides.get(signal_type, self._default)
 
-    def allows(self, signal_type: str, window_notional: object) -> bool:
-        minimum = self.minimum_for(signal_type)
+    def field_for(self, signal_type: str) -> str:
+        self.refresh()
+        return self._notional_fields.get(signal_type, "window_notional")
+
+    def observed_for(self, signal_type: str, payload_or_notional: object) -> object:
+        if isinstance(payload_or_notional, dict):
+            return payload_or_notional.get(self.field_for(signal_type))
+        return payload_or_notional
+
+    def allows(
+        self,
+        signal_type: str,
+        payload_or_notional: object,
+        *,
+        class_code: str | None = None,
+    ) -> bool:
+        minimum = self.minimum_for(signal_type, class_code)
         if minimum <= 0.0:
             return True
-        observed = _finite_number_or_nan(window_notional)
-        return math.isfinite(observed) and observed > minimum
+        observed = _finite_number_or_nan(
+            self.observed_for(signal_type, payload_or_notional)
+        )
+        return math.isfinite(observed) and observed >= minimum
 
 
 class DeliveryPolicy:
@@ -209,6 +279,7 @@ class DeliveryPolicy:
         *,
         metadata: dict[str, object] | None = None,
     ) -> TriggerSignal:
+        notional_field = self.notional_thresholds.field_for(signal.signal_type)
         payload = {
             **signal.payload,
             "delivery_status": decision.status,
@@ -220,10 +291,13 @@ class DeliveryPolicy:
             "delivery_channel": self._channel(decision),
             "delivery_explanation_ru": self._explanation_ru(decision),
             "delivery_min_notional_rub": self.notional_thresholds.minimum_for(
-                signal.signal_type
+                signal.signal_type, signal.class_code
             ),
+            "delivery_notional_field": notional_field,
             "delivery_observed_notional_rub": _finite_number_or_none(
-                signal.payload.get("window_notional")
+                self.notional_thresholds.observed_for(
+                    signal.signal_type, signal.payload
+                )
             ),
             "delivered_at": (
                 decision.delivered_at.isoformat()
@@ -272,7 +346,7 @@ class DeliveryPolicy:
         if custom is not None and not custom.should_send:
             return custom
         if not self.notional_thresholds.allows(
-            st, signal.payload.get("window_notional")
+            st, signal.payload, class_code=signal.class_code
         ):
             return DeliveryDecision(
                 status=DELIVERY_SUPPRESSED,
