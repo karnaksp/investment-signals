@@ -318,6 +318,78 @@ def test_correlated_price_types_share_cooldown():
         assert not feed.sample(second, (100, 103, 102))
 
 
+def test_inactive_third_maturity_does_not_erase_valid_pair_persistence():
+    detector = FuturesCurveDetector(_contracts(), _settings())
+    feed = Feed(detector)
+    # The farthest maturity never has a usable quote.
+    for second in range(8):
+        assert not feed.sample(second, prices=(100, 101), quantities=(1, 1), oi=(10000, 10000))
+    assert not feed.sample(8, prices=(100, 102), quantities=(1, 1), oi=(10000, 10000))
+    # Even an explicit invalid update for the unused farthest series cannot
+    # reset the independent, synchronized near-next pair.
+    assert not feed.event(2, 8.5, bid=None, ask=None)
+    signals = feed.sample(9, prices=(100, 102), quantities=(1, 1), oi=(10000, 10000))
+    assert len(signals) == 1
+    assert [leg["instrument_id"] for leg in signals[0].payload["legs"]] == ["0", "1"]
+
+
+def test_stronger_negative_score_wins_over_weaker_positive_score():
+    detector = FuturesCurveDetector(_contracts(), _settings())
+    feed = Feed(detector)
+    _warm(feed)
+    assert not feed.sample(8, prices=(103, 100.5, 102))
+    signals = feed.sample(9, prices=(103, 100.5, 102))
+    assert len(signals) == 1
+    assert signals[0].instrument_id == "0"
+    assert signals[0].z_score < 0
+    assert signals[0].payload["direction"] == "narrowing"
+
+
+def test_all_enabled_types_can_emit_carry_for_equal_normalized_price_scores():
+    settings = CurveSettings(
+        sample_interval_seconds=1, min_baseline_points=24,
+        min_warmup_seconds=23, persistence_seconds=1,
+    )
+    detector = FuturesCurveDetector(_contracts()[:2], settings)
+    feed = Feed(detector)
+    # An established, non-flat reference keeps MAD above both the carry and
+    # calendar economic noise floors. Their standardized scores are equivalent.
+    for second in range(24):
+        delta = (-40, -30, -20, -10, 10, 20, 30, 40)[second % 8]
+        assert not feed.sample(second, prices=(100_000, 100_000 * math.exp((300 + delta) / 10_000)), quantities=(10, 10), oi=(10000, 10000))
+    shock = (100_000, 100_000 * math.exp(550 / 10_000))
+    assert not feed.sample(24, prices=shock, quantities=(10, 10), oi=(10000, 10000))
+    signals = feed.sample(25, prices=shock, quantities=(10, 10), oi=(10000, 10000))
+    assert len(signals) == 1
+    assert signals[0].signal_type == "term_premium_shock"
+    assert signals[0].payload["annualized_premium"] - signals[0].baseline_value >= 0.03
+    assert all(leg["trade_count"] >= 20 for leg in signals[0].payload["legs"])
+
+
+def test_robust_statistics_cache_reuses_reference_and_invalidates_on_sample(monkeypatch):
+    import tinvest_signal_engine.domain.futures_curve as module
+
+    detector = FuturesCurveDetector(_contracts(), _settings())
+    for second, value in enumerate((0, 2, 4)):
+        detector._append("reference", NOW + timedelta(seconds=second), value)
+    calls = []
+    original = module.median
+
+    def counted(values):
+        calls.append(1)
+        return original(values)
+
+    monkeypatch.setattr(module, "median", counted)
+    first = detector._stats("reference", NOW + timedelta(seconds=3), 10, 0.1)
+    second = detector._stats("reference", NOW + timedelta(seconds=3.5), 11, 0.1)
+    assert len(calls) == 2  # median and MAD once, despite two evaluated quotes.
+    assert first[0] == second[0] == 2
+    detector._append("reference", NOW + timedelta(seconds=4), 100)
+    third = detector._stats("reference", NOW + timedelta(seconds=4), 11, 0.1)
+    assert len(calls) == 4
+    assert third[0] == 3
+
+
 def test_state_roundtrip_preserves_baseline_and_cooldown():
     contracts, settings = _contracts(), _settings()
     detector = FuturesCurveDetector(contracts, settings)

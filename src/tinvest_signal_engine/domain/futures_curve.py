@@ -208,6 +208,7 @@ class FuturesCurveDetector:
     def _reset(self) -> None:
         self._legs = {key: _LegState() for key in self.contracts}
         self._history: dict[str, deque[tuple[datetime, float]]] = {}
+        self._stats_cache: dict[str, tuple[datetime, int, float, float, float]] = {}
         self._prices: dict[str, deque[tuple[datetime, float, float]]] = {}
         self._roll: dict[str, deque[tuple[datetime, float, float, float]]] = {}
         self._last_sample: dict[str, datetime] = {}
@@ -250,7 +251,7 @@ class FuturesCurveDetector:
                 or (now - event.at).total_seconds() > self.settings.max_quote_age_seconds
             ):
                 state.quote = None
-                self._clear_pending(contract.chain_id)
+                self._clear_pending_instrument(contract.instrument_id)
                 return ()
             state.quote = (event.at, float(event.bid), float(event.ask))
         elif event.kind == "trade":
@@ -304,7 +305,21 @@ class FuturesCurveDetector:
                 candidates.extend(self._kink_candidates(active[index:index + 3], event.at, now))
         # Only one of the correlated price descriptions per chain; OI migration
         # has an independent cooldown because it describes different evidence.
-        candidates.sort(key=lambda item: item.score, reverse=True)
+        priority = {
+            "futures_curve_kink": 4,
+            "term_premium_shock": 3,
+            "futures_basis_momentum": 2,
+            "calendar_spread_dislocation": 1,
+            "roll_migration_anomaly": 0,
+        }
+        candidates.sort(
+            key=lambda item: (
+                round(abs(item.score), 9),
+                priority[item.signal_type],
+                self._group_key(item.contracts),
+            ),
+            reverse=True,
+        )
         selected: list[CurveSignal] = []
         used: set[tuple[str, str]] = set()
         for candidate in candidates:
@@ -326,6 +341,17 @@ class FuturesCurveDetector:
     def _clear_pending(self, chain: str) -> None:
         for key in tuple(self._pending):
             if key.startswith(chain + "|"):
+                del self._pending[key]
+
+    def _clear_pending_group(self, contracts: tuple[CurveContract, ...]) -> None:
+        prefix = self._group_key(contracts) + "|"
+        for key in tuple(self._pending):
+            if key.startswith(prefix):
+                del self._pending[key]
+
+    def _clear_pending_instrument(self, instrument_id: str) -> None:
+        for key in tuple(self._pending):
+            if instrument_id in key.rsplit("|", 2)[1].split(","):
                 del self._pending[key]
 
     def _prune_trades(self, state: _LegState, at: datetime) -> None:
@@ -373,13 +399,20 @@ class FuturesCurveDetector:
             return None
         if (at - history[-1][0]).total_seconds() > self.settings.max_sample_gap_seconds:
             self._history.pop(key, None)
+            self._stats_cache.pop(key, None)
             self._last_sample.pop(key, None)
             self._pending.pop(key, None)
             return None
         if (history[-1][0] - history[0][0]).total_seconds() < self.settings.min_warmup_seconds:
             return None
-        center = median(point[1] for point in history)
-        scale = max(floor, 1.4826 * median(abs(point[1] - center) for point in history))
+        cached = self._stats_cache.get(key)
+        signature = (history[-1][0], len(history), floor)
+        if cached is None or cached[:3] != signature:
+            center = median(point[1] for point in history)
+            scale = max(floor, 1.4826 * median(abs(point[1] - center) for point in history))
+            self._stats_cache[key] = (*signature, center, scale)
+        else:
+            center, scale = cached[3:]
         return center, (value - center) / scale, len(history)
 
     def _append(self, key: str, at: datetime, value: float) -> None:
@@ -387,6 +420,7 @@ class FuturesCurveDetector:
         if last is not None and (at - last).total_seconds() < self.settings.sample_interval_seconds:
             return
         self._history.setdefault(key, deque(maxlen=self.settings.baseline_points)).append((at, value))
+        self._stats_cache.pop(key, None)
         self._last_sample[key] = at
         self.state_revision += 1
 
@@ -443,7 +477,7 @@ class FuturesCurveDetector:
         key = self._group_key(pair)
         quotes = self._quotes(pair, at, now)
         if quotes is None:
-            self._clear_pending(pair[0].chain_id)
+            self._clear_pending_group(pair)
             return []
         mids, cost = quotes
         spread_bps = (math.log(mids[1]) - math.log(mids[0])) * 10_000
@@ -520,6 +554,7 @@ class FuturesCurveDetector:
     def _kink_candidates(self, contracts: tuple[CurveContract, ...], at: datetime, now: datetime) -> list[_Candidate]:
         quotes = self._quotes(contracts, at, now)
         if quotes is None:
+            self._clear_pending_group(contracts)
             return []
         mids, cost = quotes
         total = (contracts[2].expiration_at - contracts[0].expiration_at).total_seconds()
