@@ -225,8 +225,10 @@ class FuturesCurveRuntimeAdapter:
             return ()
         return tuple(TriggerSignal(
             signal_id=str(uuid5(NAMESPACE_URL, f"curve:{event.event_id}:{item.signal_type}:{item.chain_id}")),
-            detected_at=processed_at, instrument_id=item.instrument_id,
-            ticker=item.ticker, class_code="SPBFUT", alias=item.chain_id,
+            # Persist against the triggering event's leg. The curve itself and
+            # all compared maturities remain explicit in the legs payload.
+            detected_at=processed_at, instrument_id=event.instrument_id,
+            ticker=event.ticker, class_code="SPBFUT", alias=item.chain_id,
             source_event_type=event.event_type, signal_type=item.signal_type,
             severity=3, metric_value=item.metric_value, baseline_value=item.baseline_value,
             z_score=item.z_score, window_seconds=(
