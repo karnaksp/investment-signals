@@ -103,8 +103,10 @@ class FuturesCurveRuntimeAdapter:
     def __init__(
         self, *, factory: Callable[[], tuple[FuturesCurveDetector, CurveRuntimeConfiguration]],
         instruments_path: Path, policy_path: Path, state_path: Path,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._factory = factory
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._paths = (instruments_path, policy_path)
         self._engine, self._config = factory()
         self._state_path = state_path
@@ -210,9 +212,12 @@ class FuturesCurveRuntimeAdapter:
             trade_price = quotation_to_float(payload.get("price")) if event.event_type == "trade" else None
         except (ValueError, TypeError, OverflowError):
             return ()
+        # Kafka queueing time is part of quote age. A fresh timestamp at ingest
+        # must not let an old queued quote pass the realtime freshness gate.
+        processed_at = max(event.received_at, self._clock())
         found = self._engine.process(CurveMarketEvent(
             event_id=event.event_id, instrument_id=event.instrument_id,
-            at=event.source_time, received_at=event.received_at,
+            at=event.source_time, received_at=processed_at,
             kind=event.event_type, bid=bid, ask=ask, quantity=quantity, open_interest=oi,
             trade_price=trade_price,
         ), emit_signals=emit_signals)
@@ -220,7 +225,7 @@ class FuturesCurveRuntimeAdapter:
             return ()
         return tuple(TriggerSignal(
             signal_id=str(uuid5(NAMESPACE_URL, f"curve:{event.event_id}:{item.signal_type}:{item.chain_id}")),
-            detected_at=event.received_at, instrument_id=item.instrument_id,
+            detected_at=processed_at, instrument_id=item.instrument_id,
             ticker=item.ticker, class_code="SPBFUT", alias=item.chain_id,
             source_event_type=event.event_type, signal_type=item.signal_type,
             severity=3, metric_value=item.metric_value, baseline_value=item.baseline_value,

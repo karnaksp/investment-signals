@@ -85,6 +85,7 @@ def _adapter(tmp_path):
     adapter = FuturesCurveRuntimeAdapter(
         factory=lambda: (engine, config), instruments_path=paths[0], policy_path=paths[1],
         state_path=tmp_path / "state.json",
+        clock=lambda: NOW,
     )
     return adapter, engine
 
@@ -186,7 +187,8 @@ def test_real_curve_to_russian_realtime_pipeline_uses_strict_live_defaults(tmp_p
         config = load_curve_configuration(instruments, policy_path)
         return FuturesCurveDetector(config.contracts, config.settings), config
     adapter = FuturesCurveRuntimeAdapter(factory=factory, instruments_path=instruments,
-                                        policy_path=policy_path, state_path=tmp_path / "state.json")
+                                        policy_path=policy_path, state_path=tmp_path / "state.json",
+                                        clock=lambda: NOW)
     assert adapter.is_secondary("SiH7_SPBFUT")
     sequence = 0
     def feed(second, prices, *, trades=False):
@@ -234,7 +236,8 @@ def test_postgres_rollback_clears_uncommitted_curve_state(tmp_path):
         config = load_curve_configuration(*paths)
         return FuturesCurveDetector(config.contracts, config.settings), config
     curve = FuturesCurveRuntimeAdapter(factory=factory, instruments_path=paths[0],
-                                      policy_path=paths[1], state_path=tmp_path / "state.json")
+                                      policy_path=paths[1], state_path=tmp_path / "state.json",
+                                      clock=lambda: NOW)
     adapter = LegacyDetectionAdapter(RuntimeSettings.from_env(), delivered_count_since=lambda **_kw: 0,
                                      futures_curve=curve)
     event = _event(bids=[{"price": 100}], asks=[{"price": 101}])
@@ -244,3 +247,23 @@ def test_postgres_rollback_clears_uncommitted_curve_state(tmp_path):
     adapter.replace_state(())
     assert curve._engine._legs[event.instrument_id].quote is None
     assert not curve._engine._cooldowns
+
+
+def test_kafka_queue_delay_cannot_make_stale_quotes_look_fresh(tmp_path):
+    paths = _files(tmp_path)
+    config = load_curve_configuration(*paths)
+    engine = FuturesCurveDetector(config.contracts, config.settings)
+    processing_time = NOW + timedelta(seconds=6)
+    adapter = FuturesCurveRuntimeAdapter(
+        factory=lambda: (engine, config), instruments_path=paths[0],
+        policy_path=paths[1], state_path=tmp_path / "state.json",
+        clock=lambda: processing_time,
+    )
+    event = _event(bids=[{"price": 100}], asks=[{"price": 101}])
+    adapter.process(event, emit_signals=True)
+    assert engine._legs[event.instrument_id].quote is None
+
+    fresh = replace(event, event_id="fresh", source_time=processing_time,
+                    received_at=processing_time)
+    adapter.process(fresh, emit_signals=True)
+    assert engine._legs[event.instrument_id].quote is not None

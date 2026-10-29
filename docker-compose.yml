@@ -183,8 +183,10 @@ services:
       - .env
     environment:
       PROTO_DIR: /app/proto
+      PYTHONPATH: /app/live-src
     volumes:
       - ./conf:/app/conf:ro
+      - ./src:/app/live-src:ro
     command: ["tinvest-raw-stream"]
     restart: unless-stopped
 
