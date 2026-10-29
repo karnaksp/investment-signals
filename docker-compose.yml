@@ -192,9 +192,11 @@ services:
       # Full book snapshots at 1 Hz keep the larger futures universe current
       # without filling the durable detector inbox with redundant snapshots.
       INGESTOR_ORDERBOOK_MIN_INTERVAL_MS: "${INGESTOR_ORDERBOOK_MIN_INTERVAL_MS:-1000}"
+      INGESTOR_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/ingestor.json
     volumes:
       - ./conf:/app/conf:ro
       - ./src:/app/live-src:ro
+      - ./var/runtime-health:/app/var/runtime-health
     command: ["tinvest-raw-stream"]
     restart: unless-stopped
 
