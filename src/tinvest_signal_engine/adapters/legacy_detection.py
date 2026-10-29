@@ -7,9 +7,12 @@ import logging
 import time
 import zlib
 from datetime import UTC, datetime
+from dataclasses import replace
 from hashlib import sha256
 from typing import Callable, Sequence
 from uuid import uuid4
+
+from tinvest_signal_engine.adapters.futures_curve_runtime import FuturesCurveRuntimeAdapter
 
 from tinvest_signal_engine.application.reliable_processing import (
     DetectionBatch,
@@ -58,11 +61,13 @@ class LegacyDetectionAdapter:
         config_ack_sink: DetectorConfigAcknowledgementSink | None = None,
         detector_instance_id: str | None = None,
         delivery_recovery_guard: DeliveryRecoveryGuard | None = None,
+        futures_curve: FuturesCurveRuntimeAdapter | None = None,
     ) -> None:
         self._settings = settings
         self._config_ack_sink = config_ack_sink
         self._detector_instance_id = detector_instance_id or str(uuid4())
         self._delivery_recovery_guard = delivery_recovery_guard
+        self._futures_curve = futures_curve
         self._market_schedule = MarketSchedule.from_strings(
             timezone_name=settings.market_schedule_timezone,
             collection_start=settings.market_collection_start,
@@ -101,8 +106,28 @@ class LegacyDetectionAdapter:
                     event.source_time
                 )
                 and not bool(event.payload.get("recovery_backfill"))
+                and not (self._futures_curve is not None
+                         and self._futures_curve.is_secondary(event.instrument_id))
             ),
         )
+        if self._futures_curve is not None:
+            curve_signals = self._futures_curve.process(
+                event,
+                emit_signals=(self._market_schedule.is_signal_emission_active(event.source_time)
+                              and not bool(event.payload.get("recovery_backfill"))),
+            )
+            signals = list(signals) + [replace(
+                signal,
+                expectation_catalog_version=self._settings.expectation_catalog_version,
+                delivery_config_version=self._settings.delivery_config_version,
+                cost_model_version=self._settings.cost_model_version,
+                provenance_status="complete" if all((
+                    self._settings.expectation_catalog_version,
+                    self._settings.delivery_config_version,
+                    self._settings.cost_model_version,
+                    signal.detector_config_version,
+                )) else "legacy",
+            ) for signal in curve_signals]
         observations = self._detector.drain_observations()
         signals = self._detector.enrich_signals_with_unary(signals)
         prepared: list[PreparedSignal] = []
@@ -160,6 +185,8 @@ class LegacyDetectionAdapter:
         self,
         checkpoints: Sequence[DetectorStateCheckpoint],
     ) -> None:
+        if getattr(self, "_state_loaded", False) and self._futures_curve is not None:
+            self._futures_curve.reset_after_rollback()
         payloads: list[dict[str, object]] = []
         for checkpoint in checkpoints:
             if checkpoint.state_schema_version not in {
@@ -182,9 +209,12 @@ class LegacyDetectionAdapter:
                 raise ValueError("detector checkpoint instrument mismatch")
             payloads.append(decoded)
         replace_instrument_states(self._detector, payloads)
+        self._state_loaded = True
 
     def checkpoint(self) -> None:
         flush_detector_to_redis(self._detector, self._settings.redis_url)
+        if self._futures_curve is not None:
+            self._futures_curve.checkpoint()
 
     def _build_detector(self) -> SignalDetector:
         loaded = load_detector_config(

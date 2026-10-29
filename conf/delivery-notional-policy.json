@@ -1,6 +1,11 @@
 {
   "default_min_notional_rub": 40000000,
   "signal_min_notional_rub": {
+    "calendar_spread_dislocation": 20000000,
+    "roll_migration_anomaly": 20000000,
+    "futures_curve_kink": 20000000,
+    "term_premium_shock": 20000000,
+    "futures_basis_momentum": 20000000,
     "aggressive_trade_burst": 0,
     "confirmed_impulse_long": 0,
     "confirmed_impulse_short": 0,

@@ -7,11 +7,14 @@ defaults:
   roll_before_expiry_days: 5
   require_two_sided_order_book: true
   minimum_two_sided_lots: 1
-  max_candidates: 4
+  max_candidates: 6
+  chain_depth: 3
+  include_expiring_contract: true
 
 futures:
   - alias: brent_oil
     basic_asset: Brent
+    ticker_pattern: '^BM[FGHJKMNQUVXZ]\d$'
   - alias: gold
     basic_asset: Золото в долларах
   - alias: silver

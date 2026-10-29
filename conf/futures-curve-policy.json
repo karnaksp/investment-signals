@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "enabled": true,
+  "settings": {
+    "sample_interval_seconds": 30,
+    "min_baseline_points": 120,
+    "min_warmup_seconds": 3600,
+    "max_quote_age_seconds": 5,
+    "max_quote_skew_seconds": 2,
+    "min_total_notional_rub": 20000000,
+    "min_leg_notional_rub": 5000000,
+    "min_leg_trades": 20,
+    "z_threshold": 4.5,
+    "min_deviation_bps": 15,
+    "min_carry_change": 0.03,
+    "min_kink_deviation_bps": 15,
+    "momentum_horizon_seconds": 3600,
+    "min_momentum_bps": 20,
+    "min_roll_oi_share_change": 0.05,
+    "min_roll_volume_share_change": 0.15,
+    "min_roll_matched_contracts": 500,
+    "persistence_seconds": 30,
+    "cooldown_seconds": 1800
+  }
+}

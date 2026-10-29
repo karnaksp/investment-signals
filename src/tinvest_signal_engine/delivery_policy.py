@@ -17,12 +17,17 @@ from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
 
-POLICY_VERSION = "delivery_v7"
+POLICY_VERSION = "delivery_v8"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
 
 _NOTIONAL_DELIVERY_RULE = "signal_notional_gte_configured_threshold"
+
+_FUTURES_CURVE_TYPES = {
+    "calendar_spread_dislocation", "roll_migration_anomaly", "futures_curve_kink",
+    "term_premium_shock", "futures_basis_momentum",
+}
 
 _ALWAYS_TYPES = {"trading_status_changed", "market_access_changed"}
 _COMBO_TYPES = {"microstructure_combo_long", "microstructure_combo_short"}
@@ -245,6 +250,7 @@ class DeliveryPolicy:
             deque
         )
         self._recent_deliveries: deque[datetime] = deque()
+        self._recent_curve_deliveries: deque[datetime] = deque()
         self._last_instrument_delivery: dict[str, datetime] = {}
         self._last_status_delivery: dict[tuple[str, str], datetime] = {}
 
@@ -332,6 +338,8 @@ class DeliveryPolicy:
             return limited
 
         self._recent_deliveries.append(ts)
+        if signal.signal_type in _FUTURES_CURVE_TYPES:
+            self._recent_curve_deliveries.append(ts)
         if signal.signal_type not in _ALWAYS_TYPES:
             self._last_instrument_delivery[signal.instrument_id] = ts
         if signal.signal_type in _ALWAYS_TYPES:
@@ -345,6 +353,32 @@ class DeliveryPolicy:
         custom = self._custom_decision(signal, now)
         if custom is not None and not custom.should_send:
             return custom
+        if st in _FUTURES_CURVE_TYPES:
+            if not _strong_futures_curve(signal):
+                return DeliveryDecision(
+                    status=DELIVERY_SUPPRESSED, reason="futures_curve_below_strong_gate",
+                    rule="futures_curve_strong_v1", channel="admin_only",
+                )
+            since = now - timedelta(hours=1)
+            while self._recent_curve_deliveries and self._recent_curve_deliveries[0] < since:
+                self._recent_curve_deliveries.popleft()
+            if len(self._recent_curve_deliveries) >= 6:
+                return DeliveryDecision(
+                    status=DELIVERY_SUPPRESSED, reason="futures_curve_hourly_limit",
+                    rule="futures_curve_max_6_per_hour", channel="admin_only",
+                )
+            if self._delivered_count_since is not None:
+                try:
+                    sent = sum(int(self._delivered_count_since(since, None, kind))
+                               for kind in _FUTURES_CURVE_TYPES)
+                except Exception:
+                    logger.exception("Futures curve delivery history unavailable")
+                    sent = 6
+                if sent >= 6:
+                    return DeliveryDecision(
+                        status=DELIVERY_SUPPRESSED, reason="futures_curve_hourly_limit",
+                        rule="futures_curve_max_6_per_hour", channel="admin_only",
+                    )
         if not self.notional_thresholds.allows(
             st, signal.payload, class_code=signal.class_code
         ):
@@ -352,6 +386,12 @@ class DeliveryPolicy:
                 status=DELIVERY_SUPPRESSED,
                 reason="notional_below_delivery_threshold",
                 rule=_NOTIONAL_DELIVERY_RULE,
+            )
+
+        if st in _FUTURES_CURVE_TYPES:
+            return DeliveryDecision(
+                status=DELIVERY_DELIVERED, reason="futures_curve_strong_observation",
+                rule="futures_curve_strong_v1", delivered_at=now, channel="realtime",
             )
 
         if custom is not None:
@@ -567,6 +607,7 @@ class DeliveryPolicy:
             or signal.signal_type in _ALWAYS_TYPES
             or signal.signal_type in _COMBO_TYPES
             or signal.signal_type in _REALTIME_ROLLOUT_TYPES
+            or signal.signal_type in _FUTURES_CURVE_TYPES
         ):
             return None
         since = now - timedelta(seconds=self.instrument_cooldown)
@@ -690,6 +731,41 @@ def _parse_type_rules(raw: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _strong_futures_curve(signal: TriggerSignal) -> bool:
+    p = signal.payload
+    if (signal.class_code != "SPBFUT" or p.get("curve_strong") is not True
+            or p.get("curve_version") != "futures_curve_v1"
+            or p.get("evidence_status") != "experimental"):
+        return False
+    def number(value: object) -> float:
+        return float(value) if isinstance(value, (float, int)) and not isinstance(value, bool) else math.nan
+    checks = (
+        (abs(number(signal.z_score)), 4.5, math.inf),
+        (number(p.get("baseline_points")), 120, math.inf),
+        (number(p.get("persistence_seconds")), 30, math.inf),
+        (number(p.get("quote_age_seconds")), 0, 5),
+        (number(p.get("quote_skew_seconds")), 0, 2),
+    )
+    if any(not math.isfinite(value) or not low <= value <= high for value, low, high in checks):
+        return False
+    legs = p.get("legs")
+    needed = 3 if signal.signal_type == "futures_curve_kink" else 2
+    if not isinstance(legs, list) or len(legs) < needed:
+        return False
+    identifiers: set[str] = set()
+    for leg in legs:
+        if not isinstance(leg, dict):
+            return False
+        identifier = str(leg.get("instrument_id") or "")
+        if not identifier or identifier in identifiers:
+            return False
+        identifiers.add(identifier)
+        notional, count = number(leg.get("notional_rub")), number(leg.get("trade_count"))
+        if not math.isfinite(notional) or notional < 5_000_000 or not math.isfinite(count) or count < 20:
+            return False
+    return True
+
+
 def _normalize_rule_channel(rule: dict[str, Any]) -> str | None:
     value = str(rule.get("channel") or "").strip().lower()
     if value in {"admin_only", "digest", "realtime"}:
@@ -732,6 +808,9 @@ def _finite_number_or_none(value: object) -> float | None:
 
 
 _REASON_RU: dict[str, str] = {
+    "futures_curve_strong_observation": "Сильная аномалия между сроками подтверждена свежими котировками и активностью всех ног. Экспериментальное наблюдение.",
+    "futures_curve_below_strong_gate": "Аномалия между сроками не прошла строгие проверки силы, активности или свежести.",
+    "futures_curve_hourly_limit": "Достигнут отдельный лимит шести уведомлений по фьючерсной кривой за час.",
     "owner_realtime_rollout": "Тип включён владельцем в realtime-наблюдение и сразу отправлен в Telegram.",
     "validated_bond_convergence": "Историческая проверка сигнала схождения облигации к номиналу прошла заданный порог; уведомление отправлено сразу.",
     "bond_convergence_evidence_below_gate": "Сигнал схождения облигации сохранён, но историческая проверка не прошла заданный порог.",
