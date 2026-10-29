@@ -18,6 +18,8 @@ class FutureWatchSpec:
     ticker_pattern: str | None = None
     require_name_substrings: tuple[str, ...] = ()
     exclude_name_substrings: tuple[str, ...] = ()
+    chain_depth: int = 1
+    include_expiring_contract: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,12 @@ class FutureContract:
     sell_available: bool
     bid_lots: int = 0
     ask_lots: int = 0
+    chain_id: str = ""
+    basic_asset_size: float = 0.0
+    min_price_increment: float = 0.0
+    min_price_increment_amount: float = 0.0
+    settlement_currency: str = ""
+    settlement_type: str = ""
 
     @property
     def two_sided_lots(self) -> int:
@@ -52,6 +60,13 @@ class ResolvedFuture:
     uid: str
     expiration_at: datetime
     two_sided_lots: int
+    chain_id: str = ""
+    basic_asset_size: float = 0.0
+    min_price_increment: float = 0.0
+    min_price_increment_amount: float = 0.0
+    settlement_currency: str = ""
+    settlement_type: str = ""
+    maturity_rank: int = 1
 
 
 class UnresolvedFuturesError(RuntimeError):
@@ -74,10 +89,10 @@ def select_futures_universe(
     *,
     now: datetime,
 ) -> tuple[ResolvedFuture, ...]:
-    """Select one liquid, non-expiring contract for every configured alias.
+    """Select a liquid primary contract and optional same-product maturities.
 
-    Selection is fail-closed: if any configured underlying has no eligible
-    contract, callers must keep the previous published universe unchanged.
+    Primary selection is fail-closed and retains the original rollover alias.
+    Extra maturities may be illiquid: consumers gate signals on live quotes.
     """
 
     if now.tzinfo is None:
@@ -89,6 +104,8 @@ def select_futures_universe(
     resolved: list[ResolvedFuture] = []
     unresolved: list[str] = []
     for spec in specs:
+        if not 1 <= spec.chain_depth <= 12:
+            raise ValueError("future chain_depth must be between 1 and 12")
         cutoff = now + timedelta(days=spec.roll_before_expiry_days)
         candidates = [
             contract
@@ -114,22 +131,94 @@ def select_futures_universe(
                 item.ticker,
             ),
         )
-        resolved.append(
-            ResolvedFuture(
-                alias=spec.alias,
-                ticker=selected.ticker,
-                class_code=selected.class_code,
-                basic_asset=selected.basic_asset,
-                name=selected.name,
-                figi=selected.figi,
-                uid=selected.uid,
-                expiration_at=selected.expiration_at,
-                two_sided_lots=selected.two_sided_lots,
-            )
+        chain_candidates = sorted(
+            (
+                contract
+                for contract in contracts
+                if matches_watch_spec(contract, spec)
+                and contract.api_trade_available
+                and contract.buy_available
+                and contract.sell_available
+                and contract.expiration_at > (
+                    now if spec.include_expiring_contract else cutoff
+                )
+                and _same_contract_spec(selected, contract)
+            ),
+            key=lambda item: (
+                item.expiration_at,
+                -item.two_sided_lots,
+                item.ticker,
+            ),
         )
+        # One contract per expiry; duplicate listings are not distinct tenors.
+        by_expiry: dict[datetime, FutureContract] = {}
+        for contract in chain_candidates:
+            by_expiry.setdefault(contract.expiration_at, contract)
+        by_expiry[selected.expiration_at] = selected
+        extras = [
+            contract
+            for contract in by_expiry.values()
+            if contract.uid != selected.uid
+        ][: spec.chain_depth - 1]
+        chronological = sorted(
+            (selected, *extras), key=lambda item: (item.expiration_at, item.ticker)
+        )
+        for contract in (selected, *extras):
+            resolved.append(
+                ResolvedFuture(
+                    alias=(
+                        spec.alias
+                        if contract.uid == selected.uid
+                        else f"{spec.alias}__{contract.ticker}"
+                    ),
+                    ticker=contract.ticker,
+                    class_code=contract.class_code,
+                    basic_asset=contract.basic_asset,
+                    name=contract.name,
+                    figi=contract.figi,
+                    uid=contract.uid,
+                    expiration_at=contract.expiration_at,
+                    two_sided_lots=contract.two_sided_lots,
+                    chain_id=spec.alias,
+                    basic_asset_size=contract.basic_asset_size,
+                    min_price_increment=contract.min_price_increment,
+                    min_price_increment_amount=contract.min_price_increment_amount,
+                    settlement_currency=contract.settlement_currency,
+                    settlement_type=contract.settlement_type,
+                    maturity_rank=chronological.index(contract) + 1,
+                )
+            )
 
     if unresolved:
         raise UnresolvedFuturesError(
             "no liquid rollover candidate for: " + ", ".join(unresolved)
         )
+    if len({item.alias.lower() for item in resolved}) != len(resolved):
+        raise ValueError("resolved futures aliases must be unique")
+    if len({item.uid for item in resolved}) != len(resolved):
+        raise ValueError("futures watch specifications select overlapping contracts")
     return tuple(resolved)
+
+
+def _same_contract_spec(primary: FutureContract, other: FutureContract) -> bool:
+    """Keep mini/full contracts and settlement variants out of one chain."""
+    primary_family = re.fullmatch(r"(.+?)[FGHJKMNQUVXZ]\d{1,2}", primary.ticker)
+    other_family = re.fullmatch(r"(.+?)[FGHJKMNQUVXZ]\d{1,2}", other.ticker)
+    if (
+        primary_family is not None
+        and other_family is not None
+        and primary_family.group(1) != other_family.group(1)
+    ):
+        return False
+    if (
+        primary.basic_asset_size > 0
+        and other.basic_asset_size > 0
+        and primary.basic_asset_size != other.basic_asset_size
+    ):
+        return False
+    for field in ("settlement_currency", "settlement_type"):
+        left = getattr(primary, field).strip().lower()
+        right = getattr(other, field).strip().lower()
+        if left and right and left != right:
+            return False
+    return True

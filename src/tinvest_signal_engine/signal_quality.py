@@ -101,6 +101,20 @@ def compute_signal_quality(signal: TriggerSignal) -> dict[str, Any]:
     if bond_quality is not None:
         return bond_quality
 
+    if (signal.payload.get("curve_version") == "futures_curve_v1"
+            and signal.payload.get("curve_strong") is True):
+        # A curve's level/baseline ratio can be near one even during a large
+        # relative-value shock. Rank the validated anomaly, not the curve level.
+        z = abs(float(signal.z_score))
+        score = min(95, 75 + int(max(0, z - 4.5) * 3))
+        return {
+            "quality_score": score,
+            "quality_tier": "high",
+            "quality_tier_ru": "высокая",
+            "quality_hint_ru": "Сила наблюдаемой аномалии между сроками; это не вероятность прибыли.",
+            "quality_factors": {"method": "futures_curve_strength_v1", "abs_z": z},
+        }
+
     z = abs(float(signal.z_score))
     # Нормализация |z|: типичный «сильный» хвост от 3 до ~8
     z_norm = max(0.0, min(1.0, (z - 1.5) / 5.5))

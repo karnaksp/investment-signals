@@ -326,10 +326,12 @@ services:
       PROTO_DIR: /app/proto
       MARKET_UNARY_POLL_SECONDS: "${MARKET_UNARY_POLL_SECONDS:-300}"
       ADAPTIVE_CALIBRATION_STATE_DIR: /var/lib/investment-signals/adaptive-calibration
+      PYTHONPATH: /app/live-src
     volumes:
       - dagster_home:/opt/dagster/dagster_home
       - ./conf:/app/conf
       - ./var/adaptive-calibration:/var/lib/investment-signals/adaptive-calibration
+      - ./src:/app/live-src:ro
     command:
       - dagster-daemon
       - run

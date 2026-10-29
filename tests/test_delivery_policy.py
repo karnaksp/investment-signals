@@ -67,7 +67,7 @@ def test_combo_score_six_is_delivered(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "combo_score_ge_6"
-    assert out.payload["delivery_policy_version"] == "delivery_v7"
+    assert out.payload["delivery_policy_version"] == "delivery_v8"
     assert out.payload["delivery_priority"] == "high"
     assert out.payload["delivery_channel"] == "realtime"
     assert out.payload["delivery_explanation_ru"]

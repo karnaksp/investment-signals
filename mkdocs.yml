@@ -76,6 +76,7 @@ nav:
   - Главная: index.md
   - Архитектура: architecture.md
   - Детекторы и паттерны: detectors.md
+  - Фьючерсная кривая: futures-curve.md
   - Оркестрация (Dagster): orchestration.md
   - Аналитика сигналов (SQL): signal_analytics.md
   - Решение проблем: troubleshooting.md
