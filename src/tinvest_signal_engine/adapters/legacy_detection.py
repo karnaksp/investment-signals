@@ -76,7 +76,10 @@ class LegacyDetectionAdapter:
             signal_end=settings.market_signal_end,
         )
         self._configured_instruments_count = 0
-        self._detector = self._build_detector()
+        self._loaded_detector_config_version = self._read_detector_config_version()
+        self._detector = self._build_detector(
+            detector_config_version=self._loaded_detector_config_version,
+        )
         self._ack_detector_config("loaded", self._detector_config_version())
         self.replace_state(checkpoints)
         self._detector_mtime = settings.detector_path.stat().st_mtime
@@ -216,7 +219,7 @@ class LegacyDetectionAdapter:
         if self._futures_curve is not None:
             self._futures_curve.checkpoint()
 
-    def _build_detector(self) -> SignalDetector:
+    def _build_detector(self, *, detector_config_version: str) -> SignalDetector:
         loaded = load_detector_config(
             self._settings.detector_path,
             self._settings.detector_overrides_path,
@@ -227,12 +230,18 @@ class LegacyDetectionAdapter:
             loaded.per_instrument,
             lead_lag_pairs=loaded.lead_lag_pairs,
             expectation_catalog_version=(self._settings.expectation_catalog_version),
-            detector_config_version=self._detector_config_version(),
+            detector_config_version=detector_config_version,
             delivery_config_version=self._settings.delivery_config_version,
             cost_model_version=self._settings.cost_model_version,
         )
 
     def _detector_config_version(self) -> str:
+        # Checkpoint provenance belongs to the configuration actually loaded in
+        # memory. Reading mounted YAML here adds host I/O to every market event
+        # and can label old detector state with an unaccepted configuration.
+        return self._loaded_detector_config_version
+
+    def _read_detector_config_version(self) -> str:
         if self._settings.detector_config_version:
             return self._settings.detector_config_version
         paths = (
@@ -264,17 +273,19 @@ class LegacyDetectionAdapter:
             for instrument_id in set(self._detector._states)
             | set(self._detector._mid_track)
         ]
+        candidate_version = self._read_detector_config_version()
         try:
-            replacement = self._build_detector()
+            replacement = self._build_detector(detector_config_version=candidate_version)
+            replace_instrument_states(replacement, payloads)
         except Exception:
             self._ack_detector_config(
                 "failed",
-                self._detector_config_version(),
+                candidate_version,
                 failure_reason_code="detector_config_reload_failed",
             )
             raise
-        replace_instrument_states(replacement, payloads)
         self._detector = replacement
+        self._loaded_detector_config_version = candidate_version
         self._detector_mtime = detector_mtime
         self._overrides_mtime = overrides_mtime
         self._ack_detector_config("loaded", self._detector_config_version())
