@@ -320,9 +320,59 @@ instruments:
 
   # >>> FUTURES_NEAREST_BEGIN (managed by tinvest-refresh-futures)
   # Generated from conf/futures_universe.yaml; do not edit this block manually.
-  - ticker: BMX6
+  - ticker: BMZ6
     class_code: SPBFUT
     alias: brent_oil
+    futures_contract:
+      chain_id: "brent_oil"
+      basic_asset: "Brent"
+      expiration_at: "2026-12-02T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: BMX6
+    class_code: SPBFUT
+    alias: brent_oil__BMX6
+    futures_contract:
+      chain_id: "brent_oil"
+      basic_asset: "Brent"
+      expiration_at: "2026-11-03T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: BMF7
+    class_code: SPBFUT
+    alias: brent_oil__BMF7
+    futures_contract:
+      chain_id: "brent_oil"
+      basic_asset: "Brent"
+      expiration_at: "2027-01-05T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -333,6 +383,56 @@ instruments:
   - ticker: GDZ6
     class_code: SPBFUT
     alias: gold
+    futures_contract:
+      chain_id: "gold"
+      basic_asset: "Золото в долларах"
+      expiration_at: "2026-12-21T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GDH7
+    class_code: SPBFUT
+    alias: gold__GDH7
+    futures_contract:
+      chain_id: "gold"
+      basic_asset: "Золото в долларах"
+      expiration_at: "2027-03-22T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GDM7
+    class_code: SPBFUT
+    alias: gold__GDM7
+    futures_contract:
+      chain_id: "gold"
+      basic_asset: "Золото в долларах"
+      expiration_at: "2027-06-21T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -343,6 +443,56 @@ instruments:
   - ticker: SVZ6
     class_code: SPBFUT
     alias: silver
+    futures_contract:
+      chain_id: "silver"
+      basic_asset: "Серебро"
+      expiration_at: "2026-12-21T00:00:00+00:00"
+      basic_asset_size: 10.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: SVH7
+    class_code: SPBFUT
+    alias: silver__SVH7
+    futures_contract:
+      chain_id: "silver"
+      basic_asset: "Серебро"
+      expiration_at: "2027-03-22T00:00:00+00:00"
+      basic_asset_size: 10.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: SVM7
+    class_code: SPBFUT
+    alias: silver__SVM7
+    futures_contract:
+      chain_id: "silver"
+      basic_asset: "Серебро"
+      expiration_at: "2027-06-21T00:00:00+00:00"
+      basic_asset_size: 10.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -353,6 +503,56 @@ instruments:
   - ticker: SiZ6
     class_code: SPBFUT
     alias: usd_rub
+    futures_contract:
+      chain_id: "usd_rub"
+      basic_asset: "USD/RUB"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: SiH7
+    class_code: SPBFUT
+    alias: usd_rub__SiH7
+    futures_contract:
+      chain_id: "usd_rub"
+      basic_asset: "USD/RUB"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: SiM7
+    class_code: SPBFUT
+    alias: usd_rub__SiM7
+    futures_contract:
+      chain_id: "usd_rub"
+      basic_asset: "USD/RUB"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -363,6 +563,56 @@ instruments:
   - ticker: EuZ6
     class_code: SPBFUT
     alias: eur_rub
+    futures_contract:
+      chain_id: "eur_rub"
+      basic_asset: "EUR/RUB"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: EuH7
+    class_code: SPBFUT
+    alias: eur_rub__EuH7
+    futures_contract:
+      chain_id: "eur_rub"
+      basic_asset: "EUR/RUB"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: EuM7
+    class_code: SPBFUT
+    alias: eur_rub__EuM7
+    futures_contract:
+      chain_id: "eur_rub"
+      basic_asset: "EUR/RUB"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -373,6 +623,76 @@ instruments:
   - ticker: CRZ6
     class_code: SPBFUT
     alias: cny_rub
+    futures_contract:
+      chain_id: "cny_rub"
+      basic_asset: "CNY/RUB"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 0.001
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: CRH7
+    class_code: SPBFUT
+    alias: cny_rub__CRH7
+    futures_contract:
+      chain_id: "cny_rub"
+      basic_asset: "CNY/RUB"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 0.001
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: CRM7
+    class_code: SPBFUT
+    alias: cny_rub__CRM7
+    futures_contract:
+      chain_id: "cny_rub"
+      basic_asset: "CNY/RUB"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 1000.0
+      min_price_increment: 0.001
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: W4X6
+    class_code: SPBFUT
+    alias: wheat
+    futures_contract:
+      chain_id: "wheat"
+      basic_asset: "Пшеница"
+      expiration_at: "2026-12-01T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 10.0
+      min_price_increment_amount: 10.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
     subscriptions:
       trades: true
       last_price: true
@@ -382,7 +702,37 @@ instruments:
       candle_interval: 1m
   - ticker: W4V6
     class_code: SPBFUT
-    alias: wheat
+    alias: wheat__W4V6
+    futures_contract:
+      chain_id: "wheat"
+      basic_asset: "Пшеница"
+      expiration_at: "2026-11-02T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 10.0
+      min_price_increment_amount: 10.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: W4Z6
+    class_code: SPBFUT
+    alias: wheat__W4Z6
+    futures_contract:
+      chain_id: "wheat"
+      basic_asset: "Пшеница"
+      expiration_at: "2026-12-31T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 10.0
+      min_price_increment_amount: 10.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -393,6 +743,56 @@ instruments:
   - ticker: PDZ6
     class_code: SPBFUT
     alias: palladium
+    futures_contract:
+      chain_id: "palladium"
+      basic_asset: "Палладий"
+      expiration_at: "2026-12-21T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: PDH7
+    class_code: SPBFUT
+    alias: palladium__PDH7
+    futures_contract:
+      chain_id: "palladium"
+      basic_asset: "Палладий"
+      expiration_at: "2027-03-22T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: PDM7
+    class_code: SPBFUT
+    alias: palladium__PDM7
+    futures_contract:
+      chain_id: "palladium"
+      basic_asset: "Палладий"
+      expiration_at: "2027-06-21T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -403,6 +803,16 @@ instruments:
   - ticker: PTZ6
     class_code: SPBFUT
     alias: platinum
+    futures_contract:
+      chain_id: "platinum"
+      basic_asset: "Платина"
+      expiration_at: "2026-12-21T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
     subscriptions:
       trades: true
       last_price: true
@@ -410,9 +820,99 @@ instruments:
       order_book_depth: 50
       candles: false
       candle_interval: 1m
-  - ticker: NGV6
+  - ticker: PTH7
+    class_code: SPBFUT
+    alias: platinum__PTH7
+    futures_contract:
+      chain_id: "platinum"
+      basic_asset: "Платина"
+      expiration_at: "2027-03-22T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: PTM7
+    class_code: SPBFUT
+    alias: platinum__PTM7
+    futures_contract:
+      chain_id: "platinum"
+      basic_asset: "Платина"
+      expiration_at: "2027-06-21T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: NGX6
     class_code: SPBFUT
     alias: nat_gas_us
+    futures_contract:
+      chain_id: "nat_gas_us"
+      basic_asset: "Газ (США)"
+      expiration_at: "2026-11-26T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 0.001
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: NGZ6
+    class_code: SPBFUT
+    alias: nat_gas_us__NGZ6
+    futures_contract:
+      chain_id: "nat_gas_us"
+      basic_asset: "Газ (США)"
+      expiration_at: "2026-12-30T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 0.001
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: NGF7
+    class_code: SPBFUT
+    alias: nat_gas_us__NGF7
+    futures_contract:
+      chain_id: "nat_gas_us"
+      basic_asset: "Газ (США)"
+      expiration_at: "2027-01-28T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 0.001
+      min_price_increment_amount: 8.08664
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -423,6 +923,56 @@ instruments:
   - ticker: NAZ6
     class_code: SPBFUT
     alias: nasdaq100
+    futures_contract:
+      chain_id: "nasdaq100"
+      basic_asset: "Nasdaq 100"
+      expiration_at: "2026-12-21T00:00:00+00:00"
+      basic_asset_size: 41.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: NAH7
+    class_code: SPBFUT
+    alias: nasdaq100__NAH7
+    futures_contract:
+      chain_id: "nasdaq100"
+      basic_asset: "Nasdaq 100"
+      expiration_at: "2027-03-22T00:00:00+00:00"
+      basic_asset_size: 41.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: NAM7
+    class_code: SPBFUT
+    alias: nasdaq100__NAM7
+    futures_contract:
+      chain_id: "nasdaq100"
+      basic_asset: "Nasdaq 100"
+      expiration_at: "2027-06-21T00:00:00+00:00"
+      basic_asset_size: 41.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 0.80866
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -433,6 +983,56 @@ instruments:
   - ticker: SRZ6
     class_code: SPBFUT
     alias: sber_fut
+    futures_contract:
+      chain_id: "sber_fut"
+      basic_asset: "SBER"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_PHYSICAL_DELIVERY"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: SRH7
+    class_code: SPBFUT
+    alias: sber_fut__SRH7
+    futures_contract:
+      chain_id: "sber_fut"
+      basic_asset: "SBER"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_PHYSICAL_DELIVERY"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: SRM7
+    class_code: SPBFUT
+    alias: sber_fut__SRM7
+    futures_contract:
+      chain_id: "sber_fut"
+      basic_asset: "SBER"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_PHYSICAL_DELIVERY"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -443,6 +1043,56 @@ instruments:
   - ticker: GZZ6
     class_code: SPBFUT
     alias: gazp_fut
+    futures_contract:
+      chain_id: "gazp_fut"
+      basic_asset: "GAZP"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_PHYSICAL_DELIVERY"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GZH7
+    class_code: SPBFUT
+    alias: gazp_fut__GZH7
+    futures_contract:
+      chain_id: "gazp_fut"
+      basic_asset: "GAZP"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_PHYSICAL_DELIVERY"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GZM7
+    class_code: SPBFUT
+    alias: gazp_fut__GZM7
+    futures_contract:
+      chain_id: "gazp_fut"
+      basic_asset: "GAZP"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 100.0
+      min_price_increment: 1.0
+      min_price_increment_amount: 1.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_PHYSICAL_DELIVERY"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -453,6 +1103,56 @@ instruments:
   - ticker: GLZ6
     class_code: SPBFUT
     alias: gold_rub
+    futures_contract:
+      chain_id: "gold_rub"
+      basic_asset: "Золото в рублях"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 0.1
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GLH7
+    class_code: SPBFUT
+    alias: gold_rub__GLH7
+    futures_contract:
+      chain_id: "gold_rub"
+      basic_asset: "Золото в рублях"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 0.1
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: GLM7
+    class_code: SPBFUT
+    alias: gold_rub__GLM7
+    futures_contract:
+      chain_id: "gold_rub"
+      basic_asset: "Золото в рублях"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.1
+      min_price_increment_amount: 0.1
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -463,6 +1163,56 @@ instruments:
   - ticker: RIZ6
     class_code: SPBFUT
     alias: rts_index
+    futures_contract:
+      chain_id: "rts_index"
+      basic_asset: "RTSI"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 10.0
+      min_price_increment_amount: 16.17328
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: RIH7
+    class_code: SPBFUT
+    alias: rts_index__RIH7
+    futures_contract:
+      chain_id: "rts_index"
+      basic_asset: "RTSI"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 10.0
+      min_price_increment_amount: 16.17328
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: RIM7
+    class_code: SPBFUT
+    alias: rts_index__RIM7
+    futures_contract:
+      chain_id: "rts_index"
+      basic_asset: "RTSI"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 10.0
+      min_price_increment_amount: 16.17328
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true
@@ -473,6 +1223,56 @@ instruments:
   - ticker: MXZ6
     class_code: SPBFUT
     alias: imoex
+    futures_contract:
+      chain_id: "imoex"
+      basic_asset: "IMOEX"
+      expiration_at: "2026-12-18T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 25.0
+      min_price_increment_amount: 25.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 1
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: MXH7
+    class_code: SPBFUT
+    alias: imoex__MXH7
+    futures_contract:
+      chain_id: "imoex"
+      basic_asset: "IMOEX"
+      expiration_at: "2027-03-19T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 25.0
+      min_price_increment_amount: 25.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: MXM7
+    class_code: SPBFUT
+    alias: imoex__MXM7
+    futures_contract:
+      chain_id: "imoex"
+      basic_asset: "IMOEX"
+      expiration_at: "2027-06-18T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 25.0
+      min_price_increment_amount: 25.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 3
     subscriptions:
       trades: true
       last_price: true

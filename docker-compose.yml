@@ -99,6 +99,11 @@ services:
         rpk -X brokers=redpanda:9092 topic create marketdata.raw -p 1 -r 1 || true
         rpk -X brokers=redpanda:9092 topic create marketdata.raw.unary -p 1 -r 1 || true
         rpk -X brokers=redpanda:9092 topic create marketdata.signals -p 1 -r 1 || true
+        rpk -X brokers=redpanda:9092 topic create ${KAFKA_RAW_DLQ_TOPIC:-marketdata.raw.dlq} -p 1 -r 1 || true
+        rpk -X brokers=redpanda:9092 topic alter-config ${KAFKA_RAW_DLQ_TOPIC:-marketdata.raw.dlq} \
+          --set retention.ms=604800000 \
+          --set retention.bytes=67108864 \
+          --set segment.bytes=8388608
         rpk -X brokers=redpanda:9092 topic alter-config marketdata.raw \
           --set retention.ms=${KAFKA_RAW_RETENTION_MS:-21600000} \
           --set retention.bytes=${KAFKA_RAW_RETENTION_BYTES:-33554432} \
@@ -183,8 +188,15 @@ services:
       - .env
     environment:
       PROTO_DIR: /app/proto
+      PYTHONPATH: /app/live-src
+      # Full book snapshots at 1 Hz keep the larger futures universe current
+      # without filling the durable detector inbox with redundant snapshots.
+      INGESTOR_ORDERBOOK_MIN_INTERVAL_MS: "${INGESTOR_ORDERBOOK_MIN_INTERVAL_MS:-1000}"
+      INGESTOR_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/ingestor.json
     volumes:
       - ./conf:/app/conf:ro
+      - ./src:/app/live-src:ro
+      - ./var/runtime-health:/app/var/runtime-health
     command: ["tinvest-raw-stream"]
     restart: unless-stopped
 
@@ -235,8 +247,10 @@ services:
     environment:
       DELIVERY_WORKER_METRICS_LISTEN_PORT: "${DELIVERY_WORKER_METRICS_LISTEN_PORT:-9111}"
       DELIVERY_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/delivery-worker.json
+      PYTHONPATH: /app/live-src
     volumes:
       - ./var/runtime-health:/app/var/runtime-health
+      - ./src:/app/live-src:ro
     command: ["tinvest-delivery-worker"]
     restart: unless-stopped
     expose:

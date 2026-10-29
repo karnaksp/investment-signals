@@ -17,6 +17,7 @@ from tinvest_signal_engine.domain.detector_observations import (
     HISTORY_SAMPLING_POLICY_VERSION,
     deterministic_observation_id,
 )
+from tinvest_signal_engine.domain.configuration import content_version
 from tinvest_signal_engine.models import NormalizedEvent
 
 
@@ -261,6 +262,91 @@ def test_legacy_adapter_acks_detector_config_after_hot_reload(tmp_path: Path) ->
 
     assert [ack.status for ack in sink.acks] == ["loaded", "loaded"]
     assert sink.acks[0].detector_config_version != sink.acks[1].detector_config_version
+
+
+def _reloadable_adapter(tmp_path: Path):
+    detector_path = tmp_path / "detectors.yaml"
+    overrides_path = tmp_path / "detectors.overrides.yaml"
+    detector_path.write_text("detector: {}\n", encoding="utf-8")
+    overrides_path.write_text("{}\n", encoding="utf-8")
+    settings = replace(
+        RuntimeSettings.from_env(),
+        detector_path=detector_path,
+        detector_overrides_path=overrides_path,
+        detector_config_version=None,
+        config_reload_interval_seconds=1,
+        redis_url=None,
+    )
+    sink = _AckSink()
+    adapter = LegacyDetectionAdapter(
+        settings, delivered_count_since=lambda **kwargs: 0, config_ack_sink=sink,
+    )
+    return adapter, sink, detector_path, overrides_path
+
+
+def test_market_events_do_not_reread_detector_configuration(tmp_path, monkeypatch) -> None:
+    adapter, sink, _detector_path, _overrides_path = _reloadable_adapter(tmp_path)
+    accepted_version = sink.acks[0].detector_config_version
+    # The reload poll is separately bounded; no content reads belong to the
+    # per-event checkpoint/provenance path between reload attempts.
+    monkeypatch.setattr(adapter, "_maybe_reload", lambda: None)
+
+    def unexpected_read(_path):
+        pytest.fail("market event reread detector configuration")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_read)
+    for index in range(3):
+        event = replace(_event(), event_id=f"cached-version-{index}",
+                        payload={"quantity": 10, "price": 100})
+        checkpoint = adapter.detect_batch(event.to_dict()).checkpoint
+        assert checkpoint is not None
+        assert checkpoint.detector_config_version == accepted_version
+
+
+def test_version_changes_only_after_configuration_is_accepted(tmp_path) -> None:
+    adapter, sink, detector_path, overrides_path = _reloadable_adapter(tmp_path)
+    old_version = adapter._detector_config_version()
+    overrides_path.write_text("detector:\n  volume_zscore_threshold: 8\n", encoding="utf-8")
+    expected_version = content_version((detector_path.read_bytes(), overrides_path.read_bytes()))
+
+    assert adapter._detector_config_version() == old_version
+    assert adapter._detector._detector_config_version == old_version
+    adapter._last_config_poll = 0
+    adapter._maybe_reload()
+
+    assert adapter._detector_config_version() == expected_version
+    assert adapter._detector._detector_config_version == expected_version
+    assert sink.acks[-1].detector_config_version == expected_version
+
+
+def test_rejected_reload_preserves_accepted_version_and_detector(tmp_path) -> None:
+    adapter, sink, detector_path, overrides_path = _reloadable_adapter(tmp_path)
+    original_detector = adapter._detector
+    old_version = adapter._detector_config_version()
+    overrides_path.write_text("detector: invalid\n", encoding="utf-8")
+    attempted_version = content_version((detector_path.read_bytes(), overrides_path.read_bytes()))
+    adapter._last_config_poll = 0
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        adapter._maybe_reload()
+
+    assert adapter._detector is original_detector
+    assert adapter._detector_config_version() == old_version
+    assert adapter._detector._detector_config_version == old_version
+    assert sink.acks[-1].status == "failed"
+    assert sink.acks[-1].detector_config_version == attempted_version
+
+
+def test_explicit_detector_version_is_preserved_across_reload(tmp_path) -> None:
+    adapter, _sink, _detector_path, overrides_path = _reloadable_adapter(tmp_path)
+    adapter._settings = replace(adapter._settings, detector_config_version="release-config-v2")
+    overrides_path.write_text("detector: {}\n# changed\n", encoding="utf-8")
+    adapter._last_config_poll = 0
+
+    adapter._maybe_reload()
+
+    assert adapter._detector_config_version() == "release-config-v2"
+    assert adapter._detector._detector_config_version == "release-config-v2"
 
 
 class _AckSink:

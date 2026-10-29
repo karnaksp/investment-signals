@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import pytest
+from kafka.errors import KafkaTimeoutError
+from kafka.structs import TopicPartition
 
 from tinvest_signal_engine.adapters.kafka_reliability import (
     ReliableDetectorRuntime,
@@ -25,6 +27,24 @@ class FakeConsumer:
     messages: list[FakeMessage]
     log: list[str]
     commits: list[object] = field(default_factory=list)
+    seeks: list[tuple[TopicPartition, int]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._all_messages = list(self.messages)
+
+    def assignment(self):
+        return {TopicPartition(item.topic, item.partition) for item in self._all_messages}
+
+    def seek(self, partition, offset) -> None:
+        self.seeks.append((partition, offset))
+        self.messages = [
+            item for item in self.messages
+            if (item.topic, item.partition) != (partition.topic, partition.partition)
+        ] + [
+            item for item in self._all_messages
+            if (item.topic, item.partition) == (partition.topic, partition.partition)
+            and item.offset >= offset
+        ]
 
     def poll(self, **kwargs):
         self.log.append("poll")
@@ -283,6 +303,91 @@ def test_commit_failure_replays_through_idempotent_processor() -> None:
     assert processor.replay_calls == 3
     committed = next(iter(second_consumer.commits[0].values()))
     assert committed.offset == 3
+
+
+@pytest.mark.parametrize("failure_stage", ["processing", "commit"])
+def test_kafka_timeout_replays_polled_batch_without_skipping_suffix(failure_stage) -> None:
+    log: list[str] = []
+    messages = [
+        FakeMessage({**_valid_event(), "event_id": f"event-{offset}"}, offset=offset)
+        for offset in range(3)
+    ]
+
+    class RetryConsumer(FakeConsumer):
+        failed = False
+
+        def poll(self, **kwargs):
+            if not self.messages:
+                raise KeyboardInterrupt
+            return super().poll(**kwargs)
+
+        def commit(self, *, offsets):
+            if failure_stage == "commit" and not self.failed:
+                self.failed = True
+                raise KafkaTimeoutError("commit result unknown")
+            super().commit(offsets=offsets)
+
+    class RetryProcessor:
+        def __init__(self):
+            self.stored = set()
+            self.replayed = []
+            self.failed = False
+
+        def process(self, event):
+            if failure_stage == "processing" and event.offset_id == 1 and not self.failed:
+                self.failed = True
+                raise KafkaTimeoutError("publish metadata timed out")
+            if event.event_id in self.stored:
+                self.replayed.append(event.event_id)
+            self.stored.add(event.event_id)
+
+    consumer = RetryConsumer(messages, log)
+    processor = RetryProcessor()
+    runtime = _runtime(consumer, FakeProcessor(log), log)
+    runtime._processor = processor
+
+    runtime.run()
+
+    assert processor.stored == {"event-0", "event-1", "event-2"}
+    assert processor.replayed == (["event-0"] if failure_stage == "processing" else
+                                  ["event-0", "event-1", "event-2"])
+    assert consumer.seeks == [(TopicPartition("marketdata.raw", 2), 0)]
+    committed = next(iter(consumer.commits[-1].values()))
+    assert committed.offset == 3
+
+
+def test_rewind_failure_stops_worker_instead_of_skipping_records() -> None:
+    log: list[str] = []
+
+    class SeekFailingConsumer(FakeConsumer):
+        def seek(self, partition, offset):
+            raise KafkaTimeoutError("cannot rewind")
+
+    consumer = SeekFailingConsumer([FakeMessage(_valid_event())], log)
+    runtime = _runtime(consumer, FakeProcessor(log, KafkaTimeoutError("publish failed")), log)
+
+    with pytest.raises(RuntimeError, match="rewind failed; restart required"):
+        runtime.run()
+
+    assert log.count("poll") == 1
+    assert consumer.commits == []
+    assert log[-3:] == ["signal_close", "dlq_close", "consumer_close"]
+
+
+def test_rewind_skips_partitions_revoked_during_failed_operation() -> None:
+    log: list[str] = []
+
+    class RevokedConsumer(FakeConsumer):
+        def assignment(self):
+            return set()
+
+    consumer = RevokedConsumer([FakeMessage(_valid_event())], log)
+    runtime = _runtime(consumer, FakeProcessor(log, KafkaTimeoutError("rebalanced")), log)
+
+    with pytest.raises(KafkaTimeoutError, match="rebalanced"):
+        runtime.run_once()
+
+    assert consumer.seeks == []
 
 
 def test_consumer_disables_auto_commit(monkeypatch) -> None:
