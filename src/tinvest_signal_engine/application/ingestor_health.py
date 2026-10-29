@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import RLock
 from typing import Callable, Protocol
 
@@ -18,7 +18,12 @@ class IngestorHealthSnapshotStore(Protocol):
 
 
 class IngestorHealthTracker:
-    """Serialize concurrent stream/watchdog transitions through one boundary."""
+    """Serialize transitions and persist heartbeat timestamps at most once a second.
+
+    Every event still updates the in-memory snapshot used by the watchdog.
+    State changes and explicit failures/configuration updates are durable
+    immediately, without putting a synchronous file write on every live event.
+    """
 
     def __init__(
         self,
@@ -36,6 +41,7 @@ class IngestorHealthTracker:
             stale_after_seconds=stale_after_seconds,
         )
         self._store.save(self._snapshot)
+        self._last_saved_at = self._clock()
 
     @property
     def snapshot(self) -> IngestorHealthSnapshot:
@@ -65,7 +71,8 @@ class IngestorHealthTracker:
             return self._save(
                 self._snapshot.market_event_observed(
                     market_event_at=market_event_at,
-                )
+                ),
+                heartbeat=True,
             )
 
     def sleeping(
@@ -88,7 +95,8 @@ class IngestorHealthTracker:
                 self._snapshot.publish_succeeded(
                     market_event_at=market_event_at,
                     succeeded_at=self._clock(),
-                )
+                ),
+                heartbeat=True,
             )
 
     def failed(self, *, reason_code: str) -> IngestorHealthSnapshot:
@@ -112,7 +120,21 @@ class IngestorHealthTracker:
     def _save(
         self,
         snapshot: IngestorHealthSnapshot,
+        *,
+        heartbeat: bool = False,
     ) -> IngestorHealthSnapshot:
+        now = self._clock()
+        elapsed = now - self._last_saved_at
+        same_status = (
+            snapshot.state == self._snapshot.state
+            and snapshot.reason_code == self._snapshot.reason_code
+            and snapshot.consecutive_failures == self._snapshot.consecutive_failures
+            and snapshot.configured_instruments == self._snapshot.configured_instruments
+        )
+        if heartbeat and same_status and timedelta(0) <= elapsed < timedelta(seconds=1):
+            self._snapshot = snapshot
+            return snapshot
         self._store.save(snapshot)
+        self._last_saved_at = now
         self._snapshot = snapshot
         return snapshot

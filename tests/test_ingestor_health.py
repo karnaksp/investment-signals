@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import socket
 
+import pytest
 from grpc import StatusCode
 from tinkoff.invest.exceptions import RequestError
 
@@ -118,6 +119,140 @@ def test_streaming_snapshot_becomes_degraded_after_silence() -> None:
     assert stale.reason_code == INGESTOR_STREAM_STALE
     assert stale.consecutive_failures == 0
     assert store.items[-1] == stale
+
+
+def test_live_burst_keeps_latest_health_without_per_event_persistence() -> None:
+    clock = _Clock(STARTED_AT)
+    store = _MemoryStore()
+    tracker = IngestorHealthTracker(
+        store=store,
+        clock=clock,
+        stale_after_seconds=180,
+    )
+    tracker.connecting(configured_instruments=102)
+    tracker.publish_succeeded(market_event_at=clock.current)
+
+    for millisecond in range(1, 1000):
+        clock.current = STARTED_AT + timedelta(milliseconds=millisecond)
+        latest = tracker.publish_succeeded(market_event_at=clock.current)
+
+    assert len(store.items) == 3  # Starting, connecting and first streaming state.
+    assert tracker.snapshot is latest
+    assert latest.last_success_at == STARTED_AT + timedelta(milliseconds=999)
+    assert store.items[-1].last_success_at == STARTED_AT
+
+    clock.current = STARTED_AT + timedelta(seconds=1)
+    persisted = tracker.publish_succeeded(market_event_at=clock.current)
+
+    assert len(store.items) == 4
+    assert store.items[-1] is persisted
+    assert persisted.last_market_event_at == clock.current
+
+
+def test_watchdog_uses_latest_in_memory_success_after_coalescing() -> None:
+    clock = _Clock(STARTED_AT)
+    store = _MemoryStore()
+    tracker = IngestorHealthTracker(
+        store=store,
+        clock=clock,
+        stale_after_seconds=1,
+    )
+    tracker.publish_succeeded(market_event_at=clock.current)
+    clock.current += timedelta(milliseconds=900)
+    tracker.publish_succeeded(market_event_at=clock.current)
+    assert store.items[-1].last_success_at == STARTED_AT
+
+    clock.current = STARTED_AT + timedelta(milliseconds=1900)
+    assert tracker.evaluate_staleness().state is IngestorStreamState.STREAMING
+    clock.current += timedelta(microseconds=1)
+    stale = tracker.evaluate_staleness()
+
+    assert stale.state is IngestorStreamState.DEGRADED
+    assert stale.last_success_at == STARTED_AT + timedelta(milliseconds=900)
+    assert store.items[-1] is stale
+
+
+def test_errors_reconnects_recovery_and_config_are_persisted_immediately() -> None:
+    clock = _Clock(STARTED_AT)
+    store = _MemoryStore()
+    tracker = IngestorHealthTracker(
+        store=store,
+        clock=clock,
+        stale_after_seconds=180,
+    )
+    tracker.publish_succeeded(market_event_at=clock.current)
+    clock.current += timedelta(milliseconds=100)
+    tracker.market_event_observed(market_event_at=clock.current)
+    latest_event_at = clock.current
+    assert len(store.items) == 2
+
+    failed = tracker.failed(reason_code=INGESTOR_DNS_RESOLUTION_FAILED)
+    assert store.items[-1] is failed
+    assert failed.last_market_event_at == latest_event_at
+    failed_again = tracker.failed(reason_code=INGESTOR_DNS_RESOLUTION_FAILED)
+    assert store.items[-1] is failed_again
+    assert failed_again.consecutive_failures == 2
+    reconnecting = tracker.connecting(configured_instruments=102)
+    assert store.items[-1] is reconnecting
+    recovered = tracker.publish_succeeded(market_event_at=clock.current)
+    assert store.items[-1] is recovered
+    assert recovered.consecutive_failures == 0
+    configured = tracker.connecting(configured_instruments=103)
+    assert store.items[-1] is configured
+    assert len(store.items) == 7
+
+
+def test_failed_heartbeat_write_is_retried_without_advancing_save_deadline() -> None:
+    clock = _Clock(STARTED_AT)
+
+    class _FailingStore(_MemoryStore):
+        fail_next = False
+
+        def save(self, snapshot: IngestorHealthSnapshot) -> None:
+            if self.fail_next:
+                self.fail_next = False
+                raise OSError("disk unavailable")
+            super().save(snapshot)
+
+    store = _FailingStore()
+    tracker = IngestorHealthTracker(
+        store=store,
+        clock=clock,
+        stale_after_seconds=180,
+    )
+    tracker.publish_succeeded(market_event_at=clock.current)
+    clock.current += timedelta(milliseconds=999)
+    before_failure = tracker.publish_succeeded(market_event_at=clock.current)
+    clock.current += timedelta(milliseconds=1)
+    store.fail_next = True
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        tracker.publish_succeeded(market_event_at=clock.current)
+
+    assert tracker.snapshot is before_failure
+    retried = tracker.publish_succeeded(market_event_at=clock.current)
+    assert store.items[-1] is retried
+    assert retried.last_success_at == clock.current
+
+
+def test_backward_clock_step_does_not_suppress_health_persistence() -> None:
+    clock = _Clock(STARTED_AT)
+    store = _MemoryStore()
+    tracker = IngestorHealthTracker(
+        store=store,
+        clock=clock,
+        stale_after_seconds=180,
+    )
+    tracker.publish_succeeded(market_event_at=clock.current)
+    clock.current -= timedelta(seconds=10)
+
+    persisted = tracker.publish_succeeded(market_event_at=clock.current)
+
+    assert store.items[-1] is persisted
+    assert len(store.items) == 3
+    clock.current += timedelta(milliseconds=500)
+    tracker.publish_succeeded(market_event_at=clock.current)
+    assert len(store.items) == 3
 
 
 def test_scheduled_sleep_is_a_non_failure_connecting_state() -> None:
