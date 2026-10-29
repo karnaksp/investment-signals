@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import tempfile
 from pathlib import Path
@@ -61,6 +62,10 @@ def load_future_watch_specs(path: Path) -> tuple[FutureWatchSpec, ...]:
                     value(item, "require_two_sided_order_book", True)
                 ),
                 max_candidates=int(value(item, "max_candidates", 4)),
+                chain_depth=int(value(item, "chain_depth", 1)),
+                include_expiring_contract=bool(
+                    value(item, "include_expiring_contract", False)
+                ),
                 ticker_pattern=(str(pattern) if pattern else None),
                 require_name_substrings=tuple(
                     str(part)
@@ -86,6 +91,16 @@ def render_futures_block(resolved: tuple[ResolvedFuture, ...]) -> str:
                 f"  - ticker: {item.ticker}",
                 f"    class_code: {item.class_code}",
                 f"    alias: {item.alias}",
+                "    futures_contract:",
+                f"      chain_id: {json.dumps(item.chain_id or item.alias)}",
+                f"      basic_asset: {json.dumps(item.basic_asset, ensure_ascii=False)}",
+                f"      expiration_at: {json.dumps(item.expiration_at.isoformat())}",
+                f"      basic_asset_size: {item.basic_asset_size}",
+                f"      min_price_increment: {item.min_price_increment}",
+                f"      min_price_increment_amount: {item.min_price_increment_amount}",
+                f"      settlement_currency: {json.dumps(item.settlement_currency)}",
+                f"      settlement_type: {json.dumps(item.settlement_type)}",
+                f"      maturity_rank: {item.maturity_rank}",
                 _SUBSCRIPTIONS,
             )
         )

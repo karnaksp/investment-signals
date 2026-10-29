@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 
 from tinkoff.invest import Client
@@ -40,7 +41,27 @@ def _base_contract(raw) -> FutureContract:
         api_trade_available=bool(raw.api_trade_available_flag),
         buy_available=bool(raw.buy_available_flag),
         sell_available=bool(raw.sell_available_flag),
+        basic_asset_size=_positive_quotation(getattr(raw, "basic_asset_size", None)),
+        min_price_increment=_positive_quotation(
+            getattr(raw, "min_price_increment", None)
+        ),
+        min_price_increment_amount=_positive_quotation(
+            getattr(raw, "min_price_increment_amount", None)
+        ),
+        settlement_currency=str(getattr(raw, "currency", "") or "").strip().lower(),
+        settlement_type=str(getattr(raw, "futures_type", "") or "").strip(),
     )
+
+
+def _positive_quotation(raw) -> float:
+    """Missing monetary metadata stays zero rather than assuming a multiplier."""
+    if raw is None:
+        return 0.0
+    try:
+        value = float(raw.units) + float(raw.nano) / 1_000_000_000.0
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return 0.0
+    return value if math.isfinite(value) and value > 0.0 else 0.0
 
 
 class TInvestFuturesCatalog:
@@ -85,7 +106,10 @@ class TInvestFuturesCatalog:
                     key=lambda item: (item.expiration_at, item.ticker),
                 )
                 inspect_uids.update(
-                    item.uid for item in matching[: max(1, spec.max_candidates)]
+                    item.uid
+                    for item in matching[
+                        : max(1, spec.max_candidates, spec.chain_depth + 1)
+                    ]
                 )
 
             result: list[FutureContract] = []
