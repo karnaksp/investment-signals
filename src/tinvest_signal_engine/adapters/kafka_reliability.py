@@ -176,11 +176,13 @@ class ReliableDetectorRuntime:
                 self._health.heartbeat()
                 try:
                     processed = self.run_once()
-                except (CommitFailedError, KafkaTimeoutError):
-                    self._health.failed("kafka_commit_uncertain")
+                except (CommitFailedError, KafkaTimeoutError) as error:
+                    self._health.failed("kafka_operation_retry")
                     logger.warning(
-                        "Detector Kafka commit became uncertain; rejoining "
-                        "before the next batch"
+                        "Detector Kafka operation failed (%s); retained polled "
+                        "records will be replayed before the next batch: %s",
+                        type(error).__name__,
+                        error,
                     )
                     continue
                 self._health.succeeded(force=processed > 0)
@@ -226,15 +228,48 @@ class ReliableDetectorRuntime:
                 self._process_message(message)
                 completed.append(message)
         except Exception:
-            self._finish_batch(
-                completed,
-                outcome="partial_failure",
-                started=started,
-            )
+            try:
+                self._finish_batch(
+                    completed,
+                    outcome="partial_failure",
+                    started=started,
+                )
+            finally:
+                self._rewind_batch(messages)
             raise
 
-        self._finish_batch(completed, outcome="completed", started=started)
+        try:
+            self._finish_batch(completed, outcome="completed", started=started)
+        except Exception:
+            self._rewind_batch(messages)
+            raise
         return len(completed)
+
+    def _rewind_batch(self, messages: Sequence[Any]) -> None:
+        """Replay fetched records after an uncertain operation, including commits.
+
+        Poll advances the local consumer position before processing starts.
+        Durable inbox deduplication makes replaying a completed prefix safe;
+        continuing from that advanced position could skip the unhandled suffix.
+        Revoked partitions are recovered from their committed offsets by their
+        new owner, so only seek partitions still assigned to this consumer.
+        """
+        first_offsets: dict[TopicPartition, int] = {}
+        for message in messages:
+            partition = TopicPartition(message.topic, message.partition)
+            first_offsets[partition] = min(
+                int(message.offset), first_offsets.get(partition, int(message.offset))
+            )
+        try:
+            assigned = self._consumer.assignment()
+            for partition, offset in first_offsets.items():
+                if partition in assigned:
+                    self._consumer.seek(partition, offset)
+        except Exception as error:
+            # A failed rewind must terminate the worker; treating its Kafka
+            # timeout as retryable would resume from the advanced position.
+            logger.exception("Could not rewind failed detector batch")
+            raise RuntimeError("detector batch rewind failed; restart required") from error
 
     def _process_message(self, message: Any) -> None:
         raw = message.value
