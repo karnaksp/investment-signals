@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any
 
 from .models import TriggerSignal
+
+
+_FUTURES_CURVE_TYPES = {
+    "calendar_spread_dislocation",
+    "roll_migration_anomaly",
+    "futures_curve_kink",
+    "term_premium_shock",
+    "futures_basis_momentum",
+}
 
 
 def build_signal_interpretation(signal: TriggerSignal) -> dict[str, Any]:
@@ -18,6 +28,8 @@ def build_signal_interpretation(signal: TriggerSignal) -> dict[str, Any]:
     p = signal.payload or {}
     st = signal.signal_type
 
+    if st in _FUTURES_CURVE_TYPES:
+        return _futures_curve(signal, p)
     if st == "price_jump":
         return _price_jump(signal, p)
     if st in {"confirmed_impulse_long", "confirmed_impulse_short"}:
@@ -506,6 +518,171 @@ def _futures_positioning(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, 
         _fact("Open interest", _qty(_num(p.get("open_interest"))), "open_interest"),
     ]
     return _pack(signal, headline, facts, direction=direction)
+
+
+def _futures_curve(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
+    raw_legs = p.get("legs")
+    legs = (
+        [leg for leg in raw_legs if isinstance(leg, dict)][:3]
+        if isinstance(raw_legs, list)
+        else []
+    )
+    pair = " / ".join(_curve_leg_label(leg) for leg in legs)
+    if not pair:
+        pair = str(p.get("chain_id") or signal.ticker)
+    direction = str(p.get("direction") or "unknown")
+    deviation = _num(p.get("deviation_bps"))
+    facts: list[dict[str, Any] | None] = []
+
+    if signal.signal_type == "roll_migration_anomaly":
+        oi_change = _num(p.get("oi_share_change"))
+        volume_change = _num(p.get("volume_share_change"))
+        detail = (
+            "перенос в дальний срок; доля дальнего в OI "
+            f"{_curve_percentage_points(oi_change)}, "
+            f"в объёме {_curve_percentage_points(volume_change)}"
+        )
+        facts.extend(
+            [
+                _fact(
+                    "Δ доли OI дальнего",
+                    _curve_percentage_points(oi_change),
+                    "oi_share_change",
+                ),
+                _fact(
+                    "Δ доли объёма дальнего",
+                    _curve_percentage_points(volume_change),
+                    "volume_share_change",
+                ),
+            ]
+        )
+    elif signal.signal_type == "futures_curve_kink":
+        middle = {
+            "middle_rich": "средний срок дороже соседних",
+            "middle_cheap": "средний срок дешевле соседних",
+        }.get(direction, "средний срок отклонился от соседних")
+        detail = f"{middle}; отклонение {_curve_signed_bps(deviation)}"
+    elif signal.signal_type == "term_premium_shock":
+        annual_change = _num(p.get("annual_premium_change"))
+        detail = (
+            "премия за срок изменилась на "
+            f"{_curve_percentage_points(annual_change)} годовых"
+        )
+        facts.append(
+            _fact(
+                "Δ годовой премии",
+                _curve_percentage_points(annual_change),
+                "annual_premium_change",
+            )
+        )
+    elif signal.signal_type == "futures_basis_momentum":
+        difference = _num(p.get("momentum_difference_bps"), deviation)
+        horizon = _num(p.get("horizon_seconds"))
+        horizon_label = (
+            f" за {_fmt(horizon / 60, 0)} мин" if horizon is not None else ""
+        )
+        detail = f"разница динамики сроков{horizon_label} {_curve_signed_bps(difference)}"
+        facts.extend(
+            [
+                _fact(
+                    "Разница динамики",
+                    _curve_signed_bps(difference),
+                    "momentum_difference_bps",
+                ),
+                _fact(
+                    "Горизонт",
+                    f"{_fmt(horizon, 0)} с" if horizon is not None else None,
+                    "horizon_seconds",
+                ),
+                _fact("Метод", "внутридневная исследовательская адаптация", "method"),
+            ]
+        )
+    else:
+        movement = {
+            "widening": "спред расширился",
+            "narrowing": "спред сузился",
+        }.get(direction, "календарный спред изменился")
+        detail = f"{movement}; отклонение {_curve_signed_bps(deviation)}"
+
+    score = _num(p.get("score"), signal.z_score)
+    notional = _num(p.get("window_notional"))
+    absolute_score = abs(score) if score is not None else None
+    headline = f"{pair}: {detail}; |z|={_fmt(absolute_score, 1)}"
+    if notional is not None:
+        headline += f", оборот ног {_money(notional, signal)}"
+    headline += ". Наблюдаемая аномалия, без прогноза направления цены."
+
+    facts.extend(
+        [
+            _fact("Контракты и исполнение", pair, "legs"),
+            _fact("Отклонение", _curve_signed_bps(deviation), "deviation_bps"),
+            _fact("Сила отклонения |z|", _fmt(absolute_score, 2), "score"),
+            _fact("Оборот ног", _money(notional, signal), "window_notional"),
+            _fact("Точек базы", _qty(_num(p.get("baseline_points"))), "baseline_points"),
+            _fact(
+                "Подтверждение",
+                f"{_fmt(_num(p.get('persistence_seconds')), 0)} с",
+                "persistence_seconds",
+            ),
+            _fact(
+                "Возраст котировок",
+                f"{_fmt(_num(p.get('quote_age_seconds')), 1)} с",
+                "quote_age_seconds",
+            ),
+            _fact(
+                "Разница времени котировок",
+                f"{_fmt(_num(p.get('quote_skew_seconds')), 1)} с",
+                "quote_skew_seconds",
+            ),
+            _fact("Статус", "экспериментальное наблюдение", "evidence_status"),
+        ]
+    )
+    for index, leg in enumerate(legs, 1):
+        facts.extend(
+            [
+                _fact(f"Срок {index}", _curve_leg_label(leg), f"leg_{index}"),
+                _fact(
+                    f"Цена срока {index}",
+                    _fmt(_num(leg.get("mid")), 4),
+                    f"leg_{index}_mid",
+                ),
+                _fact(
+                    f"Оборот срока {index}",
+                    _money(_num(leg.get("notional_rub")), signal),
+                    f"leg_{index}_notional_rub",
+                ),
+                _fact(
+                    f"OI срока {index}",
+                    _qty(_num(leg.get("open_interest"))),
+                    f"leg_{index}_open_interest",
+                ),
+            ]
+        )
+    return _pack(signal, headline, facts, direction=direction)
+
+
+def _curve_leg_label(leg: dict[str, Any]) -> str:
+    ticker = str(leg.get("ticker") or "неизвестный контракт")
+    raw_expiration = leg.get("expiration_at")
+    try:
+        expiration = (
+            raw_expiration
+            if isinstance(raw_expiration, datetime)
+            else datetime.fromisoformat(str(raw_expiration).replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError, OverflowError):
+        return f"{ticker} (исполнение —)"
+    return f"{ticker} ({expiration:%d.%m.%Y})"
+
+
+def _curve_signed_bps(value: Any) -> str:
+    number = _num(value)
+    return f"{_signed_number(number, 1)} б.п." if number is not None else "—"
+
+
+def _curve_percentage_points(value: Any) -> str:
+    number = _num(value)
+    return f"{_signed_number(number * 100, 2)} п.п." if number is not None else "—"
 
 
 def _candle_range(signal: TriggerSignal, p: dict[str, Any]) -> dict[str, Any]:
