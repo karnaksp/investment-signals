@@ -15,6 +15,7 @@ from tinvest_signal_engine.domain.reliable_processing import DeliveryTask
 from tinvest_signal_engine.domain.daily_positions import (
     REPORT_SIGNAL_TYPE, REPORT_VERSION, daily_report_freshness,
 )
+from tinvest_signal_engine.domain.commodity_positions import DIGEST_VERSION
 from tinvest_signal_engine.serialization import parse_timestamp
 
 
@@ -28,9 +29,12 @@ class QueuedDeliveryRecoveryAdapter:
             payload = task.payload.get("payload")
             now = self._clock()
             try:
-                if not isinstance(payload, dict) or payload.get("daily_report_version") != REPORT_VERSION:
+                if not isinstance(payload, dict):
                     raise ValueError("unknown daily report version")
-                if payload.get("source_exchange") != "SHFE":
+                legacy = payload.get("daily_report_version") == REPORT_VERSION and payload.get("source_exchange") == "SHFE"
+                digest = (payload.get("daily_report_version") == DIGEST_VERSION
+                          and payload.get("source_exchange") == "MULTI" and payload.get("primary_source") == "SHFE")
+                if not (legacy or digest):
                     raise ValueError("unknown daily report source")
                 return daily_report_freshness(
                     trading_day=date.fromisoformat(payload["trading_day"]),
