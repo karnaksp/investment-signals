@@ -15,6 +15,15 @@ from .terminal_links import (
 
 
 def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
+    if signal.signal_type == "daily_futures_position_report":
+        from .adapters.daily_positions_report import render_daily_positions_html
+
+        # A dated bulletin is not a trading signal: no synthetic quality or
+        # probability, and no terminal link to an invented tradable ticker.
+        return replace(signal, payload={
+            **signal.payload, "summary_ru": signal.summary,
+            "telegram_html": render_daily_positions_html(signal.payload),
+        })
     quality = compute_signal_quality(signal)
     summary_en = signal.payload.get("summary_en", signal.summary)
     instrument_url = t_invest_instrument_url(

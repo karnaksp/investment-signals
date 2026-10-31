@@ -345,6 +345,7 @@ services:
       - dagster_home:/opt/dagster/dagster_home
       - ./conf:/app/conf
       - ./var/adaptive-calibration:/var/lib/investment-signals/adaptive-calibration
+      - ./var/shfe-daily-positions:/app/var/shfe-daily-positions
       - ./src:/app/live-src:ro
     command:
       - dagster-daemon

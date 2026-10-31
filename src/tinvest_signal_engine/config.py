@@ -27,7 +27,9 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     ),
     "bond_convergence_emitter": frozenset({"TINVEST_TOKEN"}),
     "candle_cache": frozenset({"TINVEST_TOKEN"}),
-    "dagster": frozenset({"POSTGRES_PASSWORD", "TINVEST_TOKEN"}),
+    "dagster": frozenset({
+        "POSTGRES_PASSWORD", "TINVEST_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_MESSAGE_THREAD_ID",
+    }),
     "detector": frozenset(
         {
             "ALERT_WEBHOOK_URL",
