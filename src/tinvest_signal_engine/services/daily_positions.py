@@ -9,12 +9,12 @@ import logging
 import os
 from pathlib import Path
 
-from tinvest_signal_engine.adapters.daily_positions_report import (
-    PostgresDailyPositionPublisher, comparison_payload, render_daily_positions_html,
-)
 from tinvest_signal_engine.adapters.postgres_reliability import connect_reliable_processing_store
 from tinvest_signal_engine.adapters.shfe_positions import ShfePositionSource
 from tinvest_signal_engine.adapters.weekly_positions import WeeklyPositionSource
+from tinvest_signal_engine.adapters.asset_position_cards import asset_report_payload, render_asset_positions_html, render_asset_positions_png
+from tinvest_signal_engine.adapters.asset_position_publisher import PostgresAssetPositionPublisher
+from tinvest_signal_engine.application.asset_positions import build_asset_position_reports
 from tinvest_signal_engine.application.daily_positions import CollectDailyPositions, DailyPositionReceipt
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTarget
@@ -27,7 +27,12 @@ logger = logging.getLogger(__name__)
 class _PreviewPublisher:
     def publish(self, comparison, *, generated_at: datetime, context=None) -> bool:
         del generated_at
-        print(render_daily_positions_html(comparison_payload(comparison, context)))
+        for report in build_asset_position_reports(comparison, context):
+            payload = asset_report_payload(report)
+            print(render_asset_positions_html(payload))
+            directory = Path("var/shfe-daily-positions/cards")
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / (report.commodity + ".png")).write_bytes(render_asset_positions_png(payload))
         return True
 
 
@@ -61,7 +66,7 @@ def run_once(
             target = DeliveryTarget("telegram", (
                 f"{settings.telegram_chat_id}:{settings.telegram_message_thread_id or ''}"
             ))
-            publisher = PostgresDailyPositionPublisher(store=store, target=target)
+            publisher = PostgresAssetPositionPublisher(store=store, target=target)
         receipt = CollectDailyPositions(source=source, publisher=publisher, context_sources=context_sources).execute(
             as_of=as_of or datetime.now(timezone.utc),
         )

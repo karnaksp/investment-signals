@@ -28,6 +28,7 @@ dependencies = [
   "kafka-python-ng",
   "lz4>=4.3",
   "orjson>=3.10",
+  "Pillow>=11.3,<14",
   "prometheus-client>=0.20",
   "psycopg[binary]>=3.2",
   "protobuf>=5.29.6,<6",

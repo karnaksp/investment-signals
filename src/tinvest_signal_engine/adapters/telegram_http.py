@@ -55,8 +55,9 @@ class TelegramAddressRequester(Protocol):
         port: int,
         address: ResolvedTelegramAddress,
         path: str,
-        payload: dict[str, object],
+        payload: dict[str, object] | bytes,
         timeout_seconds: float,
+        content_type: str = "application/json",
     ) -> RawTelegramHttpResponse: ...
 
 
@@ -120,8 +121,9 @@ class StdlibTelegramAddressRequester:
         port: int,
         address: ResolvedTelegramAddress,
         path: str,
-        payload: dict[str, object],
+        payload: dict[str, object] | bytes,
         timeout_seconds: float,
+        content_type: str = "application/json",
     ) -> RawTelegramHttpResponse:
         raw_socket = socket.socket(address.family, socket.SOCK_STREAM)
         raw_socket.settimeout(timeout_seconds)
@@ -147,7 +149,7 @@ class StdlibTelegramAddressRequester:
             context=self._ssl_context,
         )
         connection.sock = tls_socket
-        body = json.dumps(
+        body = payload if isinstance(payload, bytes) else json.dumps(
             payload,
             ensure_ascii=False,
             separators=(",", ":"),
@@ -159,7 +161,7 @@ class StdlibTelegramAddressRequester:
                 body=body,
                 headers={
                     "Host": hostname,
-                    "Content-Type": "application/json",
+                    "Content-Type": content_type,
                     "Content-Length": str(len(body)),
                     "Connection": "close",
                 },
@@ -194,7 +196,8 @@ class TelegramMultiAddressHttpClient:
         self._requester = requester or StdlibTelegramAddressRequester()
 
     def post(
-        self, url: str, *, json: dict[str, object]
+        self, url: str, *, json: dict[str, object] | None = None,
+        data: dict[str, str] | None = None, files: dict | None = None,
     ) -> httpx.Response:
         parsed = urlsplit(url)
         if (
@@ -206,7 +209,9 @@ class TelegramMultiAddressHttpClient:
             or parsed.port not in {None, 443}
         ):
             raise ValueError("unsupported Telegram API endpoint")
-        request = httpx.Request("POST", url, json=json)
+        request = httpx.Request("POST", url, json=json, data=data, files=files)
+        extra = {} if json is not None else {"content_type": request.headers["Content-Type"]}
+        payload = json if json is not None else request.read()
         try:
             addresses = self._resolver.resolve(
                 hostname=_TELEGRAM_API_HOST,
@@ -235,8 +240,9 @@ class TelegramMultiAddressHttpClient:
                     port=443,
                     address=address,
                     path=path,
-                    payload=json,
+                    payload=payload,
                     timeout_seconds=remaining_seconds,
+                    **extra,
                 )
             except TelegramAddressConnectionError as error:
                 last_connect_error = error
