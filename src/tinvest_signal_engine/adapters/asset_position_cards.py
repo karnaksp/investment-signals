@@ -19,7 +19,7 @@ _GROUPS = {"broker_clients": "Через брокеров", "direct_members": "�
            "managed_money": "Фонды", "producers_merchants": "Производители и торговцы",
            "individuals": "Физические лица", "legal_entities": "Юридические лица"}
 _VENUES = {"SHFE": "Китай · SHFE", "CFTC": "США · CFTC", "ICE": "Лондон · ICE"}
-_INK, _MUTED, _LONG, _SHORT = "#182D3D", "#556371", "#296CC2", "#CF6946"
+_INK, _MUTED, _LONG, _SHORT = "#182D3D", "#556371", "#16804A", "#C83D3D"
 
 
 def asset_report_payload(report: AssetPositionReport) -> dict:
