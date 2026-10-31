@@ -346,6 +346,7 @@ services:
       - ./conf:/app/conf
       - ./var/adaptive-calibration:/var/lib/investment-signals/adaptive-calibration
       - ./var/shfe-daily-positions:/app/var/shfe-daily-positions
+      - ./var/ruble-positions:/app/var/ruble-positions
       - ./src:/app/live-src:ro
     command:
       - dagster-daemon

@@ -35,7 +35,7 @@ class QueuedDeliveryRecoveryAdapter:
                 if payload.get("daily_report_version") == ASSET_REPORT_VERSION:
                     primary = payload["sections"][0]
                     if ((payload.get("source_exchange"), payload.get("period")) not in {
-                        ("SHFE", "daily"), ("CFTC", "weekly"), ("ICE", "weekly"),
+                        ("SHFE", "daily"), ("CFTC", "weekly"), ("ICE", "weekly"), ("MOEX", "daily"),
                     } or any(payload[key] != primary[field] for key, field in (
                         ("source_exchange", "source"), ("period", "period"),
                         ("trading_day", "trading_day"), ("previous_day", "previous_day"),

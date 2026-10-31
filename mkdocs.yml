@@ -78,6 +78,7 @@ nav:
   - Детекторы и паттерны: detectors.md
   - Фьючерсная кривая: futures-curve.md
   - Сырьё — позиции игроков: daily-metals-positions.md
+  - Валюты — позиции игроков: ruble-positions.md
   - Оркестрация (Dagster): orchestration.md
   - Аналитика сигналов (SQL): signal_analytics.md
   - Решение проблем: troubleshooting.md

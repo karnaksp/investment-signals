@@ -1,4 +1,4 @@
-"""One commodity's positions, with independent dates for each venue."""
+"""One asset's positions, with independent dates for each venue."""
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -48,15 +48,22 @@ class AssetPositionSection:
     previous_source_sha256: str | None = None
     open_interest: int | None = None
     previous_open_interest: int | None = None
+    comparison_method: str | None = None
+    reported_gross_open_positions: int | None = None
+    previous_reported_gross_open_positions: int | None = None
 
     def __post_init__(self) -> None:
-        if (self.source, self.period) not in {("SHFE", "daily"), ("CFTC", "weekly"), ("ICE", "weekly")}:
+        if (self.source, self.period) not in {("SHFE", "daily"), ("CFTC", "weekly"), ("ICE", "weekly"), ("MOEX", "daily")}:
             raise ValueError("unsupported asset report source and period")
         if self.previous_day >= self.trading_day or self.source_event_at.utcoffset() is None:
             raise ValueError("asset report requires ordered dates and an aware source timestamp")
         if not self.groups or len({g.category for g in self.groups}) != len(self.groups):
             raise ValueError("asset report requires distinct participant groups")
-        if self.period == "weekly":
+        if self.source == "MOEX":
+            if ({g.category for g in self.groups} != {"individuals", "legal_entities"}
+                    or self.comparison_method != "exchange_reported_daily_change"):
+                raise ValueError("MOEX requires both legal-status categories and reported changes")
+        if self.period == "weekly" or self.source == "MOEX":
             for previous in (False, True):
                 oi = self.previous_open_interest if previous else self.open_interest
                 if type(oi) is not int or oi <= 0:
@@ -65,6 +72,10 @@ class AssetPositionSection:
                 shorts = sum(g.previous_shorts + g.previous_spreading if previous else g.shorts + g.spreading for g in self.groups)
                 if longs != oi or shorts != oi:
                     raise ValueError("asset report totals must reconcile with open interest")
+                if self.source == "MOEX":
+                    reported = self.previous_reported_gross_open_positions if previous else self.reported_gross_open_positions
+                    if type(reported) is not int or reported != 2 * oi:
+                        raise ValueError("MOEX gross open positions must equal both sides, not single-count OI")
 
 
 @dataclass(frozen=True)

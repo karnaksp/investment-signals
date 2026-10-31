@@ -18,6 +18,7 @@ from tinvest_signal_engine.domain.daily_positions import (
 )
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTarget, EventReplayConflict
 from tinvest_signal_engine.domain.commodity_positions import PositionContext
+from tinvest_signal_engine.domain.asset_positions import AssetPositionGroup, AssetPositionReport, AssetPositionSection
 
 
 pytestmark = pytest.mark.integration
@@ -25,7 +26,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.skipif(os.getenv("RUN_INTEGRATION", "").lower() not in {"1", "true", "yes"},
                     reason="Set RUN_INTEGRATION=1 and stack up")
-@pytest.mark.parametrize("mode", ["legacy", "digest", "asset"])
+@pytest.mark.parametrize("mode", ["legacy", "digest", "asset", "ruble"])
 def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(mode):
     connection = psycopg.connect(
         host=os.getenv("POSTGRES_HOST", "localhost"),
@@ -58,15 +59,31 @@ def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(mode):
             )), "https://www.shfe.com.cn/current", "b" * 64,
         )
         comparison = DailyPositionComparison(current, previous)
-        publisher_type = PostgresAssetPositionPublisher if mode == "asset" else PostgresDailyPositionPublisher
+        publisher_type = PostgresAssetPositionPublisher if mode in {"asset", "ruble"} else PostgresDailyPositionPublisher
         publisher = publisher_type(store=store, target=DeliveryTarget("telegram", "test"))
         context = None if mode == "legacy" else PositionContext()
-        assert publisher.publish(comparison, generated_at=datetime.now(timezone.utc), context=context)
-        assert not publisher.publish(comparison, generated_at=datetime.now(timezone.utc),
-                                     context=PositionContext((), ("ICE",)) if mode != "legacy" else None)
-        with pytest.raises(EventReplayConflict):
-            publisher.publish(DailyPositionComparison(replace(current, source_sha256="c" * 64), previous),
-                              generated_at=datetime.now(timezone.utc), context=context)
+        if mode == "ruble":
+            section = AssetPositionSection(
+                "MOEX", "Si", "daily", current.trading_day, previous.trading_day, current.published_at,
+                (AssetPositionGroup("individuals", 110, 40, 100, 40), AssetPositionGroup("legal_entities", 20, 90, 20, 80)),
+                "https://www.moex.com", "b" * 64, open_interest=130, previous_open_interest=120,
+                comparison_method="exchange_reported_daily_change", reported_gross_open_positions=260,
+                previous_reported_gross_open_positions=240,
+            )
+            report = AssetPositionReport("usd_rub", (section,))
+            assert publisher.publish_reports((report,), generated_at=datetime.now(timezone.utc))
+            assert not publisher.publish_reports((replace(report, sections=(replace(section, source_sha256="c"*64),)),),
+                                                  generated_at=datetime.now(timezone.utc))
+            revised = replace(section, groups=(replace(section.groups[0], longs=111), replace(section.groups[1], longs=19)))
+            with pytest.raises(EventReplayConflict):
+                publisher.publish_reports((replace(report, sections=(revised,)),), generated_at=datetime.now(timezone.utc))
+        else:
+            assert publisher.publish(comparison, generated_at=datetime.now(timezone.utc), context=context)
+            assert not publisher.publish(comparison, generated_at=datetime.now(timezone.utc),
+                                         context=PositionContext((), ("ICE",)) if mode != "legacy" else None)
+            with pytest.raises(EventReplayConflict):
+                publisher.publish(DailyPositionComparison(replace(current, source_sha256="c" * 64), previous),
+                                  generated_at=datetime.now(timezone.utc), context=context)
         # Tick processing must still require its state checkpoint and roll back
         # its inbox insert when no checkpoint is provided.
         tick = BrokerEvent("missing-checkpoint", "trade", "marketdata.raw", 0, 1, b"x" * 32, {})

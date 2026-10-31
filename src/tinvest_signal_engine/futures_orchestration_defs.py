@@ -15,6 +15,7 @@ from dagster import (
 
 from tinvest_signal_engine.services.futures_universe_refresh import run_once
 from tinvest_signal_engine.services.daily_positions import run_once as collect_daily_positions
+from tinvest_signal_engine.services.ruble_positions import run_once as collect_ruble_positions
 
 
 DEFAULT_FUTURES_REFRESH_CRON = "30 1 * * *"
@@ -77,7 +78,28 @@ shfe_daily_positions_schedule = ScheduleDefinition(
 )
 
 
+@op(name="collect_ruble_daily_positions", tags={"component": "ruble-positions"},
+    retry_policy=RetryPolicy(max_retries=2, delay=60))
+def collect_ruble_daily_positions_op(context):
+    receipt = collect_ruble_positions()
+    context.log.info("Ruble positions: %s, pairs=%s, unavailable=%s", receipt.status, receipt.pairs, receipt.unavailable_pairs)
+    if receipt.unavailable_pairs:
+        raise RuntimeError("Some ruble reports are unavailable; retrying without resending saved reports")
+
+
+@job(name="ruble_daily_positions_job")
+def ruble_daily_positions_job():
+    collect_ruble_daily_positions_op()
+
+
+ruble_daily_positions_schedule = ScheduleDefinition(
+    name="ruble_daily_positions", job=ruble_daily_positions_job,
+    cron_schedule="30 0,9 * * *", execution_timezone="Europe/Moscow",
+    default_status=DefaultScheduleStatus.RUNNING,
+)
+
+
 defs = Definitions(
-    jobs=[refresh_liquid_futures_universe_job, shfe_daily_positions_job],
-    schedules=[nightly_futures_universe_schedule, shfe_daily_positions_schedule],
+    jobs=[refresh_liquid_futures_universe_job, shfe_daily_positions_job, ruble_daily_positions_job],
+    schedules=[nightly_futures_universe_schedule, shfe_daily_positions_schedule, ruble_daily_positions_schedule],
 )
