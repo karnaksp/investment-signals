@@ -77,7 +77,7 @@ nav:
   - Архитектура: architecture.md
   - Детекторы и паттерны: detectors.md
   - Фьючерсная кривая: futures-curve.md
-  - Дневные позиции в металлах: daily-metals-positions.md
+  - Сырьё — позиции игроков: daily-metals-positions.md
   - Оркестрация (Dagster): orchestration.md
   - Аналитика сигналов (SQL): signal_analytics.md
   - Решение проблем: troubleshooting.md

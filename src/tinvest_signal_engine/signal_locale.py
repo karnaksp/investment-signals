@@ -12,7 +12,7 @@ from .terminal_links import t_invest_web_terminal_url
 
 _MOSCOW = ZoneInfo("Europe/Moscow")
 _SIGNAL_TYPE_RU: dict[str, str] = {
-    "daily_futures_position_report": "Дневные позиции в металлах SHFE",
+    "daily_futures_position_report": "Сырьё: позиции игроков",
     # Имена из detector_core.py и исторические алиасы
     "volume_spike": "Всплеск объёма",
     "trade_rate_spike": "Всплеск частоты сделок",

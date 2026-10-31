@@ -9,14 +9,16 @@ import json
 from uuid import NAMESPACE_URL, uuid5
 
 from tinvest_signal_engine.adapters.postgres_reliability import PostgresReliableProcessingStore
+from tinvest_signal_engine.adapters.commodity_positions_report import context_payload, render_commodity_positions_html
 from tinvest_signal_engine.application.reliable_processing import BrokerEvent
 from tinvest_signal_engine.domain.daily_positions import (
     CATEGORIES, PRODUCTS, REPORT_SIGNAL_TYPE, REPORT_VERSION, DailyPositionComparison,
 )
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTarget, PreparedSignal, SignalRecord
+from tinvest_signal_engine.domain.commodity_positions import DIGEST_VERSION, PositionContext
 
 
-def comparison_payload(comparison: DailyPositionComparison) -> dict:
+def comparison_payload(comparison: DailyPositionComparison, context: PositionContext | None = None) -> dict:
     current, previous = comparison.current, comparison.previous
     old = {(x.product, x.category): x for x in previous.totals}
     products = []
@@ -31,7 +33,7 @@ def comparison_payload(comparison: DailyPositionComparison) -> dict:
                 "long_change": row.long_change, "short_change": row.short_change,
             })
         products.append({"product": product, "groups": groups})
-    return {
+    payload = {
         "daily_report_version": REPORT_VERSION, "source_exchange": "SHFE",
         "trading_day": current.trading_day.isoformat(),
         "previous_day": previous.trading_day.isoformat(),
@@ -40,11 +42,17 @@ def comparison_payload(comparison: DailyPositionComparison) -> dict:
         "source_sha256": current.source_sha256, "previous_source_sha256": previous.source_sha256,
         "scope": "all_maturities_complete_categories", "products": products,
     }
+    if context is not None:
+        payload.update(context_payload(context))
+        payload.update(daily_report_version=DIGEST_VERSION, source_exchange="MULTI", primary_source="SHFE")
+    return payload
 
 
 def render_daily_positions_html(payload: dict) -> str:
+    if payload.get("daily_report_version") == DIGEST_VERSION:
+        return render_commodity_positions_html(payload)
     names = {"au": "Золото · AU", "ag": "Серебро · AG"}
-    categories = {"broker_clients": "Клиенты брокеров", "direct_members": "Неброкерские участники"}
+    categories = {"broker_clients": "Через брокеров", "direct_members": "Напрямую на бирже"}
     lines = ["<b>Металлы · дневные позиции SHFE</b>",
              f"{html.escape(payload['trading_day'])} к {html.escape(payload['previous_day'])}"]
     for product in payload["products"]:
@@ -64,7 +72,7 @@ def render_daily_positions_html(payload: dict) -> str:
         old_oi = sum(row["previous_longs"] for row in product["groups"])
         lines.append(f"Всего открытых контрактов: {_number(oi)} ({_change(oi - old_oi, old_oi)})")
     lines.extend(("", "Количество контрактов, все сроки вместе. Чистая позиция = лонги − шорты.",
-                  "Это позиции на китайской бирже. Клиенты брокеров — не собственные ставки брокеров.",
+                  "Это позиции на китайской бирже. Через брокеров торгуют и физические, и юридические лица.",
                   f'<a href="{html.escape(payload["source_url"], quote=True)}">SHFE: исходный отчёт</a>'))
     return "\n".join(lines)
 
@@ -87,33 +95,41 @@ class PostgresDailyPositionPublisher:
         self._store = store
         self._target = target
 
-    def publish(self, comparison: DailyPositionComparison, *, generated_at: datetime) -> bool:
-        payload = comparison_payload(comparison)
-        event_id = str(uuid5(NAMESPACE_URL, f"{REPORT_VERSION}:{comparison.current.trading_day}"))
-        instrument = "SHFE_DAILY_METALS"
+    def publish(self, comparison: DailyPositionComparison, *, generated_at: datetime,
+                context: PositionContext | None = None) -> bool:
+        payload = comparison_payload(comparison, context)
+        # Validate the message before creating a durable delivery task.
+        render_daily_positions_html(payload)
+        version = payload["daily_report_version"]
+        event_id = str(uuid5(NAMESPACE_URL, f"{version}:{comparison.current.trading_day}"))
+        instrument = "COMMODITY_POSITIONS" if context is not None else "SHFE_DAILY_METALS"
         event_body = {
             "event_id": event_id, "event_type": "daily_position_report", "instrument_id": instrument,
-            "source_time": comparison.current.published_at.isoformat(), "report": payload,
+            "source_time": comparison.current.published_at.isoformat(), "report": comparison_payload(comparison),
         }
-        # Generation time is not source identity: retrying tomorrow must not
-        # create a new report or conflict merely because it is fetched again.
+        if context is not None:
+            event_body["report_version"] = version
+        # SHFE is the daily trigger. Optional weekly context is enrichment,
+        # frozen in the first stored signal. Its later updates or outages must
+        # neither resend the same day nor conflict with the primary source.
         canonical = json.dumps(event_body, sort_keys=True, separators=(",", ":")).encode()
         event = BrokerEvent(
-            event_id, "daily_position_report", "shfe.daily-positions", 0,
+            event_id, "daily_position_report", "commodity.daily-positions" if context is not None else "shfe.daily-positions", 0,
             comparison.current.trading_day.toordinal(), sha256(canonical).digest(), event_body,
         )
         signal = SignalRecord(
             signal_id=str(uuid5(NAMESPACE_URL, "signal:" + event_id)), detected_at=generated_at,
-            instrument_id=instrument, ticker="SHFE", class_code="REPORT", alias="shfe_daily_metals",
+            instrument_id=instrument, ticker="COMMODITIES" if context is not None else "SHFE", class_code="REPORT",
+            alias="commodity_positions" if context is not None else "shfe_daily_metals",
             source_event_type=event.event_type, signal_type=REPORT_SIGNAL_TYPE, severity=1,
             metric_value=0, baseline_value=0, z_score=0, window_seconds=86400,
-            summary="Дневные позиции в золоте и серебре SHFE",
+            summary="Сырьё: позиции игроков" if context is not None else "Дневные позиции в золоте и серебре SHFE",
             payload={**payload, "report_generated_at": generated_at.isoformat(),
                      "delivery_status": "delivered", "delivery_channel": "daily",
                      "delivery_reason": "daily_report_subscription"},
             source_event_id=event_id, source_event_at=comparison.current.published_at,
-            signal_schema_version="1.0.0", expectation_catalog_version=REPORT_VERSION,
-            detector_config_version=REPORT_VERSION, delivery_config_version=REPORT_VERSION,
+            signal_schema_version="1.0.0", expectation_catalog_version=version,
+            detector_config_version=version, delivery_config_version=version,
             cost_model_version="not_applicable", provenance_status="complete",
         )
         stored = self._store.persist_report_once(event, PreparedSignal(signal, (self._target,)))

@@ -16,6 +16,7 @@ from tinvest_signal_engine.domain.daily_positions import (
     DailyPositionComparison, PositionSnapshot, PositionTotal,
 )
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTarget, EventReplayConflict
+from tinvest_signal_engine.domain.commodity_positions import PositionContext
 
 
 pytestmark = pytest.mark.integration
@@ -23,7 +24,8 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.skipif(os.getenv("RUN_INTEGRATION", "").lower() not in {"1", "true", "yes"},
                     reason="Set RUN_INTEGRATION=1 and stack up")
-def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint():
+@pytest.mark.parametrize("digest", [False, True])
+def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(digest):
     connection = psycopg.connect(
         host=os.getenv("POSTGRES_HOST", "localhost"),
         port=int(os.getenv("HOST_POSTGRES_PORT", "35432")),
@@ -56,11 +58,13 @@ def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint():
         )
         comparison = DailyPositionComparison(current, previous)
         publisher = PostgresDailyPositionPublisher(store=store, target=DeliveryTarget("telegram", "test"))
-        assert publisher.publish(comparison, generated_at=datetime.now(timezone.utc))
-        assert not publisher.publish(comparison, generated_at=datetime.now(timezone.utc))
+        context = PositionContext() if digest else None
+        assert publisher.publish(comparison, generated_at=datetime.now(timezone.utc), context=context)
+        assert not publisher.publish(comparison, generated_at=datetime.now(timezone.utc),
+                                     context=PositionContext((), ("ICE",)) if digest else None)
         with pytest.raises(EventReplayConflict):
             publisher.publish(DailyPositionComparison(replace(current, source_sha256="c" * 64), previous),
-                              generated_at=datetime.now(timezone.utc))
+                              generated_at=datetime.now(timezone.utc), context=context)
         # Tick processing must still require its state checkpoint and roll back
         # its inbox insert when no checkpoint is provided.
         tick = BrokerEvent("missing-checkpoint", "trade", "marketdata.raw", 0, 1, b"x" * 32, {})

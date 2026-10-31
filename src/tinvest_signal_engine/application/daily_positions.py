@@ -6,10 +6,23 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
+import logging
 
 from tinvest_signal_engine.domain.daily_positions import (
     DailyPositionComparison, PositionSnapshot,
 )
+from tinvest_signal_engine.domain.commodity_positions import PositionContext
+
+logger = logging.getLogger(__name__)
+
+
+class PositionSourceUnavailable(RuntimeError):
+    """An optional source cannot supply a validated, timely comparison."""
+
+
+class PositionContextSource(Protocol):
+    name: str
+    def load(self, *, as_of: datetime) -> PositionContext: ...
 
 
 class DailyPositionSource(Protocol):
@@ -17,7 +30,8 @@ class DailyPositionSource(Protocol):
 
 
 class DailyPositionPublisher(Protocol):
-    def publish(self, comparison: DailyPositionComparison, *, generated_at: datetime) -> bool: ...
+    def publish(self, comparison: DailyPositionComparison, *, generated_at: datetime,
+                context: PositionContext | None = None) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -28,9 +42,11 @@ class DailyPositionReceipt:
 
 
 class CollectDailyPositions:
-    def __init__(self, *, source: DailyPositionSource, publisher: DailyPositionPublisher) -> None:
+    def __init__(self, *, source: DailyPositionSource, publisher: DailyPositionPublisher,
+                 context_sources: tuple[PositionContextSource, ...] = ()) -> None:
         self._source = source
         self._publisher = publisher
+        self._context_sources = context_sources
 
     def execute(self, *, as_of: datetime) -> DailyPositionReceipt:
         if as_of.utcoffset() is None:
@@ -57,7 +73,20 @@ class CollectDailyPositions:
         if (today - current.trading_day).days > 7:
             return DailyPositionReceipt("stale_source", current.trading_day, previous.trading_day)
         comparison = DailyPositionComparison(current, previous)
-        queued = self._publisher.publish(comparison, generated_at=as_of)
+        context = None
+        if self._context_sources:
+            markets, unavailable = [], []
+            for source in self._context_sources:
+                try:
+                    result = source.load(as_of=as_of)
+                    markets.extend(result.markets)
+                    unavailable.extend(result.unavailable_sources)
+                except PositionSourceUnavailable:
+                    logger.warning("Position context unavailable: %s", source.name, exc_info=True)
+                    unavailable.append(source.name)
+            context = PositionContext(tuple(markets), tuple(sorted(set(unavailable))))
+        queued = (self._publisher.publish(comparison, generated_at=as_of, context=context)
+                  if context is not None else self._publisher.publish(comparison, generated_at=as_of))
         return DailyPositionReceipt(
             "queued" if queued else "already_queued", current.trading_day, previous.trading_day,
         )

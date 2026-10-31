@@ -14,6 +14,7 @@ from tinvest_signal_engine.adapters.daily_positions_report import (
 )
 from tinvest_signal_engine.adapters.postgres_reliability import connect_reliable_processing_store
 from tinvest_signal_engine.adapters.shfe_positions import ShfePositionSource
+from tinvest_signal_engine.adapters.weekly_positions import WeeklyPositionSource
 from tinvest_signal_engine.application.daily_positions import CollectDailyPositions, DailyPositionReceipt
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTarget
@@ -24,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 class _PreviewPublisher:
-    def publish(self, comparison, *, generated_at: datetime) -> bool:
+    def publish(self, comparison, *, generated_at: datetime, context=None) -> bool:
         del generated_at
-        print(render_daily_positions_html(comparison_payload(comparison)))
+        print(render_daily_positions_html(comparison_payload(comparison, context)))
         return True
 
 
@@ -44,6 +45,9 @@ def run_once(
         "SHFE_DAILY_POSITION_CACHE_DIR", "var/shfe-daily-positions/raw",
     )))
     store = None
+    context_sources = tuple(WeeklyPositionSource(name, cache_dir=Path(os.getenv(
+        "COMMODITY_POSITION_CONTEXT_CACHE_DIR", "var/shfe-daily-positions/context",
+    ))) for name in ("CFTC", "ICE"))
     try:
         if dry_run:
             publisher = _PreviewPublisher()
@@ -58,7 +62,7 @@ def run_once(
                 f"{settings.telegram_chat_id}:{settings.telegram_message_thread_id or ''}"
             ))
             publisher = PostgresDailyPositionPublisher(store=store, target=target)
-        receipt = CollectDailyPositions(source=source, publisher=publisher).execute(
+        receipt = CollectDailyPositions(source=source, publisher=publisher, context_sources=context_sources).execute(
             as_of=as_of or datetime.now(timezone.utc),
         )
         if dry_run and receipt.status == "queued":
@@ -68,6 +72,8 @@ def run_once(
         return receipt
     finally:
         source.close()
+        for context_source in context_sources:
+            context_source.close()
         if store is not None:
             store.close()
 
