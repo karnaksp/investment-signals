@@ -63,6 +63,7 @@ RUN apt-get update \
         ca-certificates \
         passwd \
         python3 \
+        fonts-dejavu-core \
     && rm -f /usr/bin/pebble \
     && groupadd --gid 10001 tinvest \
     && useradd --uid 10001 --gid tinvest --no-create-home \

@@ -16,6 +16,7 @@ from tinvest_signal_engine.domain.daily_positions import (
     REPORT_SIGNAL_TYPE, REPORT_VERSION, daily_report_freshness,
 )
 from tinvest_signal_engine.domain.commodity_positions import DIGEST_VERSION
+from tinvest_signal_engine.domain.asset_positions import ASSET_REPORT_VERSION, asset_report_freshness
 from tinvest_signal_engine.serialization import parse_timestamp
 
 
@@ -31,6 +32,20 @@ class QueuedDeliveryRecoveryAdapter:
             try:
                 if not isinstance(payload, dict):
                     raise ValueError("unknown daily report version")
+                if payload.get("daily_report_version") == ASSET_REPORT_VERSION:
+                    primary = payload["sections"][0]
+                    if ((payload.get("source_exchange"), payload.get("period")) not in {
+                        ("SHFE", "daily"), ("CFTC", "weekly"), ("ICE", "weekly"),
+                    } or any(payload[key] != primary[field] for key, field in (
+                        ("source_exchange", "source"), ("period", "period"),
+                        ("trading_day", "trading_day"), ("previous_day", "previous_day"),
+                    ))):
+                        raise ValueError("invalid asset report primary source")
+                    return asset_report_freshness(
+                        trading_day=date.fromisoformat(payload["trading_day"]),
+                        previous_day=date.fromisoformat(payload["previous_day"]), period=payload["period"],
+                        generated_at=parse_timestamp(payload["report_generated_at"]), evaluated_at=now,
+                    )
                 legacy = payload.get("daily_report_version") == REPORT_VERSION and payload.get("source_exchange") == "SHFE"
                 digest = (payload.get("daily_report_version") == DIGEST_VERSION
                           and payload.get("source_exchange") == "MULTI" and payload.get("primary_source") == "SHFE")
@@ -41,7 +56,7 @@ class QueuedDeliveryRecoveryAdapter:
                     previous_day=date.fromisoformat(payload["previous_day"]),
                     generated_at=parse_timestamp(payload["report_generated_at"]), evaluated_at=now,
                 )
-            except (KeyError, TypeError, ValueError):
+            except (IndexError, KeyError, TypeError, ValueError):
                 return DeliveryFreshnessDecision(False, "daily_report_invalid", None, 21600, None, now.date().isoformat())
         raw_source_at = task.payload.get("source_event_at")
         source_event_at: datetime | None = None

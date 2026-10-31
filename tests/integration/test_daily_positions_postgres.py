@@ -10,6 +10,7 @@ import psycopg
 import pytest
 
 from tinvest_signal_engine.adapters.daily_positions_report import PostgresDailyPositionPublisher
+from tinvest_signal_engine.adapters.asset_position_publisher import PostgresAssetPositionPublisher
 from tinvest_signal_engine.adapters.postgres_reliability import PostgresReliableProcessingStore
 from tinvest_signal_engine.application.reliable_processing import BrokerEvent, DetectionBatch
 from tinvest_signal_engine.domain.daily_positions import (
@@ -24,8 +25,8 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.skipif(os.getenv("RUN_INTEGRATION", "").lower() not in {"1", "true", "yes"},
                     reason="Set RUN_INTEGRATION=1 and stack up")
-@pytest.mark.parametrize("digest", [False, True])
-def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(digest):
+@pytest.mark.parametrize("mode", ["legacy", "digest", "asset"])
+def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(mode):
     connection = psycopg.connect(
         host=os.getenv("POSTGRES_HOST", "localhost"),
         port=int(os.getenv("HOST_POSTGRES_PORT", "35432")),
@@ -57,11 +58,12 @@ def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(digest)
             )), "https://www.shfe.com.cn/current", "b" * 64,
         )
         comparison = DailyPositionComparison(current, previous)
-        publisher = PostgresDailyPositionPublisher(store=store, target=DeliveryTarget("telegram", "test"))
-        context = PositionContext() if digest else None
+        publisher_type = PostgresAssetPositionPublisher if mode == "asset" else PostgresDailyPositionPublisher
+        publisher = publisher_type(store=store, target=DeliveryTarget("telegram", "test"))
+        context = None if mode == "legacy" else PositionContext()
         assert publisher.publish(comparison, generated_at=datetime.now(timezone.utc), context=context)
         assert not publisher.publish(comparison, generated_at=datetime.now(timezone.utc),
-                                     context=PositionContext((), ("ICE",)) if digest else None)
+                                     context=PositionContext((), ("ICE",)) if mode != "legacy" else None)
         with pytest.raises(EventReplayConflict):
             publisher.publish(DailyPositionComparison(replace(current, source_sha256="c" * 64), previous),
                               generated_at=datetime.now(timezone.utc), context=context)
@@ -71,8 +73,9 @@ def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(digest)
         with pytest.raises(ValueError, match="state checkpoint"):
             store.persist_detection_once(tick, DetectionBatch())
         with connection.cursor() as cursor:
-            for table, count in (("processed_events", 1), ("market_signals", 1),
-                                 ("delivery_outbox", 1), ("detector_state_snapshots", 0)):
+            reports = 2 if mode == "asset" else 1
+            for table, count in (("processed_events", reports), ("market_signals", reports),
+                                 ("delivery_outbox", reports), ("detector_state_snapshots", 0)):
                 cursor.execute(f"SELECT count(*) FROM {table}")
                 assert cursor.fetchone()[0] == count
     finally:

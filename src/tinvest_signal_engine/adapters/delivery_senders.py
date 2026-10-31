@@ -12,6 +12,8 @@ from tinvest_signal_engine.adapters.telegram_http import (
 )
 from tinvest_signal_engine.config import RuntimeSettings, load_secret
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTask
+from tinvest_signal_engine.domain.asset_positions import ASSET_REPORT_VERSION
+from tinvest_signal_engine.domain.daily_positions import REPORT_SIGNAL_TYPE
 from tinvest_signal_engine.models import TriggerSignal
 from tinvest_signal_engine.sinks import TelegramAlertSink, WebhookAlertSink
 
@@ -42,7 +44,14 @@ class ConfiguredDeliverySender:
                 try:
                     if not telegram.enabled:
                         raise DeliveryFailure("telegram_not_configured")
-                    telegram.send(signal)
+                    if (signal.signal_type == REPORT_SIGNAL_TYPE
+                            and signal.payload.get("daily_report_version") == ASSET_REPORT_VERSION):
+                        from tinvest_signal_engine.adapters.telegram_position_cards import send_position_card
+                        send_position_card(client=telegram._client, bot_token=telegram._bot_token,
+                                           chat_id=telegram._chat_id, message_thread_id=telegram._message_thread_id,
+                                           payload=signal.payload)
+                    else:
+                        telegram.send(signal)
                 finally:
                     telegram.close()
                 return

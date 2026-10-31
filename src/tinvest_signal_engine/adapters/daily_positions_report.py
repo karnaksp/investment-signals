@@ -16,6 +16,7 @@ from tinvest_signal_engine.domain.daily_positions import (
 )
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTarget, PreparedSignal, SignalRecord
 from tinvest_signal_engine.domain.commodity_positions import DIGEST_VERSION, PositionContext
+from tinvest_signal_engine.domain.asset_positions import ASSET_REPORT_VERSION
 
 
 def comparison_payload(comparison: DailyPositionComparison, context: PositionContext | None = None) -> dict:
@@ -49,6 +50,9 @@ def comparison_payload(comparison: DailyPositionComparison, context: PositionCon
 
 
 def render_daily_positions_html(payload: dict) -> str:
+    if payload.get("daily_report_version") == ASSET_REPORT_VERSION:
+        from tinvest_signal_engine.adapters.asset_position_cards import render_asset_positions_html
+        return render_asset_positions_html(payload)
     if payload.get("daily_report_version") == DIGEST_VERSION:
         return render_commodity_positions_html(payload)
     names = {"au": "Золото · AU", "ag": "Серебро · AG"}
