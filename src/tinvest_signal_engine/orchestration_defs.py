@@ -32,6 +32,8 @@ from .services.threshold_cron import run_recalc_once
 from .futures_orchestration_defs import (
     nightly_futures_universe_schedule,
     refresh_liquid_futures_universe_job,
+    shfe_daily_positions_job,
+    shfe_daily_positions_schedule,
 )
 
 
@@ -192,6 +194,7 @@ defs = Definitions(
         unary_kafka_poll_once_job,
         bond_convergence_scan_job,
         refresh_liquid_futures_universe_job,
+        shfe_daily_positions_job,
     ],
     schedules=[
         daily_threshold_schedule,
@@ -199,5 +202,6 @@ defs = Definitions(
         quarter_hourly_unary_schedule,
         daily_bond_convergence_schedule,
         nightly_futures_universe_schedule,
+        shfe_daily_positions_schedule,
     ],
 )

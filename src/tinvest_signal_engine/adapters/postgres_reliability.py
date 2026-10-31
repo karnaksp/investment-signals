@@ -28,6 +28,7 @@ from tinvest_signal_engine.domain.reliable_processing import (
     DeliveryTask,
     EventReplayConflict,
     SignalRecord,
+    PreparedSignal,
     deterministic_outbox_id,
 )
 from tinvest_signal_engine.serialization import json_dumps, parse_timestamp
@@ -79,6 +80,18 @@ class PostgresReliableProcessingStore:
         event: BrokerEvent,
         batch: DetectionBatch,
     ) -> StoredEvent:
+        return self._persist_once(event, batch, require_checkpoint=True)
+
+    def persist_report_once(self, event: BrokerEvent, report: PreparedSignal) -> StoredEvent:
+        """Dated bulletins share the durable outbox but own no detector state."""
+        if (event.event_type != "daily_position_report"
+                or report.signal.signal_type != "daily_futures_position_report"):
+            raise ValueError("report persistence requires a daily position report")
+        return self._persist_once(event, DetectionBatch(signals=(report,)), require_checkpoint=False)
+
+    def _persist_once(
+        self, event: BrokerEvent, batch: DetectionBatch, *, require_checkpoint: bool,
+    ) -> StoredEvent:
         with self._connection.transaction():
             with self._connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(
@@ -117,9 +130,10 @@ class PostgresReliableProcessingStore:
                         self._insert_outbox(cursor, prepared.signal, target)
                 for observation in batch.observations:
                     self._insert_observation(cursor, event, observation)
-                if batch.checkpoint is None:
+                if batch.checkpoint is None and require_checkpoint:
                     raise ValueError("detection batch must include a state checkpoint")
-                self._upsert_checkpoint(cursor, event, batch.checkpoint)
+                if batch.checkpoint is not None:
+                    self._upsert_checkpoint(cursor, event, batch.checkpoint)
 
                 stored = self._load_signals(cursor, event.event_id)
         return StoredEvent(signals=stored, replayed=False)

@@ -14,6 +14,7 @@ from dagster import (
 )
 
 from tinvest_signal_engine.services.futures_universe_refresh import run_once
+from tinvest_signal_engine.services.daily_positions import run_once as collect_daily_positions
 
 
 DEFAULT_FUTURES_REFRESH_CRON = "30 1 * * *"
@@ -56,7 +57,27 @@ nightly_futures_universe_schedule = ScheduleDefinition(
 )
 
 
+@op(name="collect_shfe_daily_positions", tags={"component": "daily-positions"},
+    retry_policy=RetryPolicy(max_retries=2, delay=60))
+def collect_shfe_daily_positions_op(context) -> None:
+    receipt = collect_daily_positions()
+    context.log.info("SHFE daily positions: %s, %s vs %s",
+                     receipt.status, receipt.trading_day, receipt.previous_day)
+
+
+@job(name="shfe_daily_positions_job")
+def shfe_daily_positions_job() -> None:
+    collect_shfe_daily_positions_op()
+
+
+shfe_daily_positions_schedule = ScheduleDefinition(
+    name="shfe_daily_positions", job=shfe_daily_positions_job,
+    cron_schedule="0 13,15 * * 1-5", execution_timezone="Europe/Moscow",
+    default_status=DefaultScheduleStatus.RUNNING,
+)
+
+
 defs = Definitions(
-    jobs=[refresh_liquid_futures_universe_job],
-    schedules=[nightly_futures_universe_schedule],
+    jobs=[refresh_liquid_futures_universe_job, shfe_daily_positions_job],
+    schedules=[nightly_futures_universe_schedule, shfe_daily_positions_schedule],
 )
