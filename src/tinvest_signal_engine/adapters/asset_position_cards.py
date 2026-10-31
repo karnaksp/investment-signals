@@ -13,9 +13,11 @@ ASSET_NAMES = {
     "gold": "Золото", "silver": "Серебро", "platinum": "Платина", "palladium": "Палладий",
     "copper": "Медь", "wti": "Нефть WTI", "brent": "Нефть Brent",
     "natural_gas": "Газ Henry Hub", "wheat_srw": "Пшеница SRW",
+    "usd_rub": "Доллар / рубль", "cny_rub": "Юань / рубль", "eur_rub": "Евро / рубль",
 }
 _GROUPS = {"broker_clients": "Через брокеров", "direct_members": "Напрямую на бирже",
-           "managed_money": "Фонды", "producers_merchants": "Производители и торговцы"}
+           "managed_money": "Фонды", "producers_merchants": "Производители и торговцы",
+           "individuals": "Физические лица", "legal_entities": "Юридические лица"}
 _VENUES = {"SHFE": "Китай · SHFE", "CFTC": "США · CFTC", "ICE": "Лондон · ICE"}
 _INK, _MUTED, _LONG, _SHORT = "#182D3D", "#556371", "#296CC2", "#CF6946"
 
@@ -24,6 +26,11 @@ def asset_report_payload(report: AssetPositionReport) -> dict:
     sections = []
     for section in report.sections:
         row = asdict(section)
+        # Preserve existing event identities: optional MOEX metadata must not
+        # add null keys to previously queued commodity observations.
+        for key in ("comparison_method", "reported_gross_open_positions", "previous_reported_gross_open_positions"):
+            if row[key] is None:
+                row.pop(key)
         row.update(trading_day=section.trading_day.isoformat(), previous_day=section.previous_day.isoformat(),
                    source_event_at=section.source_event_at.isoformat())
         sections.append(row)
@@ -58,7 +65,10 @@ def group_takeaway(group: dict, period: str, *, include_period: bool = True) -> 
 
 
 def _display_groups(section: dict) -> list[dict]:
-    order = ("broker_clients", "direct_members") if section["source"] == "SHFE" else ("managed_money", "producers_merchants")
+    if section["source"] == "MOEX":
+        order = ("individuals", "legal_entities")
+    else:
+        order = ("broker_clients", "direct_members") if section["source"] == "SHFE" else ("managed_money", "producers_merchants")
     by_category = {g["category"]: g for g in section["groups"]}
     return [by_category[key] for key in order]
 
@@ -69,18 +79,28 @@ def _dates(section: dict) -> str:
     return f"{day} к {before}"
 
 
+def _venue(section: dict) -> str:
+    if section["source"] == "MOEX":
+        return "Мосбиржа · " + ("вечные" if section["market_id"].endswith("RUBTOM") else "с экспирацией")
+    return _VENUES[section["source"]]
+
+
 def render_asset_positions_html(payload: dict) -> str:
     lines = [f"<b>{ASSET_NAMES[payload['commodity']]} · позиции игроков</b>"]
     for section in payload["sections"]:
         cadence = "день" if section["period"] == "daily" else "неделя, с задержкой"
-        lines.extend(("", f"<b>{_VENUES[section['source']]} · {cadence}</b>", _dates(section)))
+        lines.extend(("", f"<b>{_venue(section)} · {cadence}</b>", _dates(section)))
         group = _display_groups(section)[0]
         sentence = f"{_GROUPS[group['category']]}: {group_takeaway(group, section['period']).lower()}"
         lines.append(sentence.rstrip(".") + ".")
     if payload["unavailable_sources"]:
         lines.append("Дополнительные данные недоступны: " + html.escape(", ".join(payload["unavailable_sources"])))
-    lines.extend(("", "Полосы — доли лонгов и шортов внутри группы, без спредов. "
-                  "Изменения — в контрактах. Биржи не суммируются; позиции производителей могут быть хеджем."))
+    if payload["source_exchange"] == "MOEX":
+        lines.extend(("", "Лонг пары — валюта против рубля; шорт — рубль против валюты. "
+                      "Доли внутри группы; изменения в контрактах по дневному отчёту биржи. Типы контрактов не суммируются."))
+    else:
+        lines.extend(("", "Полосы — доли лонгов и шортов внутри группы, без спредов. "
+                      "Изменения — в контрактах. Биржи не суммируются; позиции производителей могут быть хеджем."))
     links = [f'<a href="{html.escape(s["source_url"], quote=True)}">{s["source"]}</a>' for s in payload["sections"]]
     lines.append("Источники: " + " · ".join(links))
     caption = "\n".join(lines)
@@ -112,11 +132,12 @@ def render_asset_positions_png(payload: dict) -> bytes:
     draw = ImageDraw.Draw(image)
     title, heading, body, small = _font(68, True), _font(42, True), _font(37), _font(32)
     draw.text((margin, 45), ASSET_NAMES[payload["commodity"]], font=title, fill=_INK)
-    draw.text((margin, 130), "Кто держит лонги и шорты", font=body, fill=_MUTED)
+    subtitle = "Лонг валюты = шорт рубля" if payload["source_exchange"] == "MOEX" else "Кто держит лонги и шорты"
+    draw.text((margin, 130), subtitle, font=body, fill=_MUTED)
     y = 220
     for section in sections:
         cadence = "за день" if section["period"] == "daily" else "за неделю · с задержкой"
-        draw.text((margin, y), _VENUES[section["source"]] + " · " + cadence, font=heading, fill=_INK)
+        draw.text((margin, y), _venue(section) + " · " + cadence, font=heading, fill=_INK)
         draw.text((margin, y + 57), _dates(section), font=small, fill=_MUTED)
         y += 118
         for group in _display_groups(section):
@@ -144,8 +165,11 @@ def render_asset_positions_png(payload: dict) -> bytes:
     if payload["unavailable_sources"]:
         draw.text((margin, y), "Часть источников недоступна", font=small, fill=_MUTED)
         y += 80
-    draw.text((margin, height - 95), "Доли внутри группы · без спредов", font=_font(29), fill=_MUTED)
-    draw.text((margin, height - 55), "Изменения в контрактах · биржи не суммируются", font=_font(29), fill=_MUTED)
+    moex = payload["source_exchange"] == "MOEX"
+    draw.text((margin, height - 95), "Доли позиций внутри каждой группы" if moex else "Доли внутри группы · без спредов",
+              font=_font(29), fill=_MUTED)
+    draw.text((margin, height - 55), "Изменения в контрактах · типы не суммируются" if moex else "Изменения в контрактах · биржи не суммируются",
+              font=_font(29), fill=_MUTED)
     output = BytesIO()
     image.save(output, "PNG", optimize=True)
     return output.getvalue()

@@ -33,6 +33,10 @@ def test_dagster_definitions_exposes_jobs_and_schedules() -> None:
     assert orchestration_defs.shfe_daily_positions_job.name == "shfe_daily_positions_job"
     assert orchestration_defs.shfe_daily_positions_schedule.execution_timezone == "Europe/Moscow"
     assert orchestration_defs.shfe_daily_positions_schedule.default_status is DefaultScheduleStatus.RUNNING
+    assert orchestration_defs.ruble_daily_positions_job.name == "ruble_daily_positions_job"
+    assert orchestration_defs.ruble_daily_positions_schedule.execution_timezone == "Europe/Moscow"
+    assert orchestration_defs.ruble_daily_positions_schedule.cron_schedule == "30 0,9 * * *"
+    assert orchestration_defs.ruble_daily_positions_schedule.default_status is DefaultScheduleStatus.RUNNING
     assert (
         orchestration_defs.daily_bond_convergence_schedule.name
         == "daily_bond_convergence_scan"

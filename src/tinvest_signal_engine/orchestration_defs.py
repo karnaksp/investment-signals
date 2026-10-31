@@ -34,6 +34,8 @@ from .futures_orchestration_defs import (
     refresh_liquid_futures_universe_job,
     shfe_daily_positions_job,
     shfe_daily_positions_schedule,
+    ruble_daily_positions_job,
+    ruble_daily_positions_schedule,
 )
 
 
@@ -195,6 +197,7 @@ defs = Definitions(
         bond_convergence_scan_job,
         refresh_liquid_futures_universe_job,
         shfe_daily_positions_job,
+        ruble_daily_positions_job,
     ],
     schedules=[
         daily_threshold_schedule,
@@ -203,5 +206,6 @@ defs = Definitions(
         daily_bond_convergence_schedule,
         nightly_futures_universe_schedule,
         shfe_daily_positions_schedule,
+        ruble_daily_positions_schedule,
     ],
 )
