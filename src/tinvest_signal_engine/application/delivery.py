@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Protocol
 
 from tinvest_signal_engine.application.observability import ReliabilityMetrics
-from tinvest_signal_engine.domain.session_open import SESSION_OPEN_SIGNAL_TYPE
+from tinvest_signal_engine.domain.session_open import SESSION_SIGNAL_TYPES
 from tinvest_signal_engine.domain.delivery_recovery import (
     DeliveryFreshnessDecision,
 )
@@ -96,7 +96,7 @@ class DurableDeliveryWorker:
             return DeliveryRunResult("idle", None)
         admitted_retry = (
             is_transient_delivery_failure(task.previous_error_code)
-            and task.payload.get("signal_type") != SESSION_OPEN_SIGNAL_TYPE
+            and task.payload.get("signal_type") not in SESSION_SIGNAL_TYPES
         )
         if self._recovery_guard is not None and not admitted_retry:
             freshness = self._recovery_guard.evaluate(task)

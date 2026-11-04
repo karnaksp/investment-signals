@@ -14,6 +14,9 @@ _MOSCOW = ZoneInfo("Europe/Moscow")
 _SIGNAL_TYPE_RU: dict[str, str] = {
     "daily_futures_position_report": "Позиции игроков",
     "market_session_open": "Начало торговой сессии",
+    "market_session_close": "Закрытие торговой сессии",
+    "market_session_break_start": "Перерыв в торгах",
+    "market_session_break_end": "Возобновление торгов",
     # Имена из detector_core.py и исторические алиасы
     "volume_spike": "Всплеск объёма",
     "trade_rate_spike": "Всплеск частоты сделок",
