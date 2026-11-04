@@ -71,11 +71,15 @@ orchestration = [
   "dagster>=1.8.0,<2",
   "dagster-webserver>=1.8.0,<2",
 ]
+sessions = [
+  "pandas-market-calendars==5.6.0",
+]
 replay = [
   "duckdb==1.5.4",
   "pytz>=2024.1",
 ]
 dev = [
+  "pandas-market-calendars==5.6.0",
   "pytest>=8",
   "playwright>=1.40",
   "dagster>=1.8.0,<2",

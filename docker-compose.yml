@@ -256,6 +256,36 @@ services:
     expose:
       - "9111"
 
+  # Independent clock/calendar worker; no market-data stack or broker required.
+  session-open-worker:
+    build:
+      <<: *app-build
+      args:
+        <<: *app-build-args
+        APP_EXTRAS: sessions
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app/live-src
+      SESSION_OPEN_HEALTH_PATH: /app/var/runtime-health/session-open-worker.json
+    volumes:
+      - ./src:/app/live-src:ro
+      - ./conf:/app/conf:ro
+      - ./var/runtime-health:/app/var/runtime-health
+    command: ["python", "-m", "tinvest_signal_engine.services.session_open_worker"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time,pathlib; p=pathlib.Path('/app/var/runtime-health/session-open-worker.json'); assert time.time()-p.stat().st_mtime < 60 and json.loads(p.read_text())['state']=='active'"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
   # Метрики из JSON выхода duckdb_label_signals (mount ./var/accuracy).
   accuracy-metrics:
     build: *app-build

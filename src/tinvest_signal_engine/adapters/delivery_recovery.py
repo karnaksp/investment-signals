@@ -18,6 +18,7 @@ from tinvest_signal_engine.domain.daily_positions import (
 from tinvest_signal_engine.domain.commodity_positions import DIGEST_VERSION
 from tinvest_signal_engine.domain.asset_positions import ASSET_REPORT_VERSION, asset_report_freshness
 from tinvest_signal_engine.serialization import parse_timestamp
+from tinvest_signal_engine.domain.session_open import SESSION_OPEN_SIGNAL_TYPE, SESSION_OPEN_VERSION, session_open_freshness
 
 
 class QueuedDeliveryRecoveryAdapter:
@@ -26,6 +27,21 @@ class QueuedDeliveryRecoveryAdapter:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def evaluate(self, task: DeliveryTask) -> DeliveryFreshnessDecision:
+        if task.payload.get("signal_type") == SESSION_OPEN_SIGNAL_TYPE:
+            now = self._clock()
+            try:
+                payload = task.payload["payload"]
+                if payload["session_version"] != SESSION_OPEN_VERSION:
+                    raise ValueError("unknown session version")
+                raw_open, raw_source = payload["opens_at"], task.payload["source_event_at"]
+                if not isinstance(raw_open, str) or not isinstance(raw_source, str):
+                    raise ValueError("session times must be ISO timestamps")
+                opens_at = datetime.fromisoformat(raw_open)
+                if opens_at != datetime.fromisoformat(raw_source):
+                    raise ValueError("session source time mismatch")
+                return session_open_freshness(opens_at=opens_at, evaluated_at=now)
+            except (KeyError, TypeError, ValueError):
+                return DeliveryFreshnessDecision(False, "session_open_invalid", None, 60, None, now.date().isoformat())
         if task.payload.get("signal_type") == REPORT_SIGNAL_TYPE:
             payload = task.payload.get("payload")
             now = self._clock()

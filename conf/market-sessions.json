@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "enabled": true,
+  "display_timezone": "Europe/Istanbul",
+  "sessions": [
+    {
+      "id": "asx",
+      "title": "Австралия · ASX",
+      "instruments": "Акции Австралии",
+      "calendar": "ASX",
+      "timezone": "Australia/Sydney",
+      "source_url": "https://www.asx.com.au/markets/market-resources/trading-hours-calendar/cash-market-trading-hours",
+      "note": "Начало основной сессии по расписанию."
+    },
+    {
+      "id": "tokyo",
+      "title": "Япония · Tokyo / JPX",
+      "instruments": "Акции Японии",
+      "calendar": "JPX",
+      "timezone": "Asia/Tokyo",
+      "source_url": "https://www.jpx.co.jp/english/equities/trading/domestic/01.html"
+    },
+    {
+      "id": "china_stocks",
+      "title": "Китай · Shanghai / Shenzhen",
+      "instruments": "Акции материкового Китая",
+      "calendar": "SSE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://english.sse.com.cn/start/trading/schedule/",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "hong_kong",
+      "title": "Гонконг · HKEX",
+      "instruments": "Акции Гонконга",
+      "calendar": "HKEX",
+      "timezone": "Asia/Hong_Kong",
+      "source_url": "https://www.hkex.com.hk/Services/Trading-hours-and-Severe-Weather-Arrangements/Trading-Hours/Securities-Market?sc_lang=en"
+    },
+    {
+      "id": "shfe_day",
+      "title": "Китай · SHFE · дневная сессия",
+      "instruments": "Товарные фьючерсы: золото, серебро, медь и другие металлы",
+      "calendar": "SHFE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.shfe.cn/eng/reports/CalendarHolidays/TradingHours/",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "shfe_night",
+      "title": "Китай · SHFE · ночная сессия",
+      "instruments": "Товарные фьючерсы с ночными торгами: золото, серебро, медь",
+      "calendar": "SHFE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.shfe.cn/eng/reports/CalendarHolidays/TradingHours/",
+      "mode": "china_night",
+      "local_open": "21:00",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "moex",
+      "title": "Россия · Мосбиржа",
+      "instruments": "Акции и фьючерсы · основная сессия",
+      "calendar": "MOEX",
+      "timezone": "Europe/Moscow",
+      "source_url": "https://www.moex.com/n103379",
+      "mode": "moex",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "london",
+      "title": "Великобритания · LSE",
+      "instruments": "Акции Великобритании",
+      "calendar": "LSE",
+      "timezone": "Europe/London",
+      "source_url": "https://www.londonstockexchange.com/en/resources/faqs/personal-investing"
+    },
+    {
+      "id": "frankfurt",
+      "title": "Германия · Xetra",
+      "instruments": "Акции Германии · основная сессия",
+      "calendar": "XETR",
+      "timezone": "Europe/Berlin",
+      "source_url": "https://www.xetra.com/xetra-en/trading/trading-calendar-and-trading-hours"
+    },
+    {
+      "id": "us_stocks",
+      "title": "США · NYSE / Nasdaq",
+      "instruments": "Акции США · основная сессия",
+      "calendar": "NYSE",
+      "timezone": "America/New_York",
+      "source_url": "https://www.nyse.com/markets/hours-calendars"
+    },
+    {
+      "id": "cme_resources",
+      "title": "США · CME Globex / COMEX / NYMEX",
+      "instruments": "Фьючерсы: золото GC, серебро SI, медь HG, нефть CL, газ NG",
+      "calendar": "CMEGlobex_EnergyAndMetals",
+      "timezone": "America/Chicago",
+      "source_url": "https://www.cmegroup.com/trading-hours.html",
+      "note": "Открытие электронной сессии по расписанию; это не открытие рынка акций."
+    },
+    {
+      "id": "fx_sydney",
+      "title": "Сидней",
+      "instruments": "Валюты · AUD, NZD",
+      "calendar": "ASX",
+      "timezone": "Australia/Sydney",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "08:00",
+      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+    },
+    {
+      "id": "fx_tokyo",
+      "title": "Токио",
+      "instruments": "Валюты · JPY",
+      "calendar": "JPX",
+      "timezone": "Asia/Tokyo",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "09:00",
+      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+    },
+    {
+      "id": "fx_london",
+      "title": "Лондон",
+      "instruments": "Валюты · GBP, EUR, USD",
+      "calendar": "LSE",
+      "timezone": "Europe/London",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "08:00",
+      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+    },
+    {
+      "id": "fx_new_york",
+      "title": "Нью-Йорк",
+      "instruments": "Валюты · USD",
+      "calendar": "NYSE",
+      "timezone": "America/New_York",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "08:00",
+      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+    }
+  ],
+  "moex_2026": {
+    "source_urls": [
+      "https://www.moex.com/n96571",
+      "https://www.moex.com/n103379",
+      "https://www.moex.com/n104837"
+    ],
+    "closed_dates": [
+      "2026-01-01",
+      "2026-01-02",
+      "2026-01-07",
+      "2026-03-08",
+      "2026-05-09",
+      "2026-12-31"
+    ],
+    "weekend_closed_dates": [
+      "2026-01-03",
+      "2026-01-04",
+      "2026-01-10",
+      "2026-01-11",
+      "2026-02-14",
+      "2026-02-15",
+      "2026-03-07",
+      "2026-03-08",
+      "2026-03-21",
+      "2026-03-22",
+      "2026-05-09",
+      "2026-05-10",
+      "2026-06-20",
+      "2026-06-21",
+      "2026-08-01",
+      "2026-08-02",
+      "2026-08-15",
+      "2026-08-16",
+      "2026-09-12",
+      "2026-09-13",
+      "2026-10-24",
+      "2026-10-25",
+      "2026-11-28",
+      "2026-11-29",
+      "2026-12-05",
+      "2026-12-06"
+    ],
+    "holiday_sessions": [
+      "2026-02-23",
+      "2026-05-01",
+      "2026-06-12",
+      "2026-11-04"
+    ]
+  }
+}

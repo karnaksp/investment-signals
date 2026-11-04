@@ -56,6 +56,9 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "migration": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
     "observation_worker": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
     "reference_tick_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
+    "session_open_worker": frozenset({
+        "POSTGRES_PASSWORD", "TELEGRAM_CHAT_ID", "TELEGRAM_MESSAGE_THREAD_ID",
+    }),
     "scientific_candle_writer": frozenset({"CLICKHOUSE_PASSWORD"}),
     "signal_outcome_worker": frozenset({"CLICKHOUSE_PASSWORD", "POSTGRES_PASSWORD"}),
     "threshold_cron": frozenset({"TINVEST_TOKEN"}),
