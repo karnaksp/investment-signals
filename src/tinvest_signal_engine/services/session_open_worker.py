@@ -1,4 +1,4 @@
-"""Independent realtime worker for market-opening Telegram notifications."""
+"""Realtime Telegram notifications for market opens, closes and breaks."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -9,10 +9,10 @@ from pathlib import Path
 
 from tinvest_signal_engine.adapters.postgres_reliability import connect_reliable_processing_store
 from tinvest_signal_engine.adapters.session_calendar import ExchangeSessionCalendar
-from tinvest_signal_engine.adapters.session_open_message import opening_payload, render_session_open_html
-from tinvest_signal_engine.adapters.session_open_publisher import PostgresSessionOpenPublisher
+from tinvest_signal_engine.adapters.session_open_message import boundary_payload, render_session_boundary_html
+from tinvest_signal_engine.adapters.session_open_publisher import PostgresSessionBoundaryPublisher
 from tinvest_signal_engine.adapters.worker_health_file import WorkerHealthFileSink
-from tinvest_signal_engine.application.session_open import AnnounceSessionOpenings
+from tinvest_signal_engine.application.session_open import AnnounceSessionBoundaries
 from tinvest_signal_engine.application.worker_health import WorkerHealthTracker
 from tinvest_signal_engine.config import RuntimeSettings
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTarget
@@ -41,14 +41,20 @@ def main() -> None:
         logger.info("Session opening notifications disabled")
         return
     if args.preview:
+        from collections import defaultdict
+
         now = args.at or datetime.now(timezone.utc)
-        upcoming = {item.session_id + item.opens_at.isoformat(): item
+        upcoming = {item.session_id + item.event_kind + item.event_at.isoformat(): item
                     for day in (now, now + timedelta(days=1))
-                    for item in calendar.openings(now=day)
-                    if now <= item.opens_at < now + timedelta(days=1)}
-        for item in sorted(upcoming.values(), key=lambda item: (item.opens_at, item.session_id)):
-            print(item.opens_at.isoformat(), render_session_open_html(
-                opening_payload(item, display_timezone=calendar.display_timezone)), "\n")
+                    for item in calendar.boundaries(now=day)
+                    if now <= item.event_at < now + timedelta(days=1)}
+        groups = defaultdict(list)
+        for item in upcoming.values():
+            groups[(item.event_at, item.event_kind)].append(item)
+        for (at, _), events in sorted(groups.items()):
+            print(at.isoformat(), render_session_boundary_html(
+                boundary_payload(tuple(sorted(events, key=lambda e: e.session_id)),
+                                 display_timezone=calendar.display_timezone)), "\n")
         if calendar.unavailable:
             raise RuntimeError("Some session calendars are unavailable")
         return
@@ -56,10 +62,10 @@ def main() -> None:
     if not settings.telegram_chat_id:
         raise ValueError("Telegram destination is required for session notifications")
     store = connect_reliable_processing_store(settings)
-    publisher = PostgresSessionOpenPublisher(store=store, target=DeliveryTarget(
+    publisher = PostgresSessionBoundaryPublisher(store=store, target=DeliveryTarget(
         "telegram", f"{settings.telegram_chat_id}:{settings.telegram_message_thread_id or ''}"),
         display_timezone=calendar.display_timezone)
-    use_case = AnnounceSessionOpenings(calendar=calendar, publisher=publisher)
+    use_case = AnnounceSessionBoundaries(calendar=calendar, publisher=publisher)
     health = WorkerHealthTracker(worker_id="session_open_worker", sink=WorkerHealthFileSink(
         Path(os.getenv("SESSION_OPEN_HEALTH_PATH", "/tmp/session-open-worker.json"))), stale_after_seconds=60)
     try:
@@ -69,14 +75,14 @@ def main() -> None:
                 try:
                     # Warm the day's calendars before sampling the delivery
                     # timestamp, so cold-start computation cannot backdate alerts.
-                    calendar.openings(now=datetime.now(timezone.utc))
+                    calendar.boundaries(now=datetime.now(timezone.utc))
                     queued = use_case.execute(now=datetime.now(timezone.utc))
                     if calendar.unavailable:
                         health.failed("session_calendar_unavailable")
                     else:
                         health.succeeded(force=bool(queued))
                     if queued:
-                        logger.info("Session openings queued: %s", queued)
+                        logger.info("Session boundary notices queued: %s", queued)
                 except Exception:
                     health.failed("session_open_cycle_failed")
                     logger.exception("Session opening cycle failed")

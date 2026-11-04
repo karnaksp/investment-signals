@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "enabled": true,
   "display_timezone": "Europe/Istanbul",
   "sessions": [
@@ -10,7 +10,10 @@
       "calendar": "ASX",
       "timezone": "Australia/Sydney",
       "source_url": "https://www.asx.com.au/markets/market-resources/trading-hours-calendar/cash-market-trading-hours",
-      "note": "Начало основной сессии по расписанию."
+      "note": "Основная непрерывная сессия; аукционы проходят отдельно.",
+      "regular_times": {
+        "market_close": "16:00"
+      }
     },
     {
       "id": "tokyo",
@@ -48,24 +51,27 @@
     },
     {
       "id": "shfe_night",
-      "title": "Китай · SHFE · ночная сессия",
-      "instruments": "Товарные фьючерсы с ночными торгами: золото, серебро, медь",
+      "title": "Шанхай · SHFE · ночь · золото/серебро",
+      "instruments": "Золото и серебро",
       "calendar": "SHFE",
       "timezone": "Asia/Shanghai",
       "source_url": "https://www.shfe.cn/eng/reports/CalendarHolidays/TradingHours/",
       "mode": "china_night",
       "local_open": "21:00",
-      "valid_through": "2026-12-31"
+      "valid_through": "2026-12-31",
+      "local_close": "02:30"
     },
     {
       "id": "moex",
-      "title": "Россия · Мосбиржа",
-      "instruments": "Акции и фьючерсы · основная сессия",
-      "calendar": "MOEX",
+      "title": "Москва · MOEX · акции · основная",
+      "instruments": "Акции России",
+      "calendar": "CUSTOM",
       "timezone": "Europe/Moscow",
       "source_url": "https://www.moex.com/n103379",
       "mode": "moex",
-      "valid_through": "2026-12-31"
+      "valid_through": "2026-12-31",
+      "segment": "stocks",
+      "part": "main"
     },
     {
       "id": "london",
@@ -98,7 +104,7 @@
       "calendar": "CMEGlobex_EnergyAndMetals",
       "timezone": "America/Chicago",
       "source_url": "https://www.cmegroup.com/trading-hours.html",
-      "note": "Открытие электронной сессии по расписанию; это не открытие рынка акций."
+      "note": "Электронная товарная сессия; ежедневный технический перерыв между сессиями."
     },
     {
       "id": "fx_sydney",
@@ -109,7 +115,7 @@
       "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
       "mode": "fx_center",
       "local_open": "08:00",
-      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+      "local_close": "17:00"
     },
     {
       "id": "fx_tokyo",
@@ -120,7 +126,7 @@
       "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
       "mode": "fx_center",
       "local_open": "09:00",
-      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+      "local_close": "18:00"
     },
     {
       "id": "fx_london",
@@ -131,7 +137,7 @@
       "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
       "mode": "fx_center",
       "local_open": "08:00",
-      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+      "local_close": "17:00"
     },
     {
       "id": "fx_new_york",
@@ -142,7 +148,534 @@
       "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
       "mode": "fx_center",
       "local_open": "08:00",
-      "note": "Условное начало активности валютного центра; Forex торгуется непрерывно в течение недели."
+      "local_close": "17:00"
+    },
+    {
+      "id": "new_zealand",
+      "title": "Веллингтон / Окленд · NZX",
+      "instruments": "Акции Новой Зеландии",
+      "calendar": "XNZE",
+      "timezone": "Pacific/Auckland",
+      "source_url": "https://www.nzx.com/learning/issuer-participant-resources/nzx-trading/anatomy-of-a-trading-day"
+    },
+    {
+      "id": "singapore",
+      "title": "Сингапур · SGX",
+      "instruments": "Акции Сингапура · основная сессия",
+      "calendar": "XSES",
+      "timezone": "Asia/Singapore",
+      "source_url": "https://www.sgx.com/securities/trading",
+      "regular_times": {
+        "break_start": "12:00",
+        "break_end": "13:00"
+      },
+      "date_overrides": {
+        "2026-02-16": {
+          "open": "09:00",
+          "close": "12:00",
+          "note": "Сокращённая предпраздничная сессия."
+        },
+        "2026-12-24": {
+          "open": "09:00",
+          "close": "12:00",
+          "note": "Сокращённая предпраздничная сессия."
+        },
+        "2026-12-31": {
+          "open": "09:00",
+          "close": "12:00",
+          "note": "Сокращённая предпраздничная сессия."
+        }
+      }
+    },
+    {
+      "id": "seoul",
+      "title": "Сеул · KRX",
+      "instruments": "Акции Южной Кореи",
+      "calendar": "XKRX",
+      "timezone": "Asia/Seoul",
+      "source_url": "https://global.krx.co.kr/"
+    },
+    {
+      "id": "taipei",
+      "title": "Тайбэй · TWSE",
+      "instruments": "Акции Тайваня",
+      "calendar": "XTAI",
+      "timezone": "Asia/Taipei",
+      "source_url": "https://www.twse.com.tw/en/trading/trading-rules.html"
+    },
+    {
+      "id": "mumbai",
+      "title": "Мумбаи · NSE / BSE",
+      "instruments": "Акции Индии · основная сессия",
+      "calendar": "NSE",
+      "timezone": "Asia/Kolkata",
+      "source_url": "https://www.nseindia.com/resources/exchange-communication-holidays",
+      "valid_through": "2026-12-31",
+      "date_overrides": {
+        "2026-11-08": {
+          "open": "14:20",
+          "close": "15:30",
+          "note": "Специальная сессия Muhurat; для CAS-бумаг применяется отдельный аукцион."
+        }
+      },
+      "override_source": "https://nsearchives.nseindia.com/content/circulars/CMTR76941.pdf"
+    },
+    {
+      "id": "jakarta",
+      "title": "Джакарта · IDX",
+      "instruments": "Акции Индонезии · непрерывная сессия",
+      "calendar": "XIDX",
+      "timezone": "Asia/Jakarta",
+      "source_url": "https://www.idx.id/en/products-services/trading-hours-and-mechanism/",
+      "regular_times": {
+        "break_start": "12:00",
+        "break_end": "13:30"
+      },
+      "weekday_times": {
+        "4": {
+          "break_start": "11:30",
+          "break_end": "14:00"
+        }
+      }
+    },
+    {
+      "id": "bangkok",
+      "title": "Бангкок · SET",
+      "instruments": "Акции Таиланда · основные сессии",
+      "calendar": "XBKK",
+      "timezone": "Asia/Bangkok",
+      "source_url": "https://www.set.or.th/en/market/information/trading-procedure/trading-hours",
+      "regular_times": {
+        "break_start": "12:30",
+        "break_end": "14:00"
+      }
+    },
+    {
+      "id": "kuala_lumpur",
+      "title": "Куала-Лумпур · Bursa Malaysia",
+      "instruments": "Акции Малайзии · основные сессии",
+      "calendar": "XKLS",
+      "timezone": "Asia/Kuala_Lumpur",
+      "source_url": "https://www.bursamalaysia.com/trade/trading_resources/equities/trading_sessions",
+      "regular_times": {
+        "break_start": "12:30",
+        "break_end": "14:30"
+      }
+    },
+    {
+      "id": "paris",
+      "title": "Париж · Euronext",
+      "instruments": "Акции · основная сессия",
+      "calendar": "XPAR",
+      "timezone": "Europe/Paris",
+      "source_url": "https://www.euronext.com/en/trading/trading-hours-holidays"
+    },
+    {
+      "id": "amsterdam",
+      "title": "Амстердам · Euronext",
+      "instruments": "Акции · основная сессия",
+      "calendar": "XAMS",
+      "timezone": "Europe/Amsterdam",
+      "source_url": "https://www.euronext.com/en/trading/trading-hours-holidays"
+    },
+    {
+      "id": "brussels",
+      "title": "Брюссель · Euronext",
+      "instruments": "Акции · основная сессия",
+      "calendar": "XBRU",
+      "timezone": "Europe/Brussels",
+      "source_url": "https://www.euronext.com/en/trading/trading-hours-holidays"
+    },
+    {
+      "id": "milan",
+      "title": "Милан · Euronext",
+      "instruments": "Акции · основная сессия",
+      "calendar": "XMIL",
+      "timezone": "Europe/Rome",
+      "source_url": "https://www.euronext.com/en/trading/trading-hours-holidays"
+    },
+    {
+      "id": "lisbon",
+      "title": "Лиссабон · Euronext",
+      "instruments": "Акции · основная сессия",
+      "calendar": "XLIS",
+      "timezone": "Europe/Lisbon",
+      "source_url": "https://www.euronext.com/en/trading/trading-hours-holidays"
+    },
+    {
+      "id": "oslo",
+      "title": "Осло · Euronext",
+      "instruments": "Акции · основная сессия",
+      "calendar": "XOSL",
+      "timezone": "Europe/Oslo",
+      "source_url": "https://www.euronext.com/en/trading/trading-hours-holidays"
+    },
+    {
+      "id": "zurich",
+      "title": "Цюрих · SIX",
+      "instruments": "Акции Швейцарии",
+      "calendar": "SIX",
+      "timezone": "Europe/Zurich",
+      "source_url": "https://www.six-group.com/en/products-services/the-swiss-stock-exchange/trading/trading-provisions/trading-hours.html"
+    },
+    {
+      "id": "madrid",
+      "title": "Мадрид · BME",
+      "instruments": "Акции Испании",
+      "calendar": "XMAD",
+      "timezone": "Europe/Madrid",
+      "source_url": "https://www.bolsasymercados.es/bme-exchange/en/Trading/Trading-Calendar"
+    },
+    {
+      "id": "stockholm",
+      "title": "Стокгольм · Nasdaq Nordic",
+      "instruments": "Акции Швеции",
+      "calendar": "XSTO",
+      "timezone": "Europe/Stockholm",
+      "source_url": "https://www.nasdaq.com/european-market-activity/trading-hours"
+    },
+    {
+      "id": "helsinki",
+      "title": "Хельсинки · Nasdaq Nordic",
+      "instruments": "Акции Финляндии",
+      "calendar": "XHEL",
+      "timezone": "Europe/Helsinki",
+      "source_url": "https://www.nasdaq.com/european-market-activity/trading-hours"
+    },
+    {
+      "id": "istanbul",
+      "title": "Стамбул · Borsa Istanbul",
+      "instruments": "Акции Турции",
+      "calendar": "XIST",
+      "timezone": "Europe/Istanbul",
+      "source_url": "https://www.borsaistanbul.com/en/markets/equity-market/trading-hours"
+    },
+    {
+      "id": "toronto",
+      "title": "Торонто · TSX",
+      "instruments": "Акции Канады",
+      "calendar": "TSX",
+      "timezone": "America/Toronto",
+      "source_url": "https://www.tsx.com/en/trading/calendars-and-trading-hours/trading-hours"
+    },
+    {
+      "id": "sao_paulo",
+      "title": "Сан-Паулу · B3",
+      "instruments": "Акции Бразилии · основная сессия",
+      "calendar": "BMF",
+      "timezone": "America/Sao_Paulo",
+      "source_url": "https://b3.com.br/pt_br/noticias/b3-ajusta-horarios-de-negociacao-de-acoes-e-derivativos-acompanhando-fim-do-horario-de-verao-nos-eua.htm",
+      "regular_times": {
+        "market_close": "18:00"
+      },
+      "valid_from": "2026-11-03",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "mexico",
+      "title": "Мехико · BMV",
+      "instruments": "Акции Мексики",
+      "calendar": "XMEX",
+      "timezone": "America/Mexico_City",
+      "source_url": "https://www.bmv.com.mx/"
+    },
+    {
+      "id": "johannesburg",
+      "title": "Йоханнесбург · JSE",
+      "instruments": "Акции ЮАР",
+      "calendar": "XJSE",
+      "timezone": "Africa/Johannesburg",
+      "source_url": "https://www.jse.co.za/"
+    },
+    {
+      "id": "riyadh",
+      "title": "Эр-Рияд · Tadawul",
+      "instruments": "Акции Саудовской Аравии · основная сессия",
+      "calendar": "CUSTOM",
+      "timezone": "Asia/Riyadh",
+      "source_url": "https://fi.saudiexchange.sa/wps/portal/international/general-information?locale=en",
+      "mode": "fixed",
+      "local_open": "10:00",
+      "local_close": "15:00",
+      "weekdays": [
+        6,
+        0,
+        1,
+        2,
+        3
+      ],
+      "valid_from": "2026-11-01",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "dubai",
+      "title": "Дубай · DFM",
+      "instruments": "Акции ОАЭ · непрерывная сессия",
+      "calendar": "CUSTOM",
+      "timezone": "Asia/Dubai",
+      "source_url": "https://www.dfm.ae/investing/services/how-to-trade",
+      "mode": "fixed",
+      "local_open": "10:00",
+      "local_close": "14:45",
+      "closed_dates": [
+        "2026-12-02",
+        "2026-12-03"
+      ],
+      "valid_from": "2026-11-01",
+      "valid_through": "2026-12-31",
+      "note": "Основная непрерывная сессия; затем аукцион и сделки по цене закрытия."
+    },
+    {
+      "id": "abu_dhabi",
+      "title": "Абу-Даби · ADX",
+      "instruments": "Акции ОАЭ · непрерывная сессия",
+      "calendar": "CUSTOM",
+      "timezone": "Asia/Dubai",
+      "source_url": "https://www.adx.ae/-/media/adx/related-documents/market-rules/adx-rules-book.pdf",
+      "mode": "fixed",
+      "local_open": "10:00",
+      "local_close": "14:45",
+      "closed_dates": [
+        "2026-12-02",
+        "2026-12-03"
+      ],
+      "valid_from": "2026-11-01",
+      "valid_through": "2026-12-31",
+      "note": "Основная непрерывная сессия; затем аукцион и сделки по цене закрытия."
+    },
+    {
+      "id": "shfe_night_base",
+      "title": "Шанхай · SHFE · ночь · промметаллы",
+      "instruments": "Медь, алюминий, никель, цинк и другие промметаллы",
+      "calendar": "SHFE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.shfe.cn/eng/reports/CalendarHolidays/TradingHours/",
+      "mode": "china_night",
+      "local_open": "21:00",
+      "local_close": "01:00",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "shfe_night_industrials",
+      "title": "Шанхай · SHFE · ночь · промтовары",
+      "instruments": "Сталь, резина, топливо и другие допущенные товары",
+      "calendar": "SHFE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.shfe.cn/eng/reports/CalendarHolidays/TradingHours/",
+      "mode": "china_night",
+      "local_open": "21:00",
+      "local_close": "23:00",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "dalian",
+      "title": "Далянь · DCE · день",
+      "instruments": "Товарные фьючерсы: руда, уголь, зерно",
+      "calendar": "DCE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.dce.com.cn/English/",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "zhengzhou",
+      "title": "Чжэнчжоу · CZCE · день",
+      "instruments": "Товарные фьючерсы: хлопок, сахар, зерно",
+      "calendar": "CZCE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.czce.com.cn/en/",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "ine",
+      "title": "Шанхай · INE · день",
+      "instruments": "Сырьевые фьючерсы, включая нефть",
+      "calendar": "INE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.ine.cn/eng/",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "ine_night",
+      "title": "Шанхай · INE · ночь",
+      "instruments": "Фьючерсы на нефть",
+      "calendar": "INE",
+      "timezone": "Asia/Shanghai",
+      "source_url": "https://www.ine.cn/eng/",
+      "mode": "china_night",
+      "local_open": "21:00",
+      "local_close": "02:30",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "cme_grains",
+      "title": "Чикаго · CBOT · зерно",
+      "instruments": "Фьючерсы на пшеницу, кукурузу, сою",
+      "calendar": "CMEGlobex_Grains",
+      "timezone": "America/Chicago",
+      "source_url": "https://www.cmegroup.com/trading-hours.html"
+    },
+    {
+      "id": "cme_fx",
+      "title": "Чикаго · CME · валютные фьючерсы",
+      "instruments": "Биржевые фьючерсы на основные валюты",
+      "calendar": "CMEGlobex_FX",
+      "timezone": "America/Chicago",
+      "source_url": "https://www.cmegroup.com/trading-hours.html"
+    },
+    {
+      "id": "eurex",
+      "title": "Франкфурт · Eurex",
+      "instruments": "Фьючерсы: европейские акции и ставки",
+      "calendar": "EUREX",
+      "timezone": "Europe/Berlin",
+      "source_url": "https://www.eurex.com/ex-en/trade/trading-hours",
+      "note": "Базовая сессия календаря Eurex; конкретные контракты могут иметь другие часы."
+    },
+    {
+      "id": "lme",
+      "title": "Лондон · LMEselect",
+      "instruments": "Промышленные металлы: медь, алюминий, никель и другие",
+      "calendar": "LSE",
+      "timezone": "Europe/London",
+      "source_url": "https://www.lme.com/en/Trading/Trading-venues/Trading-times",
+      "mode": "fixed",
+      "local_open": "01:00",
+      "local_close": "19:00"
+    },
+    {
+      "id": "ice_brent",
+      "title": "Лондон · ICE Futures Europe · Brent",
+      "instruments": "Нефть Brent · электронная сессия",
+      "calendar": "CUSTOM",
+      "timezone": "Europe/London",
+      "source_url": "https://www.ice.com/products/219/Brent-Crude-Oil-Futures",
+      "mode": "ice_brent",
+      "local_open": "01:00",
+      "local_close": "23:00",
+      "valid_through": "2026-12-31",
+      "closed_dates": [
+        "2026-01-01",
+        "2026-04-03",
+        "2026-12-25"
+      ],
+      "date_overrides": {
+        "2026-05-25": {
+          "open": "01:00",
+          "close": "18:30"
+        },
+        "2026-06-19": {
+          "open": "01:00",
+          "close": "18:30"
+        },
+        "2026-07-03": {
+          "open": "01:00",
+          "close": "18:30"
+        },
+        "2026-09-07": {
+          "open": "01:00",
+          "close": "18:30"
+        },
+        "2026-11-26": {
+          "open": "01:00",
+          "close": "18:30"
+        },
+        "2026-11-27": {
+          "open": "01:00",
+          "close": "20:00"
+        },
+        "2026-12-24": {
+          "open": "01:00",
+          "close": "19:00"
+        },
+        "2026-12-31": {
+          "open": "01:00",
+          "close": "20:00"
+        }
+      },
+      "override_source": "https://www.ice.com/publicdocs/Trading_Schedule.pdf"
+    },
+    {
+      "id": "moex_futures",
+      "title": "Москва · MOEX · фьючерсы · основная",
+      "instruments": "Срочный рынок России",
+      "calendar": "CUSTOM",
+      "timezone": "Europe/Moscow",
+      "source_url": "https://www.moex.com/n103379",
+      "mode": "moex",
+      "part": "main",
+      "segment": "futures",
+      "valid_from": "2026-09-14",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "moex_morning",
+      "title": "Москва · MOEX · утренняя",
+      "instruments": "Акции и фьючерсы; с 06:50 до 07:00 — аукцион",
+      "calendar": "CUSTOM",
+      "timezone": "Europe/Moscow",
+      "source_url": "https://www.moex.com/n103379",
+      "mode": "moex",
+      "part": "morning",
+      "segment": "both",
+      "valid_from": "2026-09-14",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "moex_evening",
+      "title": "Москва · MOEX · вечерняя",
+      "instruments": "Акции и фьючерсы · вечерняя сессия",
+      "calendar": "CUSTOM",
+      "timezone": "Europe/Moscow",
+      "source_url": "https://www.moex.com/n103379",
+      "mode": "moex",
+      "part": "evening",
+      "segment": "both",
+      "valid_from": "2026-09-14",
+      "valid_through": "2026-12-31"
+    },
+    {
+      "id": "fx_wellington",
+      "title": "Веллингтон",
+      "instruments": "Валютный финансовый центр",
+      "calendar": "XNZE",
+      "timezone": "Pacific/Auckland",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "08:00",
+      "local_close": "17:00"
+    },
+    {
+      "id": "fx_frankfurt",
+      "title": "Франкфурт",
+      "instruments": "Валютный финансовый центр",
+      "calendar": "XETR",
+      "timezone": "Europe/Berlin",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "08:00",
+      "local_close": "17:00"
+    },
+    {
+      "id": "fx_singapore",
+      "title": "Сингапур",
+      "instruments": "Валютный финансовый центр",
+      "calendar": "XSES",
+      "timezone": "Asia/Singapore",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "09:00",
+      "local_close": "18:00"
+    },
+    {
+      "id": "fx_hong_kong",
+      "title": "Гонконг",
+      "instruments": "Валютный финансовый центр",
+      "calendar": "HKEX",
+      "timezone": "Asia/Hong_Kong",
+      "source_url": "https://www.oanda.com/us-en/skills-and-insights/education/trading-asset-classes/forex/how-to-choose-forex-pair/",
+      "mode": "fx_center",
+      "local_open": "09:00",
+      "local_close": "18:00"
     }
   ],
   "moex_2026": {

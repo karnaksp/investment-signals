@@ -15,12 +15,12 @@ from .terminal_links import (
 
 
 def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
-    if signal.signal_type == "market_session_open":
-        from .adapters.session_open_message import render_session_open_html
+    if signal.signal_type in {"market_session_open", "market_session_close", "market_session_break_start", "market_session_break_end"}:
+        from .adapters.session_open_message import render_session_boundary_html
 
         return replace(signal, payload={
             **signal.payload, "summary_ru": signal.summary,
-            "telegram_html": render_session_open_html(signal.payload),
+            "telegram_html": render_session_boundary_html(signal.payload),
         })
     if signal.signal_type == "daily_futures_position_report":
         from .adapters.daily_positions_report import render_daily_positions_html

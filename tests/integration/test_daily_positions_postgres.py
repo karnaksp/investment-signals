@@ -63,21 +63,26 @@ def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(mode):
         publisher = publisher_type(store=store, target=DeliveryTarget("telegram", "test"))
         context = None if mode == "legacy" else PositionContext()
         if mode == "session":
-            from tinvest_signal_engine.adapters.session_open_publisher import PostgresSessionOpenPublisher
-            from tinvest_signal_engine.domain.session_open import SessionOpening
+            from tinvest_signal_engine.adapters.session_open_publisher import PostgresSessionBoundaryPublisher
+            from tinvest_signal_engine.domain.session_open import SessionBoundary
             from datetime import timedelta
 
-            opening = SessionOpening("china_stocks", "Китай", "Акции",
+            opening = SessionBoundary("china_stocks", "Китай", "Акции",
                                      datetime(2026, 11, 5, 1, 30, tzinfo=timezone.utc),
                                      "Asia/Shanghai", "https://english.sse.com.cn/start/trading/schedule/")
-            session_publisher = PostgresSessionOpenPublisher(store=store, target=DeliveryTarget("telegram", "test"),
+            session_publisher = PostgresSessionBoundaryPublisher(store=store, target=DeliveryTarget("telegram", "test"),
                                                             display_timezone="Europe/Istanbul")
-            assert session_publisher.publish(opening, generated_at=opening.opens_at)
+            assert session_publisher.publish((opening,), generated_at=opening.event_at)
             # Recreate the producer to simulate a restart within the same minute.
-            restarted = PostgresSessionOpenPublisher(store=store, target=DeliveryTarget("telegram", "test"),
+            restarted = PostgresSessionBoundaryPublisher(store=store, target=DeliveryTarget("telegram", "test"),
                                                      display_timezone="Europe/Istanbul")
-            assert not restarted.publish(opening, generated_at=opening.opens_at + timedelta(seconds=20))
-            assert not restarted.publish(opening, generated_at=opening.opens_at + timedelta(minutes=1))
+            assert not restarted.publish((opening,), generated_at=opening.event_at + timedelta(seconds=20))
+            assert not restarted.publish((opening,), generated_at=opening.event_at + timedelta(minutes=1))
+            # A close has an independent identity even for the same market and minute.
+            closing = replace(opening, event_kind="close")
+            hong_kong = replace(closing, session_id="hong_kong", title="Гонконг")
+            assert session_publisher.publish((closing, hong_kong), generated_at=closing.event_at)
+            assert not restarted.publish((hong_kong, closing), generated_at=closing.event_at + timedelta(seconds=20))
         elif mode == "ruble":
             section = AssetPositionSection(
                 "MOEX", "Si", "daily", current.trading_day, previous.trading_day, current.published_at,
@@ -106,7 +111,7 @@ def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(mode):
         with pytest.raises(ValueError, match="state checkpoint"):
             store.persist_detection_once(tick, DetectionBatch())
         with connection.cursor() as cursor:
-            reports = 2 if mode == "asset" else 1
+            reports = 2 if mode in {"asset", "session"} else 1
             for table, count in (("processed_events", reports), ("market_signals", reports),
                                  ("delivery_outbox", reports), ("detector_state_snapshots", 0)):
                 cursor.execute(f"SELECT count(*) FROM {table}")

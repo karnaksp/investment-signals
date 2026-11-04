@@ -18,7 +18,7 @@ from tinvest_signal_engine.domain.daily_positions import (
 from tinvest_signal_engine.domain.commodity_positions import DIGEST_VERSION
 from tinvest_signal_engine.domain.asset_positions import ASSET_REPORT_VERSION, asset_report_freshness
 from tinvest_signal_engine.serialization import parse_timestamp
-from tinvest_signal_engine.domain.session_open import SESSION_OPEN_SIGNAL_TYPE, SESSION_OPEN_VERSION, session_open_freshness
+from tinvest_signal_engine.domain.session_open import SESSION_SIGNAL_TYPES, SESSION_OPEN_VERSION, SESSION_VERSION, session_boundary_freshness
 
 
 class QueuedDeliveryRecoveryAdapter:
@@ -27,21 +27,27 @@ class QueuedDeliveryRecoveryAdapter:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def evaluate(self, task: DeliveryTask) -> DeliveryFreshnessDecision:
-        if task.payload.get("signal_type") == SESSION_OPEN_SIGNAL_TYPE:
+        if task.payload.get("signal_type") in SESSION_SIGNAL_TYPES:
             now = self._clock()
             try:
                 payload = task.payload["payload"]
-                if payload["session_version"] != SESSION_OPEN_VERSION:
+                if payload["session_version"] not in {SESSION_OPEN_VERSION, SESSION_VERSION}:
                     raise ValueError("unknown session version")
-                raw_open, raw_source = payload["opens_at"], task.payload["source_event_at"]
+                if payload["session_version"] == SESSION_OPEN_VERSION and task.payload["signal_type"] != "market_session_open":
+                    raise ValueError("legacy notices support openings only")
+                if payload["session_version"] == SESSION_VERSION:
+                    kind = payload["event_kind"]
+                    if task.payload["signal_type"] != "market_session_" + kind or not payload.get("events"):
+                        raise ValueError("session kind/source mismatch")
+                raw_open, raw_source = payload.get("event_at") or payload.get("opens_at"), task.payload["source_event_at"]
                 if not isinstance(raw_open, str) or not isinstance(raw_source, str):
                     raise ValueError("session times must be ISO timestamps")
                 opens_at = datetime.fromisoformat(raw_open)
                 if opens_at != datetime.fromisoformat(raw_source):
                     raise ValueError("session source time mismatch")
-                return session_open_freshness(opens_at=opens_at, evaluated_at=now)
+                return session_boundary_freshness(event_at=opens_at, evaluated_at=now)
             except (KeyError, TypeError, ValueError):
-                return DeliveryFreshnessDecision(False, "session_open_invalid", None, 60, None, now.date().isoformat())
+                return DeliveryFreshnessDecision(False, "session_boundary_invalid", None, 60, None, now.date().isoformat())
         if task.payload.get("signal_type") == REPORT_SIGNAL_TYPE:
             payload = task.payload.get("payload")
             now = self._clock()

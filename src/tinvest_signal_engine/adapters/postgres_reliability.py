@@ -89,13 +89,13 @@ class PostgresReliableProcessingStore:
             raise ValueError("report persistence requires a daily position report")
         return self._persist_once(event, DetectionBatch(signals=(report,)), require_checkpoint=False)
 
-    def persist_session_open_once(self, event: BrokerEvent, alert: PreparedSignal) -> StoredEvent:
+    def persist_session_notification_once(self, event: BrokerEvent, alert: PreparedSignal) -> StoredEvent:
         """Calendar notifications share the outbox, without detector checkpoints."""
-        from tinvest_signal_engine.domain.session_open import SESSION_OPEN_SIGNAL_TYPE, SESSION_OPEN_VERSION
+        from tinvest_signal_engine.domain.session_open import SESSION_SIGNAL_TYPES, SESSION_VERSION
 
-        if (event.event_type != SESSION_OPEN_SIGNAL_TYPE
-                or alert.signal.signal_type != SESSION_OPEN_SIGNAL_TYPE
-                or alert.signal.payload.get("session_version") != SESSION_OPEN_VERSION):
+        if (event.event_type not in SESSION_SIGNAL_TYPES
+                or alert.signal.signal_type != event.event_type
+                or alert.signal.payload.get("session_version") != SESSION_VERSION):
             raise ValueError("session persistence requires a versioned session opening")
         return self._persist_once(event, DetectionBatch(signals=(alert,)), require_checkpoint=False)
 
