@@ -26,7 +26,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.skipif(os.getenv("RUN_INTEGRATION", "").lower() not in {"1", "true", "yes"},
                     reason="Set RUN_INTEGRATION=1 and stack up")
-@pytest.mark.parametrize("mode", ["legacy", "digest", "asset", "ruble"])
+@pytest.mark.parametrize("mode", ["legacy", "digest", "asset", "ruble", "session"])
 def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(mode):
     connection = psycopg.connect(
         host=os.getenv("POSTGRES_HOST", "localhost"),
@@ -62,7 +62,23 @@ def test_daily_report_replay_keeps_one_outbox_and_no_detector_checkpoint(mode):
         publisher_type = PostgresAssetPositionPublisher if mode in {"asset", "ruble"} else PostgresDailyPositionPublisher
         publisher = publisher_type(store=store, target=DeliveryTarget("telegram", "test"))
         context = None if mode == "legacy" else PositionContext()
-        if mode == "ruble":
+        if mode == "session":
+            from tinvest_signal_engine.adapters.session_open_publisher import PostgresSessionOpenPublisher
+            from tinvest_signal_engine.domain.session_open import SessionOpening
+            from datetime import timedelta
+
+            opening = SessionOpening("china_stocks", "Китай", "Акции",
+                                     datetime(2026, 11, 5, 1, 30, tzinfo=timezone.utc),
+                                     "Asia/Shanghai", "https://english.sse.com.cn/start/trading/schedule/")
+            session_publisher = PostgresSessionOpenPublisher(store=store, target=DeliveryTarget("telegram", "test"),
+                                                            display_timezone="Europe/Istanbul")
+            assert session_publisher.publish(opening, generated_at=opening.opens_at)
+            # Recreate the producer to simulate a restart within the same minute.
+            restarted = PostgresSessionOpenPublisher(store=store, target=DeliveryTarget("telegram", "test"),
+                                                     display_timezone="Europe/Istanbul")
+            assert not restarted.publish(opening, generated_at=opening.opens_at + timedelta(seconds=20))
+            assert not restarted.publish(opening, generated_at=opening.opens_at + timedelta(minutes=1))
+        elif mode == "ruble":
             section = AssetPositionSection(
                 "MOEX", "Si", "daily", current.trading_day, previous.trading_day, current.published_at,
                 (AssetPositionGroup("individuals", 110, 40, 100, 40), AssetPositionGroup("legal_entities", 20, 90, 20, 80)),

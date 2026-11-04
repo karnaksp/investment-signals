@@ -56,3 +56,12 @@ def test_default_stack_runs_the_durable_delivery_worker() -> None:
         "/app/var/runtime-health/delivery-worker.json"
     )
     assert "delivery-worker" in services["prometheus"]["depends_on"]
+
+
+def test_session_worker_is_independent_of_market_ingestion_and_has_calendar_extra() -> None:
+    worker = _compose()["services"]["session-open-worker"]
+    assert set(worker["depends_on"]) == {"postgres", "migrate"}
+    assert worker["build"]["args"]["APP_EXTRAS"] == "sessions"
+    assert worker["command"] == ["python", "-m", "tinvest_signal_engine.services.session_open_worker"]
+    assert "./conf:/app/conf:ro" in worker["volumes"]
+    assert worker["restart"] == "unless-stopped"

@@ -79,6 +79,7 @@ nav:
   - Фьючерсная кривая: futures-curve.md
   - Сырьё — позиции игроков: daily-metals-positions.md
   - Валюты — позиции игроков: ruble-positions.md
+  - Открытия торговых сессий: market-sessions.md
   - Оркестрация (Dagster): orchestration.md
   - Аналитика сигналов (SQL): signal_analytics.md
   - Решение проблем: troubleshooting.md
