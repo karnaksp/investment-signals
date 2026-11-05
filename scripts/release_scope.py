@@ -30,10 +30,7 @@ class ScopeDecision:
     head: str
     changed_paths: tuple[str, ...]
     reason: str
-
-    @property
-    def docker_required(self) -> bool:
-        return self.scope == "full"
+    docker_required: bool
 
 
 def _git(*args: str) -> str:
@@ -54,6 +51,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     for key in (
         "release_metadata_paths",
         "documentation_paths",
+        "docker_paths",
         "indicator_paths",
         "indicator_tests",
     ):
@@ -130,8 +128,24 @@ def classify_paths(
 
 
 def changed_paths(base: str, head: str) -> tuple[str, ...]:
-    output = _git("diff", "--name-only", f"{base}..{head}")
+    output = _git("diff", "--no-renames", "--name-only", f"{base}..{head}")
     return tuple(line for line in output.splitlines() if line)
+
+
+def requires_docker(
+    paths: Sequence[str],
+    config: dict[str, Any],
+    *,
+    version_only_paths: Iterable[str] = (),
+) -> bool:
+    version_only = set(version_only_paths)
+    return any(
+        _matches(path, config["docker_paths"])
+        and path not in version_only
+        and not _matches(path, config["indicator_paths"])
+        and not _matches(path, config["documentation_paths"])
+        for path in paths
+    )
 
 
 def decide_scope(base: str, head: str, config: dict[str, Any]) -> ScopeDecision:
@@ -140,7 +154,8 @@ def decide_scope(base: str, head: str, config: dict[str, Any]) -> ScopeDecision:
         path for path in paths if version_metadata_only(base, head, path)
     }
     scope, reason = classify_paths(paths, config, version_only_paths=version_only)
-    return ScopeDecision(scope, base, head, paths, reason)
+    docker_required = requires_docker(paths, config, version_only_paths=version_only)
+    return ScopeDecision(scope, base, head, paths, reason, docker_required)
 
 
 def _semver(tag: str) -> tuple[int, int, int] | None:
@@ -241,6 +256,7 @@ def main() -> int:
                 args.head,
                 (),
                 "no previous stable release tag exists",
+                docker_required=True,
             )
         else:
             decision = decide_scope(base, args.head, config)
@@ -249,7 +265,7 @@ def main() -> int:
     else:
         raise SystemExit("provide --base or --previous-release")
 
-    print(json.dumps(decision.__dict__ | {"docker_required": decision.docker_required}, indent=2))
+    print(json.dumps(decision.__dict__, indent=2))
     if args.github_env:
         _write_key_values(args.github_env, decision)
     if args.summary:

@@ -6,6 +6,7 @@ from scripts.release_scope import (
     _normalized_toml,
     classify_paths,
     load_config,
+    requires_docker,
     select_previous_release,
 )
 
@@ -72,6 +73,36 @@ def test_docs_and_release_metadata_have_lightweight_scopes() -> None:
         )[0]
         == "metadata"
     )
+
+
+def test_full_verification_can_skip_docker() -> None:
+    config = load_config()
+    paths = [
+        ".env.example",
+        ".github/workflows/release.yml",
+        "scripts/release_scope.py",
+        "tests/test_release_scope.py",
+        "src/tinvest_signal_engine/detector_core.py",
+        "pyproject.toml",
+        "uv.lock",
+    ]
+    version_only = {"pyproject.toml", "uv.lock"}
+
+    assert classify_paths(paths, config, version_only_paths=version_only)[0] == "full"
+    assert not requires_docker(paths, config, version_only_paths=version_only)
+
+
+def test_shared_image_inputs_require_docker() -> None:
+    config = load_config()
+    for path in (
+        "Dockerfile",
+        "docker-compose.yml",
+        "pyproject.toml",
+        "src/tinvest_signal_engine/services/api.py",
+        "conf/market-sessions.json",
+        "sql/postgres/0100_example.sql",
+    ):
+        assert requires_docker([path], config), path
 
 
 def test_toml_normalization_ignores_only_project_version() -> None:
