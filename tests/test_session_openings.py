@@ -179,7 +179,18 @@ def test_transient_retry_expires_when_opening_minute_ends(opening):
     assert failed[0]["reason_code"] == "session_boundary_outside_minute"
 
 
-def test_real_telegram_sender_formats_short_calendar_alert_without_trading_scores(opening):
+@pytest.mark.parametrize("session_id,event_kind,action,description", [
+    ("oslo", "close", "Закрытие торгов", "Акции · основная сессия"),
+    ("shfe_night_industrials", "close", "Закрытие торгов", "Промтовары"),
+    ("shfe_night_base", "break_start", "Перерыв", "Промметаллы"),
+    ("shfe_night", "open", "Открытие торгов", "Драгметаллы"),
+    ("tokyo", "break_end", "Возобновление торгов", "Акции Японии"),
+    ("fx_tokyo", "open", "Начало валютной сессии", "Валюты"),
+    ("fx_tokyo", "close", "Завершение валютной сессии", "Валюты"),
+])
+def test_real_telegram_sender_formats_short_calendar_alert_without_trading_scores(
+        calendar, session_id, event_kind, action, description):
+    opening = replace(find(calendar, session_id, "2026-11-05")[0], event_kind=event_kind)
     _, alert = prepared(opening)
     from tinvest_signal_engine.models import TriggerSignal
     requests = []
@@ -191,9 +202,15 @@ def test_real_telegram_sender_formats_short_calendar_alert_without_trading_score
         sink.send(TriggerSignal.from_dict(signal_record_to_dict(alert.signal)))
     assert len(requests) == 1
     text = requests[0]["text"]
-    assert "Китай" in text and "09:30" in text and "04:30" in text
-    assert "Стамбул" in text
-    assert all(word not in text for word in ("Качество", "Вероятность", "Терминал", "z-score"))
+    lines = text.splitlines()
+    assert len(lines) == 3
+    assert lines[0] == f"🔔 <b>{action}</b> в"
+    assert opening.source_url in lines[1]
+    assert lines[2] == description
+    assert all(word not in text for word in (
+        "Качество", "Вероятность", "Терминал", "z-score", "местное", "Стамбул",
+        "Сталь, резина", "Золото и серебро", "Условное", "Forex продолжает",
+    ))
 
 
 def test_message_escapes_market_names(opening):
@@ -229,7 +246,8 @@ def test_europe_closes_at_same_instant_and_groups_into_one_notice(calendar):
     assert len(closes)==1
     assert {'london','frankfurt','paris','amsterdam','zurich','milan','madrid'} <= {e.session_id for e in closes[0]}
     html=render_session_boundary_html(boundary_payload(closes[0],display_timezone='Europe/Istanbul'))
-    assert 'Закрытие торгов' in html and '19:30' in html and 'Париж' in html and '17:30' in html
+    assert 'Закрытие торгов' in html and 'Париж' in html and 'Амстердам' in html
+    assert '19:30' not in html and '17:30' not in html
     assert len(html)<4096
 
 
@@ -300,4 +318,6 @@ def test_all_daily_group_messages_fit_telegram(calendar):
         groups[(e.event_at,e.event_kind)].append(e)
     assert len(groups)>20
     for events in groups.values():
-        assert len(render_session_boundary_html(boundary_payload(tuple(events),display_timezone='Europe/Istanbul')))<=4096
+        html=render_session_boundary_html(boundary_payload(tuple(events),display_timezone='Europe/Istanbul'))
+        assert len(html)<=4096
+        assert all(word not in html for word in ('местное','(Стамбул)','Сталь, резина','Технический перерыв'))
