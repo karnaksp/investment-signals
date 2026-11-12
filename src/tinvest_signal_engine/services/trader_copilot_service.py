@@ -95,8 +95,10 @@ def run_telegram_listener(
         logger.info("Shutdown requested")
         stop_requested = True
 
-    signal.signal(signal.SIGINT, _sig_handler)
-    signal.signal(signal.SIGTERM, _sig_handler)
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
 
     offset = 0
     client = httpx.Client(timeout=poll_timeout_seconds + 5.0, trust_env=False)

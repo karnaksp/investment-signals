@@ -67,12 +67,18 @@ class CompositeMarketDataProvider(MarketDataProviderPort):
 
         # Read secret files if env vars are file paths
         if not self._ch_pass:
-            pw_file = os.getenv("CLICKHOUSE_PASSWORD_FILE")
-            if pw_file and os.path.isfile(pw_file):
-                try:
-                    self._ch_pass = open(pw_file).read().strip()
-                except Exception:
-                    pass
+            candidates = (
+                os.getenv("CLICKHOUSE_PASSWORD_FILE"),
+                "/run/secrets/clickhouse_password",
+                "/var/lib/investment-signals-pro/signalctl/runtime-secrets/delivery-worker/clickhouse-password",
+            )
+            for path in candidates:
+                if path and os.path.isfile(path):
+                    try:
+                        self._ch_pass = open(path).read().strip()
+                        break
+                    except Exception:
+                        pass
 
         if not self._pg_pass:
             pg_pw_file = os.getenv("POSTGRES_PASSWORD_FILE")

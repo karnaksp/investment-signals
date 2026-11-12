@@ -172,8 +172,8 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
                                 model_used=candidate_model,
                                 tokens_used=tokens,
                             )
-                elif resp.status_code == 429:
-                    logger.warning("Gemini model %s quota exceeded (429), trying fallback model...", candidate_model)
+                elif resp.status_code in {429, 503}:
+                    logger.warning("Gemini model %s busy or quota exceeded (%s), trying fallback model...", candidate_model, resp.status_code)
                     continue
                 else:
                     logger.warning("Gemini Trader request to %s failed: %s %s", candidate_model, resp.status_code, resp.text[:200])
