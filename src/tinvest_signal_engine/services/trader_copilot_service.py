@@ -135,18 +135,68 @@ def run_telegram_listener(
 
                     # Determine if message is addressed to the bot
                     is_direct_chat = chat_type == "private"
-                    is_command = any(text.startswith(cmd) for cmd in ("/ask", "/trader", "/copilot", "/ai", "/desk", "/анализ"))
+                    is_help_command = any(
+                        text.startswith(cmd)
+                        for cmd in ("/start", "/help", "/commands", "/команды", "помощь", "справка")
+                    )
+                    is_command = any(
+                        text.startswith(cmd)
+                        for cmd in ("/ask", "/trader", "/copilot", "/ai", "/desk", "/анализ", "/вопрос")
+                    )
                     is_mention = f"@{bot_username}" in text.lower()
                     is_reply_to_bot = reply_to and reply_to.get("from", {}).get("is_bot")
 
-                    if not (is_direct_chat or is_command or is_mention or is_reply_to_bot):
+                    if not (is_direct_chat or is_command or is_mention or is_reply_to_bot or is_help_command):
                         continue
 
                     # Clean prefix/mention
                     cleaned_text = text
                     if is_mention:
                         cleaned_text = cleaned_text.replace(f"@{bot_username}", "").strip()
-                    for cmd in ("/ask", "/trader", "/copilot", "/ai", "/desk", "/анализ"):
+
+                    # Handle help / start commands
+                    if is_help_command or cleaned_text.lower() in (
+                        "/start",
+                        "/help",
+                        "/commands",
+                        "/команды",
+                        "помощь",
+                        "справка",
+                    ):
+                        help_html = (
+                            "<b>Трейдинг-деск</b> · Справка по командам\n\n"
+                            "Аналитический сервис рынка Московской биржи: стакан, котировки, VWAP, новости и баланс позиций участников.\n\n"
+                            "<b>Способы обращения в чате:</b>\n"
+                            "• <b>В личном диалоге с ботом:</b> напишите любой вопрос обычным текстом (например: <i>Что думаешь по Сберу?</i> или <i>Поясни по шортам в нефти</i>).\n"
+                            "• <b>В группе или канале:</b>\n"
+                            "  — Команда: <code>/ask &lt;вопрос&gt;</code> или <code>/trader &lt;вопрос&gt;</code>\n"
+                            "  — Команда: <code>/desk &lt;вопрос&gt;</code> или <code>/анализ &lt;вопрос&gt;</code>\n"
+                            "  — Упоминание бота: <code>@"
+                            + bot_username
+                            + " &lt;вопрос&gt;</code>\n"
+                            "  — Ответ (Reply): ответьте на любой сигнал или сообщение бота со своим вопросом.\n\n"
+                            "<b>Что анализируется:</b>\n"
+                            "• <b>Рынок:</b> последняя цена, лучший bid/ask, спред и внутридневной VWAP.\n"
+                            "• <b>Инфополе:</b> поиск актуальных новостей в интернете в режиме реального времени.\n"
+                            "• <b>Позиции:</b> открытый интерес юридических и физических лиц (длинные/короткие позиции).\n"
+                            "• <b>Сетап:</b> ключевые уровни поддержки/сопротивления, точка отмены (Stop Loss) и цели."
+                        )
+                        send_payload: dict[str, Any] = {
+                            "chat_id": chat_id,
+                            "text": help_html,
+                            "parse_mode": "HTML",
+                            "disable_web_page_preview": True,
+                            "reply_to_message_id": msg_id,
+                        }
+                        if thread_id is not None:
+                            send_payload["message_thread_id"] = thread_id
+                        client.post(
+                            f"https://api.telegram.org/bot{token}/sendMessage",
+                            json=send_payload,
+                        )
+                        continue
+
+                    for cmd in ("/ask", "/trader", "/copilot", "/ai", "/desk", "/анализ", "/вопрос"):
                         if cleaned_text.startswith(cmd):
                             cleaned_text = cleaned_text[len(cmd):].strip()
                             break

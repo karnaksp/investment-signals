@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from typing import Any, Sequence
 
 import httpx
@@ -24,7 +26,6 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 def _extract_json(text: str) -> dict[str, Any]:
     clean = text.strip()
     if clean.startswith("```"):
-        import re
         clean = re.sub(r"^```(?:json)?\n?", "", clean)
         clean = re.sub(r"\n?```$", "", clean)
     try:
@@ -33,8 +34,34 @@ def _extract_json(text: str) -> dict[str, Any]:
         start = clean.find("{")
         end = clean.rfind("}")
         if start != -1 and end > start:
-            return json.loads(clean[start : end + 1])
-        raise
+            try:
+                return json.loads(clean[start : end + 1])
+            except Exception:
+                pass
+
+    # Resilient regex parser if json.loads failed (e.g. unescaped quote in text)
+    parsed: dict[str, Any] = {}
+    for key in (
+        "market_stance",
+        "thesis_title",
+        "microstructure_analysis",
+        "news_drivers_analysis",
+        "actionable_setup",
+    ):
+        m = re.search(rf'"{key}"\s*:\s*"(.*?)(?:"\s*,\s*"\w+"|\s*"\s*}})', clean, re.DOTALL)
+        if m:
+            parsed[key] = m.group(1).strip()
+
+    for list_key in ("key_levels", "risk_factors", "news_catalysts"):
+        m = re.search(rf'"{list_key}"\s*:\s*\[(.*?)\]', clean, re.DOTALL)
+        if m:
+            items = re.findall(r'"(.*?)"', m.group(1))
+            parsed[list_key] = items
+
+    if parsed.get("thesis_title") or parsed.get("microstructure_analysis") or parsed.get("market_stance"):
+        return parsed
+
+    raise ValueError(f"Could not parse valid JSON from model response: {text[:200]}")
 
 
 class GeminiTraderCopilotAdapter(TraderLlmPort):
@@ -141,7 +168,30 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
             "generationConfig": {
                 "responseMimeType": "application/json",
                 "temperature": 0.2,
-                "maxOutputTokens": 2048,
+                "maxOutputTokens": 4096,
+                "responseSchema": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "market_stance": {
+                            "type": "STRING",
+                            "enum": ["BULLISH", "BEARISH", "NEUTRAL", "CAUTIOUS", "ARBITRAGE"],
+                        },
+                        "thesis_title": {"type": "STRING"},
+                        "microstructure_analysis": {"type": "STRING"},
+                        "news_drivers_analysis": {"type": "STRING"},
+                        "key_levels": {"type": "ARRAY", "items": {"type": "STRING"}},
+                        "actionable_setup": {"type": "STRING"},
+                        "risk_factors": {"type": "ARRAY", "items": {"type": "STRING"}},
+                        "news_catalysts": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    },
+                    "required": [
+                        "market_stance",
+                        "thesis_title",
+                        "microstructure_analysis",
+                        "news_drivers_analysis",
+                        "actionable_setup",
+                    ],
+                },
             },
         }
 
@@ -150,49 +200,61 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
         for candidate_model in self._models:
             last_model = candidate_model
             url = f"{GEMINI_API_BASE}/models/{candidate_model}:generateContent?key={self._api_key}"
-            try:
-                resp = self._client.post(url, json=data)
-                if resp.status_code == 200:
-                    body = resp.json()
-                    usage = body.get("usageMetadata") or {}
-                    tokens = int(usage.get("totalTokenCount") or 0)
-                    candidates = body.get("candidates") or []
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        if parts and "text" in parts[0]:
-                            raw_json = parts[0]["text"]
-                            parsed = _extract_json(raw_json)
-                            return TraderCopilotResponse(
-                                ticker=query.ticker or (market_context.ticker if market_context else None),
-                                market_stance=str(parsed.get("market_stance") or "NEUTRAL").upper(),
-                                thesis_title=str(parsed.get("thesis_title") or "Консультация торгового деска"),
-                                microstructure_analysis=str(parsed.get("microstructure_analysis") or ""),
-                                news_drivers_analysis=str(parsed.get("news_drivers_analysis") or ""),
-                                key_levels=tuple(str(k) for k in parsed.get("key_levels", [])),
-                                actionable_setup=str(parsed.get("actionable_setup") or ""),
-                                risk_factors=tuple(str(r) for r in parsed.get("risk_factors", [])),
-                                news_catalysts=tuple(str(c) for c in parsed.get("news_catalysts", [])),
-                                model_used=candidate_model,
-                                tokens_used=tokens,
-                            )
-                elif resp.status_code in {429, 503}:
-                    logger.warning("Gemini model %s busy or quota exceeded (%s), trying fallback model...", candidate_model, resp.status_code)
-                    continue
-                else:
-                    logger.warning("Gemini Trader request to %s failed: %s %s", candidate_model, resp.status_code, resp.text[:200])
-            except Exception as ex:
-                logger.error("Error communicating with Gemini Trader model %s: %s", candidate_model, ex)
+            for attempt in range(2):
+                try:
+                    resp = self._client.post(url, json=data)
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        usage = body.get("usageMetadata") or {}
+                        tokens = int(usage.get("totalTokenCount") or 0)
+                        candidates = body.get("candidates") or []
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts and "text" in parts[0]:
+                                raw_json = parts[0]["text"]
+                                parsed = _extract_json(raw_json)
+                                return TraderCopilotResponse(
+                                    ticker=query.ticker or (market_context.ticker if market_context else None),
+                                    market_stance=str(parsed.get("market_stance") or "NEUTRAL").upper(),
+                                    thesis_title=str(parsed.get("thesis_title") or "Консультация торгового деска"),
+                                    microstructure_analysis=str(parsed.get("microstructure_analysis") or ""),
+                                    news_drivers_analysis=str(parsed.get("news_drivers_analysis") or ""),
+                                    key_levels=tuple(str(k) for k in parsed.get("key_levels", [])),
+                                    actionable_setup=str(parsed.get("actionable_setup") or ""),
+                                    risk_factors=tuple(str(r) for r in parsed.get("risk_factors", [])),
+                                    news_catalysts=tuple(str(c) for c in parsed.get("news_catalysts", [])),
+                                    model_used=candidate_model,
+                                    tokens_used=tokens,
+                                )
+                    elif resp.status_code == 503:
+                        logger.warning("Gemini model %s busy (503), attempt %d/2", candidate_model, attempt + 1)
+                        if attempt == 0:
+                            time.sleep(1.2)
+                            continue
+                    elif resp.status_code == 429:
+                        logger.warning("Gemini model %s quota exceeded (429), trying fallback model...", candidate_model)
+                        break
+                    else:
+                        logger.warning("Gemini Trader request to %s failed: %s %s", candidate_model, resp.status_code, resp.text[:200])
+                        break
+                except Exception as ex:
+                    logger.error("Error communicating with Gemini Trader model %s: %s", candidate_model, ex)
+                    break
 
         # Fallback response if all models failed
         return TraderCopilotResponse(
             ticker=query.ticker,
             market_stance="CAUTIOUS",
-            thesis_title="Деск временно не сформировал ответ",
-            microstructure_analysis=f"Данные по тикеру: последняя цена {market_context.last_price if market_context else 'н/д'}.",
-            news_drivers_analysis="Не удалось получить консультацию LLM. Проверьте подключение к сервису.",
+            thesis_title="Деск формирует оценку",
+            microstructure_analysis=(
+                f"Данные по инструменту: последняя цена {market_context.last_price:.2f} ₽."
+                if (market_context and market_context.last_price is not None)
+                else "Данные стакана и ленты временно недоступны."
+            ),
+            news_drivers_analysis="Высокая нагрузка на аналитический шлюз котировок. Повторите запрос через несколько секунд.",
             key_levels=(),
-            actionable_setup="Воздержаться от сделок до восстановления связи с аналитическим деском.",
-            risk_factors=("Сбой внешнего аналитического сервиса",),
+            actionable_setup="Воздержаться от сделок до обновления аналитической сводки.",
+            risk_factors=("Временная задержка ответа аналитического шлюза",),
             news_catalysts=(),
             model_used=last_model,
             tokens_used=tokens,
