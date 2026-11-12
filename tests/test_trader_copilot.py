@@ -158,3 +158,66 @@ def test_google_news_rss_parser():
     assert "Акции Сбера выросли на 2%" in items[0].title
     assert items[0].source == "РБК"
     assert "Рост продолжается" in items[0].summary
+
+
+def test_futures_ticker_and_acronym_filtering():
+    from tinvest_signal_engine.application.trader_copilot import (
+        extract_ticker_from_text,
+        resolve_base_ticker,
+    )
+
+    # 1. Futures codes
+    t1 = extract_ticker_from_text("GZZ6 Тип: Всплеск объёма Терминал:...")
+    assert t1 == "GZZ6"
+    assert resolve_base_ticker(t1) == "GAZP"
+
+    t2 = extract_ticker_from_text("Разбор по SiZ6 и курсу рубля")
+    assert t2 == "SIZ6"
+    assert resolve_base_ticker(t2) == "Si"
+
+    # 2. Acronyms must NOT be matched as tickers
+    assert extract_ticker_from_text("Трейдинг-деск · LLM Взгляд: [ШОРТ]") is None
+    assert extract_ticker_from_text("Какие мошенники") is None
+    assert extract_ticker_from_text("Проблема с API и HTML разметкой") is None
+
+
+def test_direct_answer_formatting():
+    response = TraderCopilotResponse(
+        ticker="GZZ6",
+        market_stance="NEUTRAL",
+        thesis_title="Оценка подтвердилась, импульс затухает",
+        microstructure_analysis="",
+        news_drivers_analysis="",
+        direct_answer="Оценка была верной. Всплеск объема на 13240 не получил продолжения.",
+        actionable_setup="Вне позиции до выхода из диапазона 13200-13280.",
+    )
+    html_out = format_trader_response_html(response)
+    assert "<b>Трейдинг-деск</b> · GZZ6" in html_out
+    assert "Оценка была верной" in html_out
+    assert "Вне позиции до выхода" in html_out
+    # Must not contain boilerplate headers when fields are empty
+    assert "Микроструктура и лента:" not in html_out
+    assert "Новостной фон и драйверы:" not in html_out
+
+
+def test_rss_spam_filtering():
+    xml_data = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0">
+      <channel>
+        <item>
+          <title><![CDATA[\xD0\x9C\xD0\xBE\xD1\x88\xD0\xB5\xD0\xBD\xD0\xBD\xD0\xB8\xD0\xBA\xD0\xB8 \xD0\xB8\xD1\x81\xD0\xBF\xD0\xBE\xD0\xBB\xD1\x8C\xD0\xB7\xD1\x83\xD1\x8E\xD1\x82 \xD0\xBD\xD0\xB5\xD0\xB9\xD1\x80\xD0\xBE\xD1\x81\xD0\xB5\xD1\x82\xD0\xB8]]></title>
+          <link>https://example.com/scam</link>
+          <description><![CDATA[\xD0\xA1\xD1\x85\xD0\xB5\xD0\xBC\xD0\xB0 \xD0\xBE\xD0\xB1\xD0\xBC\xD0\xB0\xD0\xBD\xD0\xB0]]></description>
+        </item>
+        <item>
+          <title><![CDATA[\xD0\x93\xD0\xB0\xD0\xB7\xD0\xBF\xD1\x80\xD0\xBE\xD0\xBC \xD1\x83\xD0\xB2\xD0\xB5\xD0\xBB\xD0\xB8\xD1\x87\xD0\xB8\xD0\xBB \xD0\xBF\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0\xD0\xB2\xD0\xBA\xD0\xB8 \xD0\xB3\xD0\xB0\xD0\xB7\xD0\xB0]]></title>
+          <link>https://example.com/gazp</link>
+          <description><![CDATA[\xD0\xAD\xD0\xBA\xD1\x81\xD0\xBF\xD0\xBE\xD1\x80\xD1\x82 \xD0\xB2\xD1\x8B\xD1\x80\xD0\xBE\xD1\x81 \xD0\xBD\xD0\xB0 5%]]></description>
+        </item>
+      </channel>
+    </rss>"""
+    adapter = GoogleNewsRssSearchAdapter()
+    items = adapter._parse_rss_items(xml_data, limit=5)
+    # The scam article must be filtered out, only Gazprom kept
+    assert len(items) == 1
+    assert "Газпром увеличил" in items[0].title

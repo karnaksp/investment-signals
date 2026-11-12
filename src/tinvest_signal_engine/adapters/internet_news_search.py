@@ -87,6 +87,27 @@ class GoogleNewsRssSearchAdapter(InternetNewsSearchPort):
             clean_desc = re.sub(r"<[^>]+>", " ", desc).strip()
             clean_desc = " ".join(clean_desc.split())[:200]
 
+            # Reject non-financial noise, cybercrime, and sensational spam
+            combined_text = f"{title} {clean_desc}".lower()
+            if any(
+                spam_kw in combined_text
+                for spam_kw in (
+                    "мошенник",
+                    "хакер",
+                    "взлом",
+                    "аферист",
+                    "краж",
+                    "криминал",
+                    "убийств",
+                    "порно",
+                    "гороскоп",
+                    "дтп",
+                    "дипфейк",
+                    "deepfake",
+                )
+            ):
+                continue
+
             results.append(
                 InternetNewsItem(
                     title=title,

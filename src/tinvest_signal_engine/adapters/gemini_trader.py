@@ -42,6 +42,7 @@ def _extract_json(text: str) -> dict[str, Any]:
     # Resilient regex parser if json.loads failed (e.g. unescaped quote in text)
     parsed: dict[str, Any] = {}
     for key in (
+        "direct_answer",
         "market_stance",
         "thesis_title",
         "microstructure_analysis",
@@ -58,24 +59,28 @@ def _extract_json(text: str) -> dict[str, Any]:
             items = re.findall(r'"(.*?)"', m.group(1))
             parsed[list_key] = items
 
-    if parsed.get("thesis_title") or parsed.get("microstructure_analysis") or parsed.get("market_stance"):
+    if (
+        parsed.get("direct_answer")
+        or parsed.get("thesis_title")
+        or parsed.get("microstructure_analysis")
+        or parsed.get("market_stance")
+    ):
         return parsed
 
     raise ValueError(f"Could not parse valid JSON from model response: {text[:200]}")
 
 
 class GeminiTraderCopilotAdapter(TraderLlmPort):
-    """Institutional Senior Trader / Desk Strategist using Google Gemini Flash models with quota fallback."""
+    """Institutional Senior Trader / Desk Strategist using Google Gemini models with quota fallback."""
 
     def __init__(
         self,
         *,
         api_key: str,
-        model: str = "gemini-3.5-flash-lite",
+        model: str = "gemini-3-flash-preview",
         fallback_models: Sequence[str] = (
             "gemini-flash-lite-latest",
-            "gemini-3-flash-preview",
-            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
         ),
         timeout_seconds: float = 25.0,
         client: httpx.Client | None = None,
@@ -100,13 +105,17 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
     ) -> TraderCopilotResponse:
         system_instruction = (
             "Ты — ведущий институциональный проп-трейдер и стратег деска Московской биржи (Head of Trading Desk).\n"
-            "Твой стиль: профессиональный, четкий, аналитический, строго классический деловой язык, цифры, стакан, поток ордеров и факты.\n"
-            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать эмодзи или смайлики (никаких 🟢, 🔴, 📊, 💡, ⚠️, 🏛, 🎯 и т.д.)!\n"
-            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать дисклеймеры вроде 'не является инвестиционной рекомендацией' "
-            "и упоминать, что ты модель / LLM / нейросеть / ассистент!\n"
-            "Форматируй текст строго стандартным текстом и маркированными списками.\n"
-            "Дай жесткий практический разбор: где уровни, где сидит ликвидность, в чем реальная суть новостей из интернета, "
-            "каков торговый сетап (Long / Short / Flat / Arbitrage), точка отмены сценария (Stop Loss) и цели (Take Profit)."
+            "Твой стиль: профессиональный, прямой, лаконичный, строго деловой язык, факты, стакан и логика рынка.\n"
+            "ГЛАВНОЕ ПРАВИЛО: отвечай четко и по существу на поставленный вопрос пользователя, "
+            "не накидывай шаблонных блоков, если они не требуются.\n"
+            "Если вопрос простой, диалоговый или о предыдущем сигнале ('В итоге правильная оценка была?', 'Почему сигнал?', 'Поясни'):\n"
+            "— дай четкий прямой ответ в поле 'direct_answer' (1-3 емких абзаца).\n"
+            "— не придумывай вымышленные уровни или шаблонные сетапы, если они не уместны (оставь их пустыми).\n"
+            "Если вопрос требует анализа инструмента ('Что думаешь по Сберу?', 'Дай сетап по нефти'):\n"
+            "— дай в 'direct_answer' главную аналитическую мысль, а в 'key_levels' и 'actionable_setup' — точные цены, SL и TP.\n"
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать эмодзи или смайлики!\n"
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать дисклеймеры вроде 'не является инвестиционной рекомендацией'!\n"
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО упоминать, что ты модель / нейросеть / LLM / бот!"
         )
 
         # Assemble market context section
@@ -133,7 +142,7 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
         news_section = "Свежие новости из сети не найдены."
         if news_items:
             n_lines = []
-            for item in news_items[:5]:
+            for item in news_items[:4]:
                 src = f" ({item.source})" if item.source else ""
                 n_lines.append(f"• {item.title}{src}")
                 if item.summary:
@@ -151,14 +160,15 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
             f"АКТУАЛЬНЫЙ ИНТЕРНЕТ-НОВОСТНОЙ ФОН:\n{news_section}\n\n"
             "СФОРМИРУЙ ОТВЕТ СТРОГО В ВИДЕ JSON:\n"
             "{\n"
+            '  "direct_answer": "Прямой, емкий ответ на конкретный вопрос пользователя (1-3 абзаца)",\n'
             '  "market_stance": "BULLISH" | "BEARISH" | "NEUTRAL" | "CAUTIOUS" | "ARBITRAGE",\n'
-            '  "thesis_title": "Краткий заголовок торговой гипотезы (до 8 слов)",\n'
-            '  "microstructure_analysis": "Анализ стакана, спреда, VWAP и баланса сил (2-4 предложения)",\n'
-            '  "news_drivers_analysis": "Синтез реального новостного фона и драйверов (2-4 предложения)",\n'
-            '  "key_levels": ["Поддержка: ...", "Сопротивление: ...", "Отмена сценария: ..."],\n'
-            '  "actionable_setup": "Конкретный сетап с точкой входа, SL и TP (1-2 предложения)",\n'
-            '  "risk_factors": ["Риск 1", "Риск 2"],\n'
-            '  "news_catalysts": ["Новость 1", "Новость 2"]\n'
+            '  "thesis_title": "Краткий заголовок вердикта (до 7 слов)",\n'
+            '  "microstructure_analysis": "Краткий контекст стакана / VWAP (или пустая строка)",\n'
+            '  "news_drivers_analysis": "Краткий контекст драйверов (или пустая строка)",\n'
+            '  "key_levels": ["Поддержка: ...", "Сопротивление: ..."] или [],\n'
+            '  "actionable_setup": "Конкретный сетап с точкой входа, SL и TP (или пустая строка)",\n'
+            '  "risk_factors": ["Риск 1"] или [],\n'
+            '  "news_catalysts": ["Новость 1"] или []\n'
             "}"
         )
 
@@ -172,6 +182,7 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
                 "responseSchema": {
                     "type": "OBJECT",
                     "properties": {
+                        "direct_answer": {"type": "STRING"},
                         "market_stance": {
                             "type": "STRING",
                             "enum": ["BULLISH", "BEARISH", "NEUTRAL", "CAUTIOUS", "ARBITRAGE"],
@@ -185,11 +196,9 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
                         "news_catalysts": {"type": "ARRAY", "items": {"type": "STRING"}},
                     },
                     "required": [
+                        "direct_answer",
                         "market_stance",
                         "thesis_title",
-                        "microstructure_analysis",
-                        "news_drivers_analysis",
-                        "actionable_setup",
                     ],
                 },
             },
@@ -223,6 +232,7 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
                                     actionable_setup=str(parsed.get("actionable_setup") or ""),
                                     risk_factors=tuple(str(r) for r in parsed.get("risk_factors", [])),
                                     news_catalysts=tuple(str(c) for c in parsed.get("news_catalysts", [])),
+                                    direct_answer=str(parsed.get("direct_answer") or ""),
                                     model_used=candidate_model,
                                     tokens_used=tokens,
                                 )
@@ -256,6 +266,7 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
             actionable_setup="Воздержаться от сделок до обновления аналитической сводки.",
             risk_factors=("Временная задержка ответа аналитического шлюза",),
             news_catalysts=(),
+            direct_answer="Высокая нагрузка на аналитический шлюз котировок. Пожалуйста, повторите запрос через несколько секунд.",
             model_used=last_model,
             tokens_used=tokens,
         )
