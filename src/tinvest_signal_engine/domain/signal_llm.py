@@ -101,3 +101,107 @@ def format_llm_analysis_plain(result: LlmAnalysisResult) -> str:
     if result.invalidation_level:
         lines.append(f"Отмена: {result.invalidation_level}")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class AssetPositionLlmContext:
+    """Context extracted from daily long/short position reports for LLM interpretation."""
+
+    commodity: str
+    commodity_name: str
+    source_exchange: str
+    trading_day: str
+    previous_day: str
+    sections_summary: str
+    recent_news: tuple[NewsArticle, ...] = ()
+
+
+@dataclass(frozen=True)
+class AssetPositionAnalysisResult:
+    """LLM analysis and macro interpretation of long/short positioning."""
+
+    commodity: str
+    sentiment: str  # BULLISH, BEARISH, NEUTRAL, OVERHEATED_BULLISH, OVERHEATED_BEARISH, SQUEEZE_RISK
+    bias_title: str
+    smart_money_summary: str
+    crowd_bias: str
+    interpretation: str
+    macro_drivers: str
+    actionable_advice: str
+    risk_factors: str = ""
+    model_used: str = ""
+    tokens_used: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "commodity": self.commodity,
+            "sentiment": self.sentiment,
+            "bias_title": self.bias_title,
+            "smart_money_summary": self.smart_money_summary,
+            "crowd_bias": self.crowd_bias,
+            "interpretation": self.interpretation,
+            "macro_drivers": self.macro_drivers,
+            "actionable_advice": self.actionable_advice,
+            "risk_factors": self.risk_factors,
+            "model_used": self.model_used,
+            "tokens_used": self.tokens_used,
+        }
+
+
+def format_position_analysis_html(
+    result: AssetPositionAnalysisResult, commodity_title: str = ""
+) -> str:
+    """Format position analysis into a clean Telegram HTML card."""
+    sentiment_badges = {
+        "BULLISH": "🟢 <b>BULLISH</b>",
+        "BEARISH": "🔴 <b>BEARISH</b>",
+        "NEUTRAL": "⚪ <b>NEUTRAL</b>",
+        "OVERHEATED_BULLISH": "🟡 <b>ПЕРЕГРЕТЫЙ ЛОНГ</b>",
+        "OVERHEATED_BEARISH": "🟡 <b>ПЕРЕГРЕТЫЙ ШОРТ</b>",
+        "SQUEEZE_RISK": "⚠️ <b>РИСК СКВИЗА</b>",
+    }
+    badge = sentiment_badges.get(
+        result.sentiment.upper(), f"<b>{html.escape(result.sentiment)}</b>"
+    )
+    title = html.escape(commodity_title or result.commodity.upper())
+
+    lines = [
+        f"🧠 <b>Анализ позиционирования · {title}</b> ({badge})",
+    ]
+    if result.bias_title:
+        lines.append(f"<b>{html.escape(result.bias_title)}</b>\n")
+
+    if result.smart_money_summary:
+        lines.append(f"• <b>Умный капитал:</b> {html.escape(result.smart_money_summary)}")
+
+    if result.crowd_bias:
+        lines.append(f"• <b>Толпа / розница:</b> {html.escape(result.crowd_bias)}")
+
+    if result.interpretation:
+        lines.append(f"• <b>Что значит перевес:</b> {html.escape(result.interpretation)}")
+
+    if result.macro_drivers:
+        lines.append(f"• <b>Макро / динамика:</b> {html.escape(result.macro_drivers)}")
+
+    if result.actionable_advice:
+        lines.append(f"• <b>Рекомендация:</b> {html.escape(result.actionable_advice)}")
+
+    if result.risk_factors:
+        lines.append(f"• <b>Главный риск:</b> {html.escape(result.risk_factors)}")
+
+    return "\n".join(lines)
+
+
+def format_position_analysis_plain(
+    result: AssetPositionAnalysisResult, commodity_title: str = ""
+) -> str:
+    """Plain-text fallback for position report analysis."""
+    title = commodity_title or result.commodity.upper()
+    lines = [
+        f"[Анализ позиций: {title} - {result.sentiment}]",
+        result.bias_title,
+        f"Умный капитал: {result.smart_money_summary}",
+        f"Интерпретация: {result.interpretation}",
+        f"Рекомендация: {result.actionable_advice}",
+    ]
+    return "\n".join(lines)

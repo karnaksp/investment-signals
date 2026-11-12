@@ -7,11 +7,15 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from tinvest_signal_engine.domain.signal_llm import (
+    AssetPositionAnalysisResult,
+    AssetPositionLlmContext,
     LlmAnalysisResult,
     LlmSignalContext,
     NewsArticle,
     format_llm_analysis_html,
     format_llm_analysis_plain,
+    format_position_analysis_html,
+    format_position_analysis_plain,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,12 @@ class LlmAnalyzerPort(Protocol):
         self, context: LlmSignalContext
     ) -> LlmAnalysisResult | None:
         """Deep structured analysis of signal and verified news."""
+        ...
+
+    def analyze_position_report(
+        self, context: AssetPositionLlmContext
+    ) -> AssetPositionAnalysisResult | None:
+        """Deep analysis of long/short positioning, macro context, and asset dynamics."""
         ...
 
 
@@ -194,6 +204,93 @@ class SignalLlmEnrichmentUseCase:
         except Exception as ex:
             logger.warning("LLM enrichment failed for %s: %s", ticker, ex)
             return payload
+
+    def analyze_asset_positions(
+        self, payload: dict[str, Any]
+    ) -> AssetPositionAnalysisResult | None:
+        """Analyze a daily long/short position card payload."""
+        if not self._enabled:
+            return None
+
+        commodity = str(payload.get("commodity") or "").strip().lower()
+        if not commodity:
+            return None
+
+        commodity_name = _COMMODITY_RU_NAMES.get(commodity, commodity.upper())
+        trading_day = str(payload.get("trading_day") or "")
+        previous_day = str(payload.get("previous_day") or "")
+        source_exchange = str(payload.get("source_exchange") or "")
+
+        sections = payload.get("sections") or []
+        sections_summary_lines: list[str] = []
+        for sec in sections:
+            src = sec.get("source", "Exchange")
+            period = "день" if sec.get("period") == "daily" else "неделя"
+            sections_summary_lines.append(f"Площадка {src} ({period}):")
+            for grp in sec.get("groups", []):
+                cat = grp.get("category", "")
+                cat_ru = _CATEGORY_RU_NAMES.get(cat, cat)
+                longs = int(grp.get("longs") or 0)
+                shorts = int(grp.get("shorts") or 0)
+                prev_longs = int(grp.get("previous_longs") or 0)
+                prev_shorts = int(grp.get("previous_shorts") or 0)
+                d_long = longs - prev_longs
+                d_short = shorts - prev_shorts
+                total = longs + shorts
+                long_pct = round(longs / total * 100) if total > 0 else 0
+                sections_summary_lines.append(
+                    f"  - {cat_ru}: Лонги {long_pct}% ({longs:,}, Δ={d_long:+d}), "
+                    f"Шорты {100 - long_pct}% ({shorts:,}, Δ={d_short:+d})"
+                )
+
+        # Fetch recent news for this commodity
+        raw_news = self._news_provider.get_recent_news(
+            commodity.upper(), max_age_hours=24, limit=4, payload=payload
+        )
+
+        context = AssetPositionLlmContext(
+            commodity=commodity,
+            commodity_name=commodity_name,
+            source_exchange=source_exchange,
+            trading_day=trading_day,
+            previous_day=previous_day,
+            sections_summary="\n".join(sections_summary_lines),
+            recent_news=raw_news,
+        )
+
+        try:
+            return self._llm_analyzer.analyze_position_report(context)
+        except Exception as ex:
+            logger.warning("LLM position analysis failed for %s: %s", commodity, ex)
+            return None
+
+
+_COMMODITY_RU_NAMES: dict[str, str] = {
+    "gold": "Золото",
+    "silver": "Серебро",
+    "platinum": "Платина",
+    "palladium": "Палладий",
+    "copper": "Медь",
+    "wti": "Нефть WTI",
+    "brent": "Нефть Brent",
+    "natural_gas": "Газ Henry Hub",
+    "wheat_srw": "Пшеница SRW",
+    "usd_rub": "Доллар / рубль",
+    "cny_rub": "Юань / рубль",
+    "eur_rub": "Евро / рубль",
+}
+
+_CATEGORY_RU_NAMES: dict[str, str] = {
+    "broker_clients": "Через брокеров (клиенты)",
+    "direct_members": "Напрямую на бирже (проф. участники)",
+    "managed_money": "Фонды (Managed Money / спекулянты)",
+    "producers_merchants": "Производители и торговцы (хеджеры)",
+    "swap_dealers": "Своп-дилеры",
+    "other_reportables": "Другие крупные участники",
+    "nonreportable": "Мелкие участники (розница)",
+    "individuals": "Физические лица",
+    "legal_entities": "Юридические лица",
+}
 
 
 def _to_float(value: Any) -> float | None:

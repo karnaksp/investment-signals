@@ -10,6 +10,8 @@ import httpx
 
 from tinvest_signal_engine.application.signal_llm import LlmAnalyzerPort
 from tinvest_signal_engine.domain.signal_llm import (
+    AssetPositionAnalysisResult,
+    AssetPositionLlmContext,
     LlmAnalysisResult,
     LlmSignalContext,
 )
@@ -28,7 +30,7 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         api_key: str,
         gatekeeper_model: str = "gemini-3.5-flash-lite",
         analyzer_model: str = "gemini-3.5-flash",
-        timeout_seconds: float = 4.0,
+        timeout_seconds: float = 25.0,
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key.strip()
@@ -192,6 +194,98 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
             )
         except Exception as ex:
             logger.warning("Gemini analyzer error for %s: %s", context.ticker, ex)
+            return None
+
+    def analyze_position_report(
+        self, context: AssetPositionLlmContext
+    ) -> AssetPositionAnalysisResult | None:
+        """Analyze long/short position breakdown, macro drivers and sentiment."""
+        if not self.enabled:
+            return None
+
+        news_text = (
+            "\n".join(
+                f"- [{n.source or 'Новость'}] {n.title}" + (f": {n.summary}" if n.summary else "")
+                for n in context.recent_news
+            )
+            if context.recent_news
+            else "Специфичных срочных новостей за последние часы не зафиксировано."
+        )
+
+        system_prompt = (
+            "Ты — старший макро-аналитик сырьевых и валютных рынков (эксперт по отчетам CoT / SHFE / Мосбиржи). "
+            "Твоя задача — проанализировать отчет о позиционировании игроков (лонги/шорты фондов, производителей и розницы), "
+            "сопоставить его с долгосрочной динамикой актива и новостным фоном и сформировать точный, профессиональный "
+            "вывод в формате строгого JSON без лишних преамбул."
+        )
+
+        user_prompt = f"""АКТИВ: {context.commodity_name} (код: {context.commodity.upper()})
+ДАТА ОТЧЕТА: {context.trading_day} (к {context.previous_day}), биржа: {context.source_exchange}
+
+РАСКЛАД ПОЗИЦИЙ ПО ПЛОЩАДКАМ И ГРУППАМ:
+{context.sections_summary}
+
+НОВОСТНОЙ И МАКРО-ФОН:
+{news_text}
+
+Сформируй JSON со следующими полями:
+- "sentiment": одно из: "BULLISH", "BEARISH", "NEUTRAL", "OVERHEATED_BULLISH", "OVERHEATED_BEARISH", "SQUEEZE_RISK"
+- "bias_title": емкий аналитический заголовок (1 строка на русском)
+- "smart_money_summary": действия крупных фондов/институционалов/производителей (1-2 емких предложения на русском)
+- "crowd_bias": действия розницы/клиентов/физлиц (1 предложение на русском)
+- "interpretation": структурный смысл текущего перевеса позиций и риска сквиза/разворота (2 предложения на русском)
+- "macro_drivers": ключевой макроэкономический драйвер и долгосрочный контекст актива (1-2 предложения на русском)
+- "actionable_advice": практическая рекомендация для инвестора/трейдера с риск-менеджментом (1-2 предложения на русском)
+- "risk_factors": главный риск для описанного сценария (1 предложение на русском)
+"""
+
+        url = f"{GEMINI_API_BASE}/models/{self._analyzer_model}:generateContent"
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 500,
+                "temperature": 0.2,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+
+        try:
+            resp = self._post_with_fallback(url, payload)
+            if resp is None or resp.status_code != 200:
+                logger.warning(
+                    "Gemini position analyzer returned HTTP %s",
+                    resp.status_code if resp else "None",
+                )
+                return None
+
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+
+            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            parsed = json.loads(raw_text)
+
+            usage = data.get("usageMetadata", {})
+            tokens_used = int(usage.get("totalTokenCount") or 0)
+
+            return AssetPositionAnalysisResult(
+                commodity=context.commodity,
+                sentiment=str(parsed.get("sentiment") or "NEUTRAL").strip(),
+                bias_title=str(parsed.get("bias_title") or "").strip(),
+                smart_money_summary=str(parsed.get("smart_money_summary") or "").strip(),
+                crowd_bias=str(parsed.get("crowd_bias") or "").strip(),
+                interpretation=str(parsed.get("interpretation") or "").strip(),
+                macro_drivers=str(parsed.get("macro_drivers") or "").strip(),
+                actionable_advice=str(parsed.get("actionable_advice") or "").strip(),
+                risk_factors=str(parsed.get("risk_factors") or "").strip(),
+                model_used=self._analyzer_model,
+                tokens_used=tokens_used,
+            )
+        except Exception as ex:
+            logger.warning("Gemini position analyzer error for %s: %s", context.commodity, ex)
             return None
 
     def _post_with_fallback(

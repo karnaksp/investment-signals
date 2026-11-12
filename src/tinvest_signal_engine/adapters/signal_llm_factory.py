@@ -27,7 +27,7 @@ def create_llm_enrichment_service(
     enabled: bool | None = None,
     gatekeeper_model: str = "gemini-3.5-flash-lite",
     analyzer_model: str = "gemini-3.5-flash",
-    timeout_seconds: float = 4.0,
+    timeout_seconds: float = 25.0,
     cooldown_seconds: int = 1800,
     min_quality_score: float = 0.65,
     rss_urls: list[str] | None = None,
@@ -48,7 +48,7 @@ def create_llm_enrichment_service(
         api_key=key,
         gatekeeper_model=gatekeeper_model or os.getenv("GEMINI_GATEKEEPER_MODEL", "gemini-3.5-flash-lite"),
         analyzer_model=analyzer_model or os.getenv("GEMINI_ANALYZER_MODEL", "gemini-3.5-flash"),
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=float(os.getenv("GEMINI_TIMEOUT_SECONDS", str(timeout_seconds))),
     )
 
     rss_provider = RssNewsProvider(rss_urls=rss_urls)

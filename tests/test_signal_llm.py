@@ -350,3 +350,89 @@ def test_signal_enrichment_integration_with_llm() -> None:
     assert "LONG" in tg_html
     assert "BUY_MOMENTUM" in tg_html
     assert "Рекордные дивиденды 33 руб." in tg_html
+
+
+def test_asset_position_analysis_formatting() -> None:
+    from tinvest_signal_engine.domain.signal_llm import (
+        AssetPositionAnalysisResult,
+        format_position_analysis_html,
+        format_position_analysis_plain,
+    )
+
+    pos_result = AssetPositionAnalysisResult(
+        commodity="gold",
+        sentiment="OVERHEATED_BULLISH",
+        bias_title="Фонды наращивают ставку на рост золота",
+        smart_money_summary="Фонды увеличили чистый лонг до 75%",
+        crowd_bias="Розница в умеренном лонге",
+        interpretation="Сильный тренд, но растет риск локального отката",
+        macro_drivers="Закупки центробанков поддерживают восходящий тренд",
+        actionable_advice="Искать покупки на коррекциях",
+        risk_factors="Уход ниже $2650",
+    )
+
+    html = format_position_analysis_html(pos_result, commodity_title="Золото")
+    assert "Анализ позиционирования · Золото" in html
+    assert "ПЕРЕГРЕТЫЙ ЛОНГ" in html
+    assert "Фонды увеличили чистый лонг до 75%" in html
+    assert "Искать покупки на коррекциях" in html
+
+    plain = format_position_analysis_plain(pos_result, commodity_title="Золото")
+    assert "[Анализ позиций: Золото - OVERHEATED_BULLISH]" in plain
+    assert "Фонды наращивают ставку на рост золота" in plain
+
+
+def test_use_case_analyze_asset_positions() -> None:
+    from tinvest_signal_engine.domain.signal_llm import AssetPositionAnalysisResult
+
+    pos_sample = AssetPositionAnalysisResult(
+        commodity="brent",
+        sentiment="BEARISH",
+        bias_title="Производители агрессивно хеджируют падение нефти",
+        smart_money_summary="Коммерческие участники нарастили шорт",
+        crowd_bias="Спекулянты сокращают лонги",
+        interpretation="Слабый спрос давит на котировки",
+        macro_drivers="Рост добычи вне ОПЕК+",
+        actionable_advice="Продавать на отскоках",
+        risk_factors="Геополитическое обострение на Ближнем Востоке",
+    )
+
+    class MockPositionLlmAnalyzer(MockLlmAnalyzer):
+        def analyze_position_report(self, context):
+            self.position_context = context
+            return pos_sample
+
+    analyzer = MockPositionLlmAnalyzer()
+    service = SignalLlmEnrichmentUseCase(
+        news_provider=MockNewsProvider(()),
+        llm_analyzer=analyzer,
+    )
+
+    payload = {
+        "commodity": "brent",
+        "source_exchange": "ICE",
+        "trading_day": "2026-11-10",
+        "previous_day": "2026-11-03",
+        "sections": [
+            {
+                "source": "ICE",
+                "period": "weekly",
+                "groups": [
+                    {
+                        "category": "managed_money",
+                        "longs": 80000,
+                        "shorts": 120000,
+                        "previous_longs": 90000,
+                        "previous_shorts": 110000,
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = service.analyze_asset_positions(payload)
+    assert result is not None
+    assert result.sentiment == "BEARISH"
+    assert result.commodity == "brent"
+    assert "Производители агрессивно" in result.bias_title
+    assert "Managed Money" in analyzer.position_context.sections_summary

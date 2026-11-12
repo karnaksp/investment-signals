@@ -35,6 +35,19 @@ TICKER_ALIASES: dict[str, tuple[str, ...]] = {
     "AFLT": ("АЭРОФЛОТ", "AFLT"),
     "SNGS": ("СУРГУТНЕФТЕГАЗ", "SNGS"),
     "MTSS": ("МТС", "MTSS"),
+    # Commodities and Currencies for Position Reports
+    "GOLD": ("ЗОЛОТО", "GOLD", "XAU"),
+    "SILVER": ("СЕРЕБРО", "SILVER", "XAG"),
+    "PLATINUM": ("ПЛАТИНА", "PLATINUM"),
+    "PALLADIUM": ("ПАЛЛАДИЙ", "PALLADIUM"),
+    "COPPER": ("МЕДЬ", "COPPER"),
+    "WTI": ("WTI", "НЕФТЬ", "НЕФТИ"),
+    "BRENT": ("BRENT", "НЕФТЬ", "НЕФТИ"),
+    "NATURAL_GAS": ("ГАЗ", "ГАЗА", "HENRY HUB"),
+    "WHEAT_SRW": ("ПШЕНИЦА", "ПШЕНИЦЫ", "ЗЕРНО"),
+    "USD_RUB": ("ДОЛЛАР", "РУБЛЬ", "ВАЛЮТА", "ЦБ"),
+    "CNY_RUB": ("ЮАНЬ", "РУБЛЬ", "ВАЛЮТА"),
+    "EUR_RUB": ("ЕВРО", "РУБЛЬ", "ВАЛЮТА"),
 }
 
 
