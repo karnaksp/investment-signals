@@ -243,12 +243,18 @@ class TraderCopilotUseCase:
     def answer_query(
         self, query: TraderDeskQuery
     ) -> tuple[TraderCopilotResponse, MarketContextSnapshot | None]:
-        # 1. Determine target ticker from query or replied message
+        # 1. Determine target ticker from query, replied message, or dialogue history
         ticker = query.ticker
         if not ticker:
             ticker = extract_ticker_from_text(query.query_text)
         if not ticker and query.reply_to_text:
             ticker = extract_ticker_from_text(query.reply_to_text)
+        if not ticker and query.dialogue_history:
+            for msg in reversed(query.dialogue_history):
+                candidate_ticker = extract_ticker_from_text(msg.text)
+                if candidate_ticker:
+                    ticker = candidate_ticker
+                    break
 
         effective_query = query if query.ticker == ticker else TraderDeskQuery(
             query_text=query.query_text,
@@ -258,6 +264,7 @@ class TraderCopilotUseCase:
             chat_id=query.chat_id,
             message_id=query.message_id,
             reply_to_text=query.reply_to_text,
+            dialogue_history=query.dialogue_history,
             created_at=query.created_at,
         )
 

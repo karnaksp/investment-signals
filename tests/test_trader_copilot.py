@@ -63,8 +63,9 @@ def test_domain_models_and_formatting():
     )
 
     html_out = format_trader_response_html(response, market_context=snapshot)
-    assert "<b>Трейдинг-деск</b> · SBER" in html_out
-    assert "[ЛОНГ]" in html_out
+    assert "Трейдинг-деск" not in html_out
+    assert "Взгляд:" not in html_out
+    assert "<b>SBER:</b>" in html_out
     assert "298.50 ₽" in html_out
     assert "Удержание выше VWAP" in html_out
     assert "Поддержка: 297.50" in html_out
@@ -192,7 +193,8 @@ def test_direct_answer_formatting():
         actionable_setup="Вне позиции до выхода из диапазона 13200-13280.",
     )
     html_out = format_trader_response_html(response)
-    assert "<b>Трейдинг-деск</b> · GZZ6" in html_out
+    assert "Трейдинг-деск" not in html_out
+    assert "Взгляд:" not in html_out
     assert "Оценка была верной" in html_out
     assert "Вне позиции до выхода" in html_out
     # Must not contain boilerplate headers when fields are empty
@@ -221,3 +223,26 @@ def test_rss_spam_filtering():
     # The scam article must be filtered out, only Gazprom kept
     assert len(items) == 1
     assert "Газпром увеличил" in items[0].title
+
+
+def test_dialogue_chain_tracking():
+    from tinvest_signal_engine.services.trader_copilot_service import (
+        _record_message,
+        _build_dialogue_chain,
+    )
+
+    chat_id = 9999
+    # 1. First signal
+    _record_message(msg_id=1, chat_id=chat_id, text="GZZ6 Всплеск объема", user_name="Система", is_bot=True, reply_to_id=None)
+    # 2. User replies to signal
+    _record_message(msg_id=2, chat_id=chat_id, text="В итоге правильная оценка была?", user_name="D S", is_bot=False, reply_to_id=1)
+    # 3. Bot responds to user
+    _record_message(msg_id=3, chat_id=chat_id, text="Оценка подтвердилась...", user_name="Деск", is_bot=True, reply_to_id=2)
+    # 4. User replies to bot response
+    _record_message(msg_id=4, chat_id=chat_id, text="Какие мошенники", user_name="D S", is_bot=False, reply_to_id=3)
+
+    chain = _build_dialogue_chain(chat_id=chat_id, current_msg_id=4, reply_to_dict=None)
+    assert len(chain) == 3
+    assert chain[0].text == "GZZ6 Всплеск объема"
+    assert chain[1].text == "В итоге правильная оценка была?"
+    assert chain[2].text == "Оценка подтвердилась..."

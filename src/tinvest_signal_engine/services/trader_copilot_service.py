@@ -19,11 +19,122 @@ from tinvest_signal_engine.adapters.market_data_provider import CompositeMarketD
 from tinvest_signal_engine.application.trader_copilot import TraderCopilotUseCase
 from tinvest_signal_engine.config import load_secret
 from tinvest_signal_engine.domain.trader_copilot import (
+    DialogueMessage,
     TraderDeskQuery,
     format_trader_response_html,
 )
 
 logger = logging.getLogger(__name__)
+
+_RECENT_MESSAGES: dict[int, dict[str, Any]] = {}
+_CHAT_HISTORY: dict[int | str, list[int]] = {}
+
+
+def _record_message(
+    msg_id: int,
+    chat_id: int | str,
+    text: str,
+    user_name: str,
+    is_bot: bool,
+    reply_to_id: int | None,
+) -> None:
+    _RECENT_MESSAGES[msg_id] = {
+        "text": text,
+        "user_name": user_name,
+        "is_bot": is_bot,
+        "reply_to_id": reply_to_id,
+        "timestamp": time.time(),
+    }
+    if len(_RECENT_MESSAGES) > 300:
+        oldest_id = next(iter(_RECENT_MESSAGES))
+        _RECENT_MESSAGES.pop(oldest_id, None)
+
+    hist = _CHAT_HISTORY.setdefault(chat_id, [])
+    if msg_id not in hist:
+        hist.append(msg_id)
+        if len(hist) > 40:
+            hist.pop(0)
+
+
+def _build_dialogue_chain(
+    chat_id: int | str,
+    current_msg_id: int,
+    reply_to_dict: dict[str, Any] | None,
+) -> tuple[DialogueMessage, ...]:
+    chain: list[DialogueMessage] = []
+    visited: set[int] = set()
+
+    # If the reply_to_message dict is available directly in the update, store it and any nested replies
+    if reply_to_dict and "message_id" in reply_to_dict:
+        r_id = reply_to_dict["message_id"]
+        r_user = reply_to_dict.get("from", {})
+        r_is_bot = bool(r_user.get("is_bot"))
+        r_name = r_user.get("username") or r_user.get("first_name") or ("Деск" if r_is_bot else "Участник")
+        r_text = str(reply_to_dict.get("text") or "").strip()
+        nested_reply = reply_to_dict.get("reply_to_message")
+        nested_id = nested_reply.get("message_id") if nested_reply else None
+
+        _record_message(
+            msg_id=r_id,
+            chat_id=chat_id,
+            text=r_text,
+            user_name=r_name,
+            is_bot=r_is_bot,
+            reply_to_id=nested_id,
+        )
+
+        if nested_reply and nested_id:
+            nr_user = nested_reply.get("from", {})
+            nr_is_bot = bool(nr_user.get("is_bot"))
+            nr_name = nr_user.get("username") or nr_user.get("first_name") or ("Деск" if nr_is_bot else "Участник")
+            _record_message(
+                msg_id=nested_id,
+                chat_id=chat_id,
+                text=str(nested_reply.get("text") or "").strip(),
+                user_name=nr_name,
+                is_bot=nr_is_bot,
+                reply_to_id=None,
+            )
+
+    # 1. Follow reply chain backwards
+    curr_entry = _RECENT_MESSAGES.get(current_msg_id)
+    step = 0
+    while curr_entry and curr_entry.get("reply_to_id") and step < 5:
+        p_id = curr_entry["reply_to_id"]
+        if p_id in visited or p_id not in _RECENT_MESSAGES:
+            break
+        visited.add(p_id)
+        p = _RECENT_MESSAGES[p_id]
+        role = "trader" if p.get("is_bot") else "user"
+        chain.append(
+            DialogueMessage(
+                role=role,
+                text=p["text"],
+                user_name=p.get("user_name", ""),
+            )
+        )
+        curr_entry = p
+        step += 1
+
+    chain.reverse()
+
+    # 2. If chain has less than 2 messages, also include recent messages from chat history
+    if len(chain) < 2 and chat_id in _CHAT_HISTORY:
+        chat_recent_ids = [mid for mid in _CHAT_HISTORY[chat_id] if mid != current_msg_id]
+        for mid in chat_recent_ids[-3:]:
+            if mid not in visited and mid in _RECENT_MESSAGES:
+                m = _RECENT_MESSAGES[mid]
+                role = "trader" if m.get("is_bot") else "user"
+                chain.append(
+                    DialogueMessage(
+                        role=role,
+                        text=m["text"],
+                        user_name=m.get("user_name", ""),
+                    )
+                )
+                visited.add(mid)
+
+    return tuple(chain[-4:])
 
 
 def build_copilot_use_case(*, api_key: str | None = None) -> TraderCopilotUseCase:
@@ -196,6 +307,18 @@ def run_telegram_listener(
                         )
                         continue
 
+                    reply_to_id = reply_to.get("message_id") if reply_to else None
+                    _record_message(
+                        msg_id=msg_id,
+                        chat_id=chat_id,
+                        text=text,
+                        user_name=user_name,
+                        is_bot=False,
+                        reply_to_id=reply_to_id,
+                    )
+
+                    dialogue_history = _build_dialogue_chain(chat_id, msg_id, reply_to)
+
                     for cmd in ("/ask", "/trader", "/copilot", "/ai", "/desk", "/анализ", "/вопрос"):
                         if cleaned_text.startswith(cmd):
                             cleaned_text = cleaned_text[len(cmd):].strip()
@@ -203,7 +326,12 @@ def run_telegram_listener(
 
                     reply_text = str(reply_to.get("text") or "") if reply_to else None
 
-                    logger.info("Processing copilot query from %s: '%s'", user_name, cleaned_text)
+                    logger.info(
+                        "Processing copilot query from %s: '%s' (history: %d msgs)",
+                        user_name,
+                        cleaned_text,
+                        len(dialogue_history),
+                    )
 
                     desk_query = TraderDeskQuery(
                         query_text=cleaned_text,
@@ -211,6 +339,7 @@ def run_telegram_listener(
                         chat_id=chat_id,
                         message_id=msg_id,
                         reply_to_text=reply_text,
+                        dialogue_history=dialogue_history,
                     )
 
                     copilot_resp, market_ctx = use_case.answer_query(desk_query)
@@ -237,6 +366,17 @@ def run_telegram_listener(
                         logger.error("Failed to send copilot reply: %s %s", send_resp.status_code, send_resp.text)
                     else:
                         logger.info("Sent copilot consultation to chat %s (message %s)", chat_id, msg_id)
+                        sent_result = send_resp.json().get("result", {})
+                        sent_msg_id = sent_result.get("message_id")
+                        if sent_msg_id:
+                            _record_message(
+                                msg_id=sent_msg_id,
+                                chat_id=chat_id,
+                                text=out_html,
+                                user_name="Деск",
+                                is_bot=True,
+                                reply_to_id=msg_id,
+                            )
 
             except Exception as ex:
                 if not stop_requested:

@@ -9,6 +9,22 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class DialogueMessage:
+    """Historical message in the conversation thread."""
+
+    role: str  # "user", "trader", "system"
+    text: str
+    user_name: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "text": self.text,
+            "user_name": self.user_name,
+        }
+
+
+@dataclass(frozen=True)
 class TraderDeskQuery:
     """User query or reply to a signal directed at the trading desk copilot."""
 
@@ -19,6 +35,7 @@ class TraderDeskQuery:
     chat_id: int | str | None = None
     message_id: int | None = None
     reply_to_text: str | None = None
+    dialogue_history: tuple[DialogueMessage, ...] = ()
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
@@ -30,6 +47,7 @@ class TraderDeskQuery:
             "chat_id": self.chat_id,
             "message_id": self.message_id,
             "reply_to_text": self.reply_to_text,
+            "dialogue_history": [m.to_dict() for m in self.dialogue_history],
             "created_at": self.created_at.isoformat(),
         }
 
@@ -128,94 +146,41 @@ def format_trader_response_html(
     market_context: MarketContextSnapshot | None = None,
     query_text: str | None = None,
 ) -> str:
-    """Formats professional trader consultation into clean classical HTML without emojis or LLM tags."""
-    stance_badges = {
-        "BULLISH": "<b>[ЛОНГ]</b>",
-        "BEARISH": "<b>[ШОРТ]</b>",
-        "NEUTRAL": "<b>[ВНЕ РЫНКА]</b>",
-        "CAUTIOUS": "<b>[ОСТОРОЖНО]</b>",
-        "ARBITRAGE": "<b>[АРБИТРАЖ]</b>",
-    }
-    badge = stance_badges.get(response.market_stance.upper(), f"<b>[{response.market_stance}]</b>")
-    ticker_hdr = f" · {response.ticker}" if response.ticker else ""
+    """Formats professional trader response into clean classical HTML without emojis or robotic banners."""
+    lines: list[str] = []
 
-    lines = [
-        f"<b>Трейдинг-деск</b>{ticker_hdr}",
-    ]
-
-    # If a direct answer was provided (conversational / Q&A response)
-    if response.direct_answer:
-        if response.thesis_title and response.thesis_title not in {"Ответ деска", "Консультация", ""}:
-            lines.append(f"<b>Взгляд:</b> {badge} — {html.escape(response.thesis_title)}")
-
-        # Live price details if available
-        if market_context and market_context.last_price is not None and market_context.last_price > 0:
-            price_str = f"<b>Текущая цена:</b> <code>{market_context.last_price:.2f} ₽</code>"
-            if market_context.spread_bps is not None and market_context.spread_bps > 0:
-                price_str += f" (спред: {market_context.spread_bps:.1f} б.п.)"
-            lines.append(price_str)
-            if market_context.positions_ratio_summary:
-                lines.append(f"<b>Позиции:</b> {html.escape(market_context.positions_ratio_summary)}")
-
-        lines.append("")
-        lines.append(html.escape(response.direct_answer))
-
-        if response.actionable_setup:
-            lines.append("")
-            lines.append(f"<b>Торговый сетап:</b> <i>{html.escape(response.actionable_setup)}</i>")
-
-        if response.key_levels:
-            lines.append("")
-            lines.append("<b>Ключевые уровни:</b>")
-            for lvl in response.key_levels:
-                lines.append(f"• {html.escape(lvl)}")
-
-        if response.risk_factors:
-            lines.append("")
-            lines.append("<b>Факторы риска:</b>")
-            for rf in response.risk_factors:
-                lines.append(f"• {html.escape(rf)}")
-
-        if response.news_catalysts:
-            lines.append("")
-            lines.append("<b>Источники:</b>")
-            for cat in response.news_catalysts[:2]:
-                lines.append(f"• <i>{html.escape(cat)}</i>")
-
-        return "\n".join(lines).strip()
-
-    # Default full structured template (for comprehensive asset review)
-    lines.append(f"<b>Взгляд:</b> {badge} — {html.escape(response.thesis_title)}")
-
-    # Add live price and stats header if available
+    # Live price details if market context exists
     if market_context and market_context.last_price is not None and market_context.last_price > 0:
-        price_str = f"<b>Текущая цена:</b> <code>{market_context.last_price:.2f} ₽</code>"
+        price_str = f"<b>{html.escape(market_context.ticker)}:</b> <code>{market_context.last_price:.2f} ₽</code>"
         if market_context.spread_bps is not None and market_context.spread_bps > 0:
             price_str += f" (спред: {market_context.spread_bps:.1f} б.п.)"
         lines.append(price_str)
         if market_context.positions_ratio_summary:
             lines.append(f"<b>Позиции:</b> {html.escape(market_context.positions_ratio_summary)}")
-
-    lines.append("")
-
-    if response.microstructure_analysis:
-        lines.append("<b>Микроструктура и лента:</b>")
-        lines.append(html.escape(response.microstructure_analysis))
         lines.append("")
 
-    if response.news_drivers_analysis:
-        lines.append("<b>Новостной фон и драйверы:</b>")
-        lines.append(html.escape(response.news_drivers_analysis))
+    # Direct answer text or analytical body
+    if response.direct_answer:
+        lines.append(html.escape(response.direct_answer))
+    else:
+        if response.thesis_title and response.thesis_title not in {"Ответ деска", "Консультация", ""}:
+            lines.append(f"<i>{html.escape(response.thesis_title)}</i>\n")
+        if response.microstructure_analysis:
+            lines.append(html.escape(response.microstructure_analysis))
+            lines.append("")
+        if response.news_drivers_analysis:
+            lines.append(html.escape(response.news_drivers_analysis))
+            lines.append("")
+
+    if response.actionable_setup:
         lines.append("")
+        lines.append(f"<b>Торговый сетап:</b> <i>{html.escape(response.actionable_setup)}</i>")
 
     if response.key_levels:
+        lines.append("")
         lines.append("<b>Ключевые уровни:</b>")
         for lvl in response.key_levels:
             lines.append(f"• {html.escape(lvl)}")
-        lines.append("")
-
-    if response.actionable_setup:
-        lines.append(f"<b>Торговый сетап:</b> <i>{html.escape(response.actionable_setup)}</i>")
 
     if response.risk_factors:
         lines.append("")
@@ -226,7 +191,7 @@ def format_trader_response_html(
     if response.news_catalysts:
         lines.append("")
         lines.append("<b>Источники:</b>")
-        for cat in response.news_catalysts[:3]:
+        for cat in response.news_catalysts[:2]:
             lines.append(f"• <i>{html.escape(cat)}</i>")
 
     return "\n".join(lines).strip()
