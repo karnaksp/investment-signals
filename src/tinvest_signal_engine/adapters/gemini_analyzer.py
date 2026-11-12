@@ -37,7 +37,7 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         self._gatekeeper_model = gatekeeper_model
         self._analyzer_model = analyzer_model
         self._timeout = timeout_seconds
-        self._client = client or httpx.Client(timeout=timeout_seconds)
+        self._client = client or httpx.Client(timeout=timeout_seconds, trust_env=False)
 
     @property
     def enabled(self) -> bool:

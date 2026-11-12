@@ -109,7 +109,7 @@ class RssNewsProvider(NewsProviderPort):
             )
         )
         self._ttl = cache_ttl_seconds
-        self._client = client or httpx.Client(timeout=4.0, follow_redirects=True)
+        self._client = client or httpx.Client(timeout=4.0, follow_redirects=True, trust_env=False)
         self._cached_articles: list[NewsArticle] = []
         self._last_fetch_ts: float = 0.0
 
