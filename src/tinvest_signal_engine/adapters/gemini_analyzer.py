@@ -12,8 +12,18 @@ from tinvest_signal_engine.application.signal_llm import LlmAnalyzerPort
 from tinvest_signal_engine.domain.signal_llm import (
     AssetPositionAnalysisResult,
     AssetPositionLlmContext,
+    DerivativesAnomalyContext,
+    DerivativesAnomalyResult,
+    DividendGapContext,
+    DividendGapDecision,
     LlmAnalysisResult,
     LlmSignalContext,
+    LossAttributionContext,
+    LossAttributionResult,
+    PreMarketBriefingContext,
+    PreMarketBriefingResult,
+    RetracementGuardContext,
+    RetracementGuardDecision,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,6 +301,374 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         except Exception as ex:
             logger.warning("Gemini position analyzer error for %s: %s", context.commodity, ex)
             return None
+
+    def generate_premarket_briefing(
+        self, context: PreMarketBriefingContext
+    ) -> PreMarketBriefingResult | None:
+        """Synthesize daily pre-market briefing and morning trading compass."""
+        if not self.enabled:
+            return None
+
+        news_text = "\n".join(
+            f"- {a.title} ({a.source})" for a in context.overnight_news[:4]
+        ) or "Существенных ночных корпоративных новостей нет."
+
+        corp_text = "\n".join(f"- {e}" for e in context.corporate_events[:4]) or "Плановых отчетов на утро нет."
+        macro_text = "\n".join(f"- {e}" for e in context.macro_events[:3]) or "Ключевых макро-релизов до полудня нет."
+
+        system_prompt = (
+            "Ты — главный стратег инвестиционной компании по российскому фондовому и срочному рынку (MOEX). "
+            "Твоя задача — сформировать емкий, профессиональный 'Утренний компас сессии' перед открытием торгов."
+        )
+
+        brent_str = f"{context.brent_price:g}" if context.brent_price is not None else "Н/Д"
+        brent_d = f"{context.brent_change_pct:+.1f}%" if context.brent_change_pct is not None else "+0.0%"
+        gold_str = f"{context.gold_price:g}" if context.gold_price is not None else "Н/Д"
+        gold_d = f"{context.gold_change_pct:+.1f}%" if context.gold_change_pct is not None else "+0.0%"
+
+        user_prompt = f"""ДАТА: {context.trading_date}
+ВНЕШНИЙ ФОН И СЫРЬЕ:
+- Нефть Brent: {brent_str} (изм: {brent_d})
+- Золото: {gold_str} (изм: {gold_d})
+- Азиатские площадки: {context.asia_sentiment or 'смешанная динамика'}
+- Фьючерсы США: {context.us_futures_sentiment or 'нейтрально'}
+
+НОЧНЫЕ НОВОСТИ:
+{news_text}
+
+СОБЫТИЯ И КАЛЕНДАРЬ:
+{corp_text}
+{macro_text}
+
+Сформируй JSON со следующими полями:
+- "overall_sentiment": строго одно из: "ПОЗИТИВНЫЙ", "НЕГАТИВНЫЙ", "НЕЙТРАЛЬНЫЙ", "СМЕШАННЫЙ"
+- "sentiment_headline": емкий заголовок баланса сил (1 строка на русском)
+- "key_drivers": список из 2-3 ключевых рыночных драйверов (короткие фразы на русском)
+- "focus_sectors": список из 2-3 секторов, где ожидается активность (на русском)
+- "risk_factors": список из 1-2 главных рисков утренней сессии (на русском)
+- "actionable_summary": практическое резюме для трейдера перед открытием (1-2 предложения на русском)
+"""
+        url = f"{GEMINI_API_BASE}/models/{self._analyzer_model}:generateContent"
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 450,
+                "temperature": 0.2,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+
+        try:
+            resp = self._post_with_fallback(url, payload)
+            if resp is None or resp.status_code != 200:
+                return None
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            parsed = json.loads(raw_text)
+            usage = data.get("usageMetadata", {})
+            tokens_used = int(usage.get("totalTokenCount") or 0)
+
+            return PreMarketBriefingResult(
+                trading_date=context.trading_date,
+                overall_sentiment=str(parsed.get("overall_sentiment") or "НЕЙТРАЛЬНЫЙ").strip(),
+                sentiment_headline=str(parsed.get("sentiment_headline") or "").strip(),
+                key_drivers=tuple(str(x).strip() for x in (parsed.get("key_drivers") or [])),
+                focus_sectors=tuple(str(x).strip() for x in (parsed.get("focus_sectors") or [])),
+                risk_factors=tuple(str(x).strip() for x in (parsed.get("risk_factors") or [])),
+                actionable_summary=str(parsed.get("actionable_summary") or "").strip(),
+                model_used=self._analyzer_model,
+                tokens_used=tokens_used,
+            )
+        except Exception as ex:
+            logger.warning("Gemini premarket briefing error: %s", ex)
+            return None
+
+    def evaluate_retracement_guard(
+        self, context: RetracementGuardContext
+    ) -> RetracementGuardDecision | None:
+        """Check if morning opening gap is caused by corporate shock vs technical."""
+        if not self.enabled:
+            return None
+
+        news_text = "\n".join(
+            f"- {a.title} ({a.source})" for a in context.news_items[:4]
+        ) or "Свежих новостей по тикеру за последние 12 часов нет."
+
+        system_prompt = (
+            "Ты — риск-менеджер торговой системы утреннего возврата цены (Morning Retracement) на MOEX. "
+            "Твоя задача — не допустить вход в сделку на закрытие гэпа, если гэп вызван корпоративным или санкционным шоком "
+            "(отмена дивидендов, допэмиссия, санкции, авария, неожиданный убыток), так как при шоке цена продолжит безоткатное движение."
+        )
+
+        gap_side = "ВНИЗ" if context.gap_direction.lower() in ("up", "вверх") else "ВВЕРХ"
+
+        user_prompt = f"""ТИКЕР: {context.ticker}
+НАПРАВЛЕНИЕ ГЭПА: {gap_side}
+РАЗМЕР ГЭПА: {context.gap_pct:.2f}%
+ВЕРОЯТНОСТЬ ВОЗВРАТА ПО СТАТИСТИКЕ: {context.model_probability * 100:.0f}%
+
+СВЕЖИЕ НОВОСТИ И СОБЫТИЯ ПО ТИКЕРУ:
+{news_text}
+
+Оцени, вызван ли гэп фундаментальным шоком:
+Сформируй JSON со следующими полями:
+- "is_fundamental_shock": true если гэп вызван реальным шоком/новостью, false если это технический рыночный гэп
+- "verdict": строго одно из: "CONFIRMED" (гэп технический, возврат валиден), "WARNING" (есть новостной фон, повышенный риск), "BLOCKED" (сильный корпоративный шок, риск безоткатного тренда, сделка запрещена)
+- "shock_reason": в 1 предложении поясни причину гэпа или укажи 'Фундаментальный шок отсутствует'
+- "recommendation": краткая рекомендация трейдеру по стопу или размеру позиции (1 предложение)
+- "confidence_score": число от 0.0 до 1.0
+"""
+        url = f"{GEMINI_API_BASE}/models/{self._analyzer_model}:generateContent"
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 300,
+                "temperature": 0.1,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+
+        try:
+            resp = self._post_with_fallback(url, payload)
+            if resp is None or resp.status_code != 200:
+                return None
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            parsed = json.loads(raw_text)
+            usage = data.get("usageMetadata", {})
+            tokens_used = int(usage.get("totalTokenCount") or 0)
+
+            return RetracementGuardDecision(
+                ticker=context.ticker,
+                verdict=str(parsed.get("verdict") or "CONFIRMED").strip().upper(),
+                is_fundamental_shock=bool(parsed.get("is_fundamental_shock")),
+                shock_reason=str(parsed.get("shock_reason") or "").strip(),
+                recommendation=str(parsed.get("recommendation") or "").strip(),
+                confidence_score=float(parsed.get("confidence_score") or 0.8),
+                model_used=self._analyzer_model,
+                tokens_used=tokens_used,
+            )
+        except Exception as ex:
+            logger.warning("Gemini retracement guard error for %s: %s", context.ticker, ex)
+            return None
+
+    def analyze_loss_attribution(
+        self, context: LossAttributionContext
+    ) -> LossAttributionResult | None:
+        """Run post-mortem analysis for a losing signal."""
+        if not self.enabled:
+            return None
+
+        news_text = "\n".join(
+            f"- {a.title} ({a.source})" for a in context.subsequent_news[:3]
+        ) or "В период удержания позиции явных новостей не зафиксировано."
+
+        system_prompt = (
+            "Ты — квант-аналитик по аудиту точности торговых сигналов. "
+            "Твоя задача — провести объективный постмортем убыточного сигнала (Loss Attribution) для выявления причин стоп-лосса."
+        )
+
+        user_prompt = f"""СИГНАЛ: ID {context.signal_id} по {context.ticker}
+ТИП СИГНАЛА: {context.signal_type}
+НАПРАВЛЕНИЕ: {context.direction}
+ВХОД: {context.entry_price}, ВЫХОД: {context.exit_price} (убыток: {context.loss_pct:.2f}%)
+ГОРИЗОНТ: {context.horizon_seconds} сек
+НОВОСТИ ПОСЛЕ СИГНАЛА:
+{news_text}
+КОНТЕКСТ РЫНКА: {context.market_context or 'Стандартная сессия'}
+
+Сформируй JSON со следующими полями:
+- "category": строго одно из: "NEWS_SHOCK", "MARKET_PULLBACK", "LOW_LIQUIDITY_SLIPPAGE", "TREND_EXHAUSTION", "FALSE_BREAKOUT", "OTHER"
+- "category_ru": понятное название категории на русском (например 'Резкий новостной разворот', 'Общерыночная коррекция')
+- "root_cause": точная причина срабатывания стопа (1-2 предложения на русском)
+- "is_preventable": true если убыток можно было предотвратить предсигнальным фильтром, иначе false
+- "calibration_suggestion": практический совет для калибровки детектора (1 предложение на русском)
+"""
+        url = f"{GEMINI_API_BASE}/models/{self._analyzer_model}:generateContent"
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 300,
+                "temperature": 0.2,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+
+        try:
+            resp = self._post_with_fallback(url, payload)
+            if resp is None or resp.status_code != 200:
+                return None
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            parsed = json.loads(raw_text)
+            usage = data.get("usageMetadata", {})
+            tokens_used = int(usage.get("totalTokenCount") or 0)
+
+            return LossAttributionResult(
+                signal_id=context.signal_id,
+                category=str(parsed.get("category") or "OTHER").strip(),
+                category_ru=str(parsed.get("category_ru") or "Рыночный шум").strip(),
+                root_cause=str(parsed.get("root_cause") or "").strip(),
+                is_preventable=bool(parsed.get("is_preventable")),
+                calibration_suggestion=str(parsed.get("calibration_suggestion") or "").strip(),
+                model_used=self._analyzer_model,
+                tokens_used=tokens_used,
+            )
+        except Exception as ex:
+            logger.warning("Gemini loss attribution error for %s: %s", context.signal_id, ex)
+            return None
+
+    def interpret_derivatives_anomaly(
+        self, context: DerivativesAnomalyContext
+    ) -> DerivativesAnomalyResult | None:
+        """Interpret term structure, calendar spread or basis anomaly."""
+        if not self.enabled:
+            return None
+
+        system_prompt = (
+            "Ты — ведущий трейдер по срочному рынку (деривативы MOEX: фьючерсы на акции, валюты, сырье, индексы). "
+            "Твоя задача — перевести математическую дислокацию кривой или спреда в прикладную рыночную логику и сетап."
+        )
+
+        user_prompt = f"""СЕРИЯ / ИНСТРУМЕНТ: {context.chain_id} (тикер: {context.ticker})
+ТИП АНОМАЛИИ: {context.signal_type}
+МЕТРИКА: значение {context.metric_value:g}, baseline {context.baseline_value:g}, z-score {context.z_score:+.2f}
+КОНТРАКТЫ: ближний {context.front_contract or 'H1'}, дальний {context.back_contract or 'H2'}
+
+Сформируй JSON со следующими полями:
+- "anomaly_title": емкое русское название аномалии (например 'Расширение календарного спреда', 'Инверсия кривой / бэквордация')
+- "market_driver": вероятная экономическая причина (ставка ЦБ, дефицит физического актива, дивиденды, налоги) (1-2 предложения на русском)
+- "trade_setup": торговый сетап (календарный арбитраж, кэрри, покупка/продажа спреда) (1-2 предложения на русском)
+- "risk_assessment": ключевой риск данной конструкции (1 предложение на русском)
+- "confidence_score": число от 0.0 до 1.0
+"""
+        url = f"{GEMINI_API_BASE}/models/{self._analyzer_model}:generateContent"
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 350,
+                "temperature": 0.2,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+
+        try:
+            resp = self._post_with_fallback(url, payload)
+            if resp is None or resp.status_code != 200:
+                return None
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            parsed = json.loads(raw_text)
+            usage = data.get("usageMetadata", {})
+            tokens_used = int(usage.get("totalTokenCount") or 0)
+
+            return DerivativesAnomalyResult(
+                chain_id=context.chain_id,
+                anomaly_title=str(parsed.get("anomaly_title") or context.signal_type).strip(),
+                market_driver=str(parsed.get("market_driver") or "").strip(),
+                trade_setup=str(parsed.get("trade_setup") or "").strip(),
+                risk_assessment=str(parsed.get("risk_assessment") or "").strip(),
+                confidence_score=float(parsed.get("confidence_score") or 0.8),
+                model_used=self._analyzer_model,
+                tokens_used=tokens_used,
+            )
+        except Exception as ex:
+            logger.warning("Gemini derivatives interpretation error for %s: %s", context.chain_id, ex)
+            return None
+
+    def check_dividend_gap(
+        self, context: DividendGapContext
+    ) -> DividendGapDecision | None:
+        """Check whether price drop is an expected ex-dividend gap."""
+        if not self.enabled:
+            return None
+
+        news_text = "\n".join(
+            f"- {a.title} ({a.source})" for a in context.news_items[:3]
+        ) or "Новостей по тикеру не обнаружено."
+
+        system_prompt = (
+            "Ты — аналитик дивидендного календаря российского фондового рынка (MOEX). "
+            "Твоя задача — определить, является ли зафиксированное падение котировок плановой дивидендной отсечкой (экс-дивидендный день)."
+        )
+
+        user_prompt = f"""ТИКЕР: {context.ticker}
+ИЗМЕНЕНИЕ ЦЕНЫ: {context.price_change_pct:+.2f}%
+ДАТА СОБЫТИЯ: {context.event_date}
+НОВОСТИ ПО ЭМИТЕНТУ:
+{news_text}
+
+Сформируй JSON со следующими полями:
+- "is_dividend_gap": true если падение совпадает с дивидендной отсечкой, иначе false
+- "dividend_rub": ориентировочный размер дивиденда на акцию в рублях (число или null)
+- "yield_pct": ориентировочная дивидендная доходность в % (число или null)
+- "should_suppress_short": true если это дивидендный гэп и импульсные сигналы на шорт нужно подавить, иначе false
+- "explanation": краткое пояснение ситуации (1-2 предложения на русском)
+- "confidence_score": число от 0.0 до 1.0
+"""
+        url = f"{GEMINI_API_BASE}/models/{self._analyzer_model}:generateContent"
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 250,
+                "temperature": 0.1,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+
+        try:
+            resp = self._post_with_fallback(url, payload)
+            if resp is None or resp.status_code != 200:
+                return None
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            parsed = json.loads(raw_text)
+            usage = data.get("usageMetadata", {})
+            tokens_used = int(usage.get("totalTokenCount") or 0)
+
+            is_div = bool(parsed.get("is_dividend_gap"))
+            div_val = parsed.get("dividend_rub")
+            yield_val = parsed.get("yield_pct")
+            return DividendGapDecision(
+                ticker=context.ticker,
+                is_dividend_gap=is_div,
+                dividend_rub=float(div_val) if div_val is not None else None,
+                yield_pct=float(yield_val) if yield_val is not None else None,
+                should_suppress_short=bool(parsed.get("should_suppress_short", is_div)),
+                explanation=str(parsed.get("explanation") or "").strip(),
+                confidence_score=float(parsed.get("confidence_score") or 0.8),
+                model_used=self._analyzer_model,
+                tokens_used=tokens_used,
+            )
+        except Exception as ex:
+            logger.warning("Gemini dividend gap check error for %s: %s", context.ticker, ex)
+            return None
+
 
     def _post_with_fallback(
         self, url: str, payload: dict[str, Any]
