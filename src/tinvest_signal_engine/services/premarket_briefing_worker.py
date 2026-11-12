@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import logging
 import sys
 
-from tinvest_signal_engine.adapters.news_provider import TInvestNewsProvider
+from tinvest_signal_engine.adapters.news_provider import RssNewsProvider
 from tinvest_signal_engine.adapters.signal_llm_factory import get_global_llm_service
 from tinvest_signal_engine.domain.signal_llm import (
     PreMarketBriefingContext,
@@ -30,7 +30,7 @@ def build_premarket_context(
     now = datetime.now(tz=timezone.utc)
     date_str = trading_date or now.strftime("%Y-%m-%d")
 
-    news_provider = TInvestNewsProvider()
+    news_provider = RssNewsProvider()
     overnight_news = news_provider.get_recent_news("IMOEX", max_age_hours=16, limit=5)
 
     corporate_events = (

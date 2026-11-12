@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Any
 
-from tinvest_signal_engine.adapters.news_provider import TInvestNewsProvider
+from tinvest_signal_engine.adapters.news_provider import RssNewsProvider
 from tinvest_signal_engine.adapters.signal_llm_factory import get_global_llm_service
 from tinvest_signal_engine.domain.signal_llm import (
     LossAttributionContext,
@@ -34,7 +34,7 @@ def analyze_losing_signal(
         logger.error("LLM service is not configured (check GEMINI_API_KEY)")
         return None
 
-    news_provider = TInvestNewsProvider()
+    news_provider = RssNewsProvider()
     news = news_provider.get_recent_news(ticker, max_age_hours=6, limit=4)
 
     loss_pct = abs((exit_price - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
