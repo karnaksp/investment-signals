@@ -105,9 +105,13 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         if not self.enabled:
             return None
 
-        news_text = "\n".join(
-            f"- [{n.source or 'Новость'}] {n.title}" + (f": {n.summary}" if n.summary else "")
-            for n in context.news_items
+        news_text = (
+            "\n".join(
+                f"- [{n.source or 'Новость'}] {n.title}" + (f": {n.summary}" if n.summary else "")
+                for n in context.news_items
+            )
+            if context.news_items
+            else "Специфичных корпоративных новостей в ленте за последние часы не зафиксировано (технический импульс / крупная заявка)."
         )
 
         facts_lines = [

@@ -115,8 +115,10 @@ class SignalLlmEnrichmentUseCase:
         if signal_type not in self._relevant_types:
             return False
 
-        if quality_score is not None and quality_score < self._min_quality_score:
-            return False
+        if quality_score is not None:
+            norm_quality = quality_score / 100.0 if quality_score > 1.0 else quality_score
+            if norm_quality < self._min_quality_score:
+                return False
 
         now_ts = self._clock().timestamp()
         last_ts = self._last_analysis_at.get(ticker)
@@ -145,33 +147,40 @@ class SignalLlmEnrichmentUseCase:
         ):
             return payload
 
+        norm_quality = (
+            quality_score / 100.0 if (quality_score is not None and quality_score > 1.0)
+            else (quality_score or 0.0)
+        )
+
         try:
             # 1. Fetch raw candidate news articles
             raw_news = self._news_provider.get_recent_news(
                 ticker, max_age_hours=4, limit=5, payload=payload
             )
-            if not raw_news:
-                # If there are no news items at all in the window, do not call deep LLM
-                return payload
 
             # 2. Stage 1: Fast binary filter (Gatekeeper) per candidate news
             relevant_news: list[NewsArticle] = []
-            for item in raw_news:
-                try:
-                    if self._llm_analyzer.is_news_relevant(
-                        ticker, signal_type, item.title
-                    ):
-                        relevant_news.append(item)
-                except Exception as ex:
-                    logger.warning(
-                        "Error checking news relevance for %s: %s", ticker, ex
-                    )
+            if raw_news:
+                for item in raw_news:
+                    try:
+                        if self._llm_analyzer.is_news_relevant(
+                            ticker, signal_type, item.title
+                        ):
+                            relevant_news.append(item)
+                    except Exception as ex:
+                        logger.warning(
+                            "Error checking news relevance for %s: %s", ticker, ex
+                        )
 
+            # If no confirmed news, but quality is high (>= 0.80), proceed with technical analysis
             if not relevant_news:
-                logger.debug(
-                    "No relevant news passed binary gatekeeper for %s", ticker
-                )
-                return payload
+                if norm_quality < 0.80:
+                    logger.debug(
+                        "No relevant news passed binary gatekeeper for %s and quality %.2f < 0.80",
+                        ticker,
+                        norm_quality,
+                    )
+                    return payload
 
             # 3. Stage 2: Deep structured analysis
             context = LlmSignalContext(
