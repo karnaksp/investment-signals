@@ -165,7 +165,7 @@ def test_premarket_briefing_formatting(llm_service):
     assert res is not None
     assert res.overall_sentiment == "ПОЗИТИВНЫЙ"
     html = format_premarket_briefing_html(res)
-    assert "Утренний компас сессии" in html
+    assert "Утренний обзор сессии" in html
     assert "ПОЗИТИВНЫЙ" in html
     assert "Brent выше $74" in html
     assert "Нефтегаз" in html
@@ -193,7 +193,7 @@ def test_retracement_guard_confirmed_vs_blocked(llm_service):
     enriched_shock = llm_service.enrich_retracement_signal(shock_payload, ticker="SHOCK")
     assert enriched_shock["retracement_guard"]["verdict"] == "BLOCKED"
     assert enriched_shock["retracement_guard"]["is_fundamental_shock"] is True
-    assert "СИГНАЛ БЛОКИРОВАН" in enriched_shock["retracement_guard_html"]
+    assert "БЛОКИРОВАНО" in enriched_shock["retracement_guard_html"]
 
 
 def test_derivatives_anomaly_interpretation(llm_service):
@@ -214,7 +214,7 @@ def test_derivatives_anomaly_interpretation(llm_service):
     assert "derivatives_interpretation" in enriched
     assert enriched["derivatives_interpretation"]["anomaly_title"] == "Расширение календарного спреда"
     html = enriched["derivatives_interpretation_html"]
-    assert "Анализ структуры кривой" in html
+    assert "Структура кривой" in html
     assert "Покупка ближнего фьючерса" in html
 
 
@@ -293,7 +293,7 @@ def test_enrich_signal_for_delivery_integration(llm_service):
     )
     enriched = enrich_signal_for_delivery(ret_sig, llm_service=llm_service)
     assert "retracement_guard" in enriched.payload
-    assert "LLM Guard [ПОДТВЕРЖДЕНО]" in enriched.payload["telegram_html"]
+    assert "Контроль утреннего отката: ПОДТВЕРЖДЕНО" in enriched.payload["telegram_html"]
 
     # Test derivatives anomaly integration
     deriv_sig = _sample_signal(
@@ -308,7 +308,7 @@ def test_enrich_signal_for_delivery_integration(llm_service):
     )
     enriched_deriv = enrich_signal_for_delivery(deriv_sig, llm_service=llm_service)
     assert "derivatives_interpretation" in enriched_deriv.payload
-    assert "Анализ структуры кривой" in enriched_deriv.payload["telegram_html"]
+    assert "Структура кривой" in enriched_deriv.payload["telegram_html"]
 
     # Test dividend gap guard integration on sharp drop
     div_sig = _sample_signal(

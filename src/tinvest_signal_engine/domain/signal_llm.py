@@ -66,15 +66,15 @@ class LlmAnalysisResult:
 
 
 def format_llm_analysis_html(result: LlmAnalysisResult) -> str:
-    """Format structured LLM analysis into Telegram-compatible HTML."""
-    bias_emoji = {
-        "LONG": "🟢 <b>LONG</b>",
-        "SHORT": "🔴 <b>SHORT</b>",
-        "NEUTRAL": "⚪ <b>NEUTRAL</b>",
+    """Format structured analysis into clean Telegram-compatible HTML without emojis or LLM tags."""
+    bias_text = {
+        "LONG": "<b>LONG</b>",
+        "SHORT": "<b>SHORT</b>",
+        "NEUTRAL": "<b>NEUTRAL</b>",
     }.get(result.trade_bias.upper(), f"<b>{html.escape(result.trade_bias)}</b>")
 
     lines = [
-        f"🧠 <b>LLM-анализ:</b> {bias_emoji} · <i>{html.escape(result.suggested_action)}</i>"
+        f"<b>Анализ катализатора:</b> {bias_text} · <i>{html.escape(result.suggested_action)}</i>"
     ]
 
     if result.has_catalyst and result.catalyst_summary:
@@ -92,8 +92,8 @@ def format_llm_analysis_html(result: LlmAnalysisResult) -> str:
 
 
 def format_llm_analysis_plain(result: LlmAnalysisResult) -> str:
-    """Format structured LLM analysis into plain text for fallback."""
-    lines = [f"[LLM-анализ: {result.trade_bias} - {result.suggested_action}]"]
+    """Format structured analysis into plain text for fallback."""
+    lines = [f"[Анализ катализатора: {result.trade_bias} - {result.suggested_action}]"]
     if result.has_catalyst and result.catalyst_summary:
         lines.append(f"Катализатор: {result.catalyst_summary}")
     if result.risk_factor:
@@ -151,14 +151,14 @@ class AssetPositionAnalysisResult:
 def format_position_analysis_html(
     result: AssetPositionAnalysisResult, commodity_title: str = ""
 ) -> str:
-    """Format position analysis into a clean Telegram HTML card."""
+    """Format position analysis into a clean Telegram HTML card without emojis or LLM tags."""
     sentiment_badges = {
-        "BULLISH": "🟢 <b>BULLISH</b>",
-        "BEARISH": "🔴 <b>BEARISH</b>",
-        "NEUTRAL": "⚪ <b>NEUTRAL</b>",
-        "OVERHEATED_BULLISH": "🟡 <b>ПЕРЕГРЕТЫЙ ЛОНГ</b>",
-        "OVERHEATED_BEARISH": "🟡 <b>ПЕРЕГРЕТЫЙ ШОРТ</b>",
-        "SQUEEZE_RISK": "⚠️ <b>РИСК СКВИЗА</b>",
+        "BULLISH": "<b>BULLISH</b>",
+        "BEARISH": "<b>BEARISH</b>",
+        "NEUTRAL": "<b>NEUTRAL</b>",
+        "OVERHEATED_BULLISH": "<b>ПЕРЕГРЕТЫЙ ЛОНГ</b>",
+        "OVERHEATED_BEARISH": "<b>ПЕРЕГРЕТЫЙ ШОРТ</b>",
+        "SQUEEZE_RISK": "<b>РИСК СКВИЗА</b>",
     }
     badge = sentiment_badges.get(
         result.sentiment.upper(), f"<b>{html.escape(result.sentiment)}</b>"
@@ -166,7 +166,7 @@ def format_position_analysis_html(
     title = html.escape(commodity_title or result.commodity.upper())
 
     lines = [
-        f"🧠 <b>Анализ позиционирования · {title}</b> ({badge})",
+        f"<b>Анализ позиционирования · {title}</b> ({badge})",
     ]
     if result.bias_title:
         lines.append(f"<b>{html.escape(result.bias_title)}</b>\n")
@@ -208,7 +208,7 @@ def format_position_analysis_plain(
 
 
 # ==============================================================================
-# 1. Pre-Market Briefing Models (Премаркет-брифинг и утренний компас сессии)
+# 1. Pre-Market Briefing Models (Премаркет-брифинг и утренний контекст сессии)
 # ==============================================================================
 
 @dataclass(frozen=True)
@@ -229,7 +229,7 @@ class PreMarketBriefingContext:
 
 @dataclass(frozen=True)
 class PreMarketBriefingResult:
-    """Synthesized pre-market intelligence and morning compass."""
+    """Synthesized pre-market intelligence."""
 
     trading_date: str
     overall_sentiment: str  # ПОЗИТИВНЫЙ, НЕГАТИВНЫЙ, НЕЙТРАЛЬНЫЙ, СМЕШАННЫЙ
@@ -256,40 +256,32 @@ class PreMarketBriefingResult:
 
 
 def format_premarket_briefing_html(result: PreMarketBriefingResult) -> str:
-    """Format morning pre-market briefing into Telegram HTML."""
-    sentiment_emojis = {
-        "ПОЗИТИВНЫЙ": "🟢",
-        "НЕГАТИВНЫЙ": "🔴",
-        "НЕЙТРАЛЬНЫЙ": "⚪",
-        "СМЕШАННЫЙ": "🟡",
-    }
-    emoji = sentiment_emojis.get(result.overall_sentiment.upper(), "🧭")
-
+    """Format morning pre-market briefing into clean Telegram HTML without emojis."""
     lines = [
-        f"🌅 <b>Утренний компас сессии · {html.escape(result.trading_date)}</b>",
-        f"<b>Фон:</b> {emoji} <b>{html.escape(result.overall_sentiment)}</b> — {html.escape(result.sentiment_headline)}\n",
+        f"<b>Утренний обзор сессии · {html.escape(result.trading_date)}</b>",
+        f"<b>Фон:</b> <b>{html.escape(result.overall_sentiment)}</b> — {html.escape(result.sentiment_headline)}\n",
     ]
 
     if result.key_drivers:
-        lines.append("📊 <b>Ключевые драйверы:</b>")
+        lines.append("<b>Ключевые драйверы:</b>")
         for d in result.key_drivers:
             lines.append(f"• {html.escape(d)}")
         lines.append("")
 
     if result.focus_sectors:
-        lines.append("🎯 <b>Сектора в фокусе:</b>")
+        lines.append("<b>Сектора в фокусе:</b>")
         for s in result.focus_sectors:
             lines.append(f"• {html.escape(s)}")
         lines.append("")
 
     if result.risk_factors:
-        lines.append("⚠️ <b>Факторы риска:</b>")
+        lines.append("<b>Факторы риска:</b>")
         for r in result.risk_factors:
             lines.append(f"• {html.escape(r)}")
         lines.append("")
 
     if result.actionable_summary:
-        lines.append(f"💡 <b>Резюме для открытия:</b> <i>{html.escape(result.actionable_summary)}</i>")
+        lines.append(f"<b>Резюме для открытия:</b> <i>{html.escape(result.actionable_summary)}</i>")
 
     return "\n".join(lines).strip()
 
@@ -339,20 +331,20 @@ class RetracementGuardDecision:
 
 
 def format_retracement_guard_html(decision: RetracementGuardDecision) -> str:
-    """Format Retracement Guard advisory note for Telegram."""
+    """Format Retracement Guard advisory note for Telegram without emojis or LLM tags."""
     if decision.verdict == "BLOCKED" or decision.is_fundamental_shock:
         return (
-            f"🚫 <b>LLM Guard [СИГНАЛ БЛОКИРОВАН]:</b> Гэп вызван фундаментальным шоком: "
+            f"<b>Контроль утреннего отката: БЛОКИРОВАНО</b> — Гэп вызван фундаментальным шоком: "
             f"{html.escape(decision.shock_reason)}. "
             f"<i>{html.escape(decision.recommendation)}</i>"
         )
     if decision.verdict == "WARNING":
         return (
-            f"⚠️ <b>LLM Guard [ВНИМАНИЕ]:</b> Гэп имеет фундаментальный фон ({html.escape(decision.shock_reason)}). "
+            f"<b>Контроль утреннего отката: ВНИМАНИЕ</b> — Гэп имеет фундаментальный фон ({html.escape(decision.shock_reason)}). "
             f"Повышенный риск безоткатного движения! <i>{html.escape(decision.recommendation)}</i>"
         )
     return (
-        f"✅ <b>LLM Guard [ПОДТВЕРЖДЕНО]:</b> Фундаментальных шоков не обнаружено, гэп технический. "
+        f"<b>Контроль утреннего отката: ПОДТВЕРЖДЕНО</b> — Фундаментальных шоков не обнаружено, гэп технический. "
         f"<i>{html.escape(decision.recommendation or 'Статистическая вероятность возврата валидна.')}</i>"
     )
 
@@ -404,10 +396,10 @@ class LossAttributionResult:
 
 
 def format_loss_attribution_html(result: LossAttributionResult, ticker: str = "") -> str:
-    """Format signal post-mortem into Telegram HTML."""
+    """Format signal post-mortem into Telegram HTML without emojis."""
     preventable_str = "Да (фильтруемо новостным гейтом)" if result.is_preventable else "Нет (рыночный шум / стохастика)"
     lines = [
-        f"📉 <b>Постмортем сигнала · {html.escape(ticker or result.signal_id[:8])}</b>",
+        f"<b>Постмортем сигнала · {html.escape(ticker or result.signal_id[:8])}</b>",
         f"• <b>Причина:</b> <b>{html.escape(result.category_ru)}</b> ({html.escape(result.category)})",
         f"• <b>Анализ:</b> {html.escape(result.root_cause)}",
         f"• <b>Предотвратимость:</b> {preventable_str}",
@@ -463,9 +455,9 @@ class DerivativesAnomalyResult:
 
 
 def format_derivatives_anomaly_html(result: DerivativesAnomalyResult) -> str:
-    """Format derivatives anomaly interpretation for Telegram."""
+    """Format derivatives anomaly interpretation for Telegram without emojis."""
     lines = [
-        f"📐 <b>Анализ структуры кривой ({html.escape(result.anomaly_title)})</b>",
+        f"<b>Структура кривой ({html.escape(result.anomaly_title)})</b>",
         f"• <b>Причина дислокации:</b> {html.escape(result.market_driver)}",
         f"• <b>Торговый сетап:</b> <i>{html.escape(result.trade_setup)}</i>",
     ]
@@ -520,9 +512,9 @@ class DividendGapDecision:
 
 
 def format_dividend_gap_html(decision: DividendGapDecision) -> str:
-    """Format dividend gap explanation for Telegram."""
+    """Format dividend gap explanation for Telegram without emojis."""
     lines = [
-        f"ℹ️ <b>Дивидендная отсечка ({html.escape(decision.ticker)})</b>"
+        f"<b>Дивидендная отсечка ({html.escape(decision.ticker)})</b>"
     ]
     details = []
     if decision.dividend_rub:
@@ -534,6 +526,6 @@ def format_dividend_gap_html(decision: DividendGapDecision) -> str:
     if decision.explanation:
         lines.append(f"• <b>Комментарий:</b> {html.escape(decision.explanation)}")
     if decision.should_suppress_short:
-        lines.append("• <b>Статус:</b> <i>Плановый технический гэп. Алерты на панический сброс подавлены.</i>")
+        lines.append("• <b>Статус:</b> <i>Плановый технический гэп. Алерты на шорт подавлены.</i>")
     return "\n".join(lines)
 

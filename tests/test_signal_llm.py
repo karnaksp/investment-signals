@@ -346,7 +346,7 @@ def test_signal_enrichment_integration_with_llm() -> None:
 
     assert "llm_analysis" in enriched.payload
     tg_html = enriched.payload["telegram_html"]
-    assert "LLM-анализ:" in tg_html
+    assert "Анализ катализатора:" in tg_html
     assert "LONG" in tg_html
     assert "BUY_MOMENTUM" in tg_html
     assert "Рекордные дивиденды 33 руб." in tg_html

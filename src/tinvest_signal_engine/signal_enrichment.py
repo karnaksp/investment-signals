@@ -137,7 +137,7 @@ def enrich_signal_for_delivery(
     if p.get("dividend_gap_html"):
         tg_html = f"{p['dividend_gap_html']}\n\n{tg_html}"
         if p.get("dividend_gap", {}).get("should_suppress_short"):
-            summary_ru = f"ℹ️ [ДИВГЭП] {signal.ticker}: плановый экс-дивидендный гэп"
+            summary_ru = f"[ДИВГЭП] {signal.ticker}: плановый экс-дивидендный гэп"
     payload = {
         **p,
         "summary_en": summary_en,

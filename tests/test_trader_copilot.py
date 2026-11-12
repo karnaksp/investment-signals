@@ -64,7 +64,7 @@ def test_domain_models_and_formatting():
 
     html_out = format_trader_response_html(response, market_context=snapshot)
     assert "<b>Трейдинг-деск</b> · SBER" in html_out
-    assert "LONG / ЛОНГ" in html_out
+    assert "[ЛОНГ]" in html_out
     assert "298.50 ₽" in html_out
     assert "Удержание выше VWAP" in html_out
     assert "Поддержка: 297.50" in html_out

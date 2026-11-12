@@ -126,19 +126,19 @@ def format_trader_response_html(
     market_context: MarketContextSnapshot | None = None,
     query_text: str | None = None,
 ) -> str:
-    """Formats professional trader consultation into clean HTML for Telegram."""
+    """Formats professional trader consultation into clean classical HTML without emojis or LLM tags."""
     stance_badges = {
-        "BULLISH": "🟢 <b>LONG / ЛОНГ</b>",
-        "BEARISH": "🔴 <b>SHORT / ШОРТ</b>",
-        "NEUTRAL": "⚪ <b>FLAT / ВНЕ РЫНКА</b>",
-        "CAUTIOUS": "🟡 <b>ОСТОРОЖНО / ЗАБОР</b>",
-        "ARBITRAGE": "📐 <b>АРБИТРАЖ / СПРЕД</b>",
+        "BULLISH": "<b>[ЛОНГ]</b>",
+        "BEARISH": "<b>[ШОРТ]</b>",
+        "NEUTRAL": "<b>[ВНЕ РЫНКА]</b>",
+        "CAUTIOUS": "<b>[ОСТОРОЖНО]</b>",
+        "ARBITRAGE": "<b>[АРБИТРАЖ]</b>",
     }
-    badge = stance_badges.get(response.market_stance.upper(), f"🧭 <b>{response.market_stance}</b>")
+    badge = stance_badges.get(response.market_stance.upper(), f"<b>[{response.market_stance}]</b>")
     ticker_hdr = f" · {response.ticker}" if response.ticker else ""
 
     lines = [
-        f"🏛 <b>Трейдинг-деск</b>{ticker_hdr}",
+        f"<b>Трейдинг-деск</b>{ticker_hdr}",
         f"<b>Взгляд:</b> {badge} — {html.escape(response.thesis_title)}",
     ]
 
@@ -154,33 +154,33 @@ def format_trader_response_html(
     lines.append("")
 
     if response.microstructure_analysis:
-        lines.append("📊 <b>Микроструктура и лента:</b>")
+        lines.append("<b>Микроструктура и лента:</b>")
         lines.append(html.escape(response.microstructure_analysis))
         lines.append("")
 
     if response.news_drivers_analysis:
-        lines.append("📰 <b>Новостной фон и драйверы:</b>")
+        lines.append("<b>Новостной фон и драйверы:</b>")
         lines.append(html.escape(response.news_drivers_analysis))
         lines.append("")
 
     if response.key_levels:
-        lines.append("🎯 <b>Ключевые уровни:</b>")
+        lines.append("<b>Ключевые уровни:</b>")
         for lvl in response.key_levels:
             lines.append(f"• {html.escape(lvl)}")
         lines.append("")
 
     if response.actionable_setup:
-        lines.append(f"💡 <b>Торговый сетап:</b> <i>{html.escape(response.actionable_setup)}</i>")
+        lines.append(f"<b>Торговый сетап:</b> <i>{html.escape(response.actionable_setup)}</i>")
 
     if response.risk_factors:
         lines.append("")
-        lines.append("⚠️ <b>Факторы риска:</b>")
+        lines.append("<b>Факторы риска:</b>")
         for rf in response.risk_factors:
             lines.append(f"• {html.escape(rf)}")
 
     if response.news_catalysts:
         lines.append("")
-        lines.append("🔗 <b>Интернет-источники:</b>")
+        lines.append("<b>Источники:</b>")
         for cat in response.news_catalysts[:3]:
             lines.append(f"• <i>{html.escape(cat)}</i>")
 
