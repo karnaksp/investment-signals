@@ -14,7 +14,11 @@ from .terminal_links import (
 )
 
 
-def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
+def enrich_signal_for_delivery(
+    signal: TriggerSignal,
+    *,
+    llm_service: Any | None = None,
+) -> TriggerSignal:
     if signal.signal_type in {"market_session_open", "market_session_close", "market_session_break_start", "market_session_break_end"}:
         from .adapters.session_open_message import render_session_boundary_html
 
@@ -36,7 +40,7 @@ def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
     instrument_url = t_invest_instrument_url(
         ticker=signal.ticker, class_code=signal.class_code
     )
-    p = signal.payload or {}
+    p = dict(signal.payload or {})
     ep = p.get("event_payload") if isinstance(p.get("event_payload"), dict) else {}
     instrument_uid = (
         (p.get("instrument_uid") or p.get("uid") or ep.get("uid") or "")
@@ -50,6 +54,27 @@ def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
         class_code=signal.class_code,
     )
     interpretation = build_signal_interpretation(signal)
+
+    # Optional LLM enrichment
+    if llm_service is not False:
+        effective_llm = llm_service
+        if effective_llm is None:
+            from .adapters.signal_llm_factory import get_global_llm_service
+
+            effective_llm = get_global_llm_service()
+
+        if effective_llm is not None and "llm_analysis" not in p:
+            q_score = quality.get("quality_score")
+            q_float = float(q_score) if q_score is not None else None
+            p = effective_llm.enrich_payload(
+                ticker=signal.ticker,
+                signal_type=signal.signal_type,
+                payload=p,
+                quality_score=q_float,
+                headline_ru=str(interpretation.get("headline_ru") or ""),
+            )
+            signal = replace(signal, payload=p)
+
     summary_ru = build_summary_ru(signal, quality)
     tg_html = build_telegram_html(
         signal,
@@ -58,7 +83,7 @@ def enrich_signal_for_delivery(signal: TriggerSignal) -> TriggerSignal:
         instrument_page_url=instrument_url,
     )
     payload = {
-        **signal.payload,
+        **p,
         "summary_en": summary_en,
         "summary_ru": summary_ru,
         "terminal_url": terminal_search_url,

@@ -17,6 +17,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
         {
             "ADMIN_API_TOKEN",
             "CLICKHOUSE_PASSWORD",
+            "GEMINI_API_KEY",
             "POSTGRES_PASSWORD",
             "REDIS_URL",
             "TELEGRAM_BOT_TOKEN",
@@ -33,6 +34,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "detector": frozenset(
         {
             "ALERT_WEBHOOK_URL",
+            "GEMINI_API_KEY",
             "POSTGRES_PASSWORD",
             "REDIS_URL",
             "TELEGRAM_BOT_TOKEN",
@@ -43,6 +45,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "delivery_worker": frozenset(
         {
             "ALERT_WEBHOOK_URL",
+            "GEMINI_API_KEY",
             "POSTGRES_PASSWORD",
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
@@ -377,6 +380,14 @@ class RuntimeSettings:
     processed_event_retention_days: int
     processed_event_purge_interval_seconds: int
     processed_event_purge_batch_size: int
+    gemini_api_key: str | None = None
+    gemini_enabled: bool = True
+    gemini_analyzer_model: str = "gemini-3.5-flash"
+    gemini_gatekeeper_model: str = "gemini-3.5-flash-lite"
+    gemini_timeout_seconds: float = 4.0
+    gemini_cooldown_seconds: int = 1800
+    gemini_min_quality_score: float = 0.65
+    gemini_news_rss_urls: str | None = None
 
     @classmethod
     def from_env(cls, *, service_name: str | None = None) -> "RuntimeSettings":
@@ -741,6 +752,31 @@ class RuntimeSettings:
                     1,
                     int(os.getenv("PROCESSED_EVENT_PURGE_BATCH_SIZE", "100000")),
                 ),
+            ),
+            gemini_api_key=load_secret(
+                "GEMINI_API_KEY", service_name=service_name
+            )
+            or None,
+            gemini_enabled=_env_bool("GEMINI_ENABLED", default=True),
+            gemini_analyzer_model=(
+                os.getenv("GEMINI_ANALYZER_MODEL", "gemini-3.5-flash").strip()
+                or "gemini-3.5-flash"
+            ),
+            gemini_gatekeeper_model=(
+                os.getenv("GEMINI_GATEKEEPER_MODEL", "gemini-3.5-flash-lite").strip()
+                or "gemini-3.5-flash-lite"
+            ),
+            gemini_timeout_seconds=float(
+                os.getenv("GEMINI_TIMEOUT_SECONDS", "4.0")
+            ),
+            gemini_cooldown_seconds=int(
+                os.getenv("GEMINI_COOLDOWN_SECONDS", "1800")
+            ),
+            gemini_min_quality_score=float(
+                os.getenv("GEMINI_MIN_QUALITY_SCORE", "0.65")
+            ),
+            gemini_news_rss_urls=(
+                (os.getenv("GEMINI_NEWS_RSS_URLS") or "").strip() or None
             ),
         )
 
