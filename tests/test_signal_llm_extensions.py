@@ -357,3 +357,15 @@ def test_enrich_signal_for_delivery_integration(llm_service):
     assert "position_analysis" in enriched_pos.payload
     assert "Анализ позиционирования" in enriched_pos.payload["telegram_html"]
 
+    # Test premarket briefing integration
+    briefing_sig = _sample_signal(
+        signal_id="briefing-001",
+        ticker="MARKET",
+        signal_type="premarket_briefing",
+        summary="Утренний компас сессии: СМЕШАННЫЙ",
+        payload={"telegram_html": "<b>Утренний обзор сессии · 2026-11-13</b>"},
+    )
+    enriched_briefing = enrich_signal_for_delivery(briefing_sig, llm_service=llm_service)
+    assert enriched_briefing.payload["telegram_html"] == "<b>Утренний обзор сессии · 2026-11-13</b>"
+
+

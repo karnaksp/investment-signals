@@ -26,6 +26,17 @@ def enrich_signal_for_delivery(
             **signal.payload, "summary_ru": signal.summary,
             "telegram_html": render_session_boundary_html(signal.payload),
         })
+    if signal.signal_type == "premarket_briefing":
+        p = dict(signal.payload or {})
+        return replace(
+            signal,
+            summary=signal.summary,
+            payload={
+                **p,
+                "summary_ru": signal.summary,
+                "telegram_html": p.get("telegram_html") or signal.summary,
+            },
+        )
     if signal.signal_type == "daily_futures_position_report":
         from .adapters.daily_positions_report import render_daily_positions_html
 

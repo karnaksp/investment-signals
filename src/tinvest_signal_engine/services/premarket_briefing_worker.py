@@ -92,25 +92,7 @@ def run_premarket_briefing(*, preview: bool = False, send: bool = False) -> str 
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
             )
-            from tinvest_signal_engine.models import TriggerSignal
-            dummy_signal = TriggerSignal(
-                signal_id=f"briefing-{context.trading_date}",
-                detected_at=datetime.now(tz=timezone.utc),
-                instrument_id="MARKET_BRIEFING",
-                ticker="MARKET",
-                class_code="BRIEFING",
-                alias="market_briefing",
-                source_event_type="scheduled_briefing",
-                signal_type="premarket_briefing",
-                severity=1,
-                metric_value=0.0,
-                baseline_value=0.0,
-                z_score=0.0,
-                window_seconds=86400,
-                summary=f"Утренний компас сессии: {result.overall_sentiment}",
-                payload={"telegram_html": html_content},
-            )
-            sink.send(dummy_signal)
+            sink.send_message(html_content)
             logger.info("Pre-market briefing delivered to Telegram chat %s", chat_id)
         else:
             logger.warning("Telegram credentials not configured; briefing generated but not sent")
