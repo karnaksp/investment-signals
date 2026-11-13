@@ -107,9 +107,6 @@ class ConfiguredDeliverySender:
         self._telegram.close()
 
 
-def telegram_http_client() -> httpx.Client | TelegramMultiAddressHttpClient:
-    """Use the operator's HTTPS proxy when direct Telegram egress is blocked."""
-
-    if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
-        return httpx.Client(timeout=5.0, trust_env=True)
-    return TelegramMultiAddressHttpClient()
+def telegram_http_client() -> httpx.Client:
+    """HTTP client for Telegram deliveries using direct connection."""
+    return httpx.Client(timeout=10.0, trust_env=False)

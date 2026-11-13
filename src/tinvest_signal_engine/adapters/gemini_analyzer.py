@@ -688,34 +688,39 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
                 if match
                 else url
             )
-            try:
-                resp = self._client.post(
-                    target_url, headers=headers, json=payload, timeout=self._timeout
-                )
-                if resp.status_code == 400 and "thinkingConfig" in payload.get("generationConfig", {}):
-                    # Try without thinkingConfig
-                    fallback_payload = dict(payload)
-                    gen_cfg = dict(fallback_payload.get("generationConfig", {}))
-                    gen_cfg.pop("thinkingConfig", None)
-                    fallback_payload["generationConfig"] = gen_cfg
+            curr_payload = dict(payload)
+            if "lite" in model.lower() and "thinkingConfig" in curr_payload.get("generationConfig", {}):
+                gen_cfg = dict(curr_payload.get("generationConfig", {}))
+                gen_cfg.pop("thinkingConfig", None)
+                curr_payload["generationConfig"] = gen_cfg
+
+            for attempt in range(2):
+                try:
                     resp = self._client.post(
-                        target_url,
-                        headers=headers,
-                        json=fallback_payload,
-                        timeout=self._timeout,
+                        target_url, headers=headers, json=curr_payload, timeout=self._timeout
                     )
-                if resp.status_code == 200:
+                    if resp.status_code == 400 and "thinkingConfig" in curr_payload.get("generationConfig", {}):
+                        curr_payload = dict(curr_payload)
+                        gen_cfg = dict(curr_payload.get("generationConfig", {}))
+                        gen_cfg.pop("thinkingConfig", None)
+                        curr_payload["generationConfig"] = gen_cfg
+                        resp = self._client.post(
+                            target_url, headers=headers, json=curr_payload, timeout=self._timeout
+                        )
+                    if resp.status_code == 200:
+                        return resp
+                    if resp.status_code == 503 and attempt == 0:
+                        logger.warning("Gemini model %s returned HTTP 503, retrying in 1.5s...", model)
+                        time.sleep(1.5)
+                        continue
+                    if resp.status_code in {429, 404, 503}:
+                        logger.warning(
+                            "Gemini model %s returned HTTP %s, trying fallback...",
+                            model,
+                            resp.status_code,
+                        )
+                        break
                     return resp
-                if resp.status_code in {429, 404, 503}:
-                    logger.warning(
-                        "Gemini model %s returned HTTP %s, trying fallback...",
-                        model,
-                        resp.status_code,
-                    )
-                    if resp.status_code == 503:
-                        time.sleep(1.0)
-                    continue
-                return resp
-            except Exception as ex:
-                logger.warning("Gemini POST failed for %s: %s", model, ex)
-        return None
+                except Exception as ex:
+                    logger.warning("Gemini POST failed for %s: %s", model, ex)
+                    break

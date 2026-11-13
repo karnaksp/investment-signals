@@ -42,6 +42,14 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
             "TELEGRAM_MESSAGE_THREAD_ID",
         }
     ),
+    "premarket_briefing": frozenset(
+        {
+            "GEMINI_API_KEY",
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
+        }
+    ),
     "delivery_worker": frozenset(
         {
             "ALERT_WEBHOOK_URL",

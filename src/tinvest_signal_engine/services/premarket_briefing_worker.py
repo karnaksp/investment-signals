@@ -81,17 +81,32 @@ def run_premarket_briefing(*, preview: bool = False, send: bool = False) -> str 
         from tinvest_signal_engine.sinks import TelegramAlertSink
         import os
 
-        token = os.getenv("TELEGRAM_BOT_TOKEN") or load_secret("TELEGRAM_BOT_TOKEN", service_name="premarket_briefing")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID") or load_secret("TELEGRAM_CHAT_ID", service_name="premarket_briefing")
+        token = os.getenv("TELEGRAM_BOT_TOKEN") or load_secret("TELEGRAM_BOT_TOKEN", service_name="delivery_worker")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID") or load_secret("TELEGRAM_CHAT_ID", service_name="delivery_worker")
+        thread_raw = os.getenv("TELEGRAM_MESSAGE_THREAD_ID") or load_secret("TELEGRAM_MESSAGE_THREAD_ID", service_name="delivery_worker")
+        message_thread_id = int(str(thread_raw).strip()) if thread_raw and str(thread_raw).strip() else None
 
         if token and chat_id:
-            sink = TelegramAlertSink(bot_token=token, chat_id=chat_id)
+            sink = TelegramAlertSink(
+                bot_token=token,
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+            )
             from tinvest_signal_engine.models import TriggerSignal
             dummy_signal = TriggerSignal(
                 signal_id=f"briefing-{context.trading_date}",
                 detected_at=datetime.now(tz=timezone.utc),
+                instrument_id="MARKET_BRIEFING",
                 ticker="MARKET",
+                class_code="BRIEFING",
+                alias="market_briefing",
+                source_event_type="scheduled_briefing",
                 signal_type="premarket_briefing",
+                severity=1,
+                metric_value=0.0,
+                baseline_value=0.0,
+                z_score=0.0,
+                window_seconds=86400,
                 summary=f"Утренний компас сессии: {result.overall_sentiment}",
                 payload={"telegram_html": html_content},
             )
