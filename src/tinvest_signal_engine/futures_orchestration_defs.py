@@ -99,7 +99,43 @@ ruble_daily_positions_schedule = ScheduleDefinition(
 )
 
 
+@op(
+    name="generate_premarket_briefing",
+    tags={"component": "premarket-briefing"},
+    retry_policy=RetryPolicy(max_retries=2, delay=60),
+)
+def generate_premarket_briefing_op(context) -> None:
+    from tinvest_signal_engine.services.premarket_briefing_worker import run_premarket_briefing
+
+    html = run_premarket_briefing(send=True)
+    context.log.info("Premarket briefing generated and sent: %s characters", len(html or ""))
+
+
+@job(name="premarket_briefing_job")
+def premarket_briefing_job() -> None:
+    generate_premarket_briefing_op()
+
+
+premarket_briefing_schedule = ScheduleDefinition(
+    name="premarket_briefing",
+    job=premarket_briefing_job,
+    cron_schedule="0 9 * * 1-5",
+    execution_timezone="Europe/Moscow",
+    default_status=DefaultScheduleStatus.RUNNING,
+)
+
+
 defs = Definitions(
-    jobs=[refresh_liquid_futures_universe_job, shfe_daily_positions_job, ruble_daily_positions_job],
-    schedules=[nightly_futures_universe_schedule, shfe_daily_positions_schedule, ruble_daily_positions_schedule],
+    jobs=[
+        refresh_liquid_futures_universe_job,
+        shfe_daily_positions_job,
+        ruble_daily_positions_job,
+        premarket_briefing_job,
+    ],
+    schedules=[
+        nightly_futures_universe_schedule,
+        shfe_daily_positions_schedule,
+        ruble_daily_positions_schedule,
+        premarket_briefing_schedule,
+    ],
 )

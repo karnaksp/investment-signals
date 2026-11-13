@@ -29,11 +29,35 @@ def enrich_signal_for_delivery(
     if signal.signal_type == "daily_futures_position_report":
         from .adapters.daily_positions_report import render_daily_positions_html
 
-        # A dated bulletin is not a trading signal: no synthetic quality or
-        # probability, and no terminal link to an invented tradable ticker.
+        p = dict(signal.payload or {})
+        tg_html = render_daily_positions_html(p)
+        if llm_service is not False:
+            effective_llm = llm_service
+            if effective_llm is None:
+                from .adapters.signal_llm_factory import get_global_llm_service
+
+                effective_llm = get_global_llm_service()
+            if effective_llm is not None and "position_analysis" not in p:
+                try:
+                    analysis = effective_llm.analyze_asset_positions(p)
+                    if analysis:
+                        from .domain.signal_llm import format_position_analysis_html
+                        from .adapters.asset_position_cards import ASSET_NAMES
+
+                        commodity_title = ASSET_NAMES.get(str(p.get("commodity", "")).lower(), "")
+                        analysis_html = format_position_analysis_html(
+                            analysis, commodity_title=commodity_title
+                        )
+                        p["position_analysis"] = analysis.to_dict()
+                        p["position_analysis_html"] = analysis_html
+                        tg_html = f"{tg_html}\n\n{analysis_html}"
+                except Exception:
+                    pass
+
         return replace(signal, payload={
-            **signal.payload, "summary_ru": signal.summary,
-            "telegram_html": render_daily_positions_html(signal.payload),
+            **p,
+            "summary_ru": signal.summary,
+            "telegram_html": tg_html,
         })
     quality = compute_signal_quality(signal)
     summary_en = signal.payload.get("summary_en", signal.summary)

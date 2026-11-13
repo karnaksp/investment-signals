@@ -18,6 +18,7 @@ from tinvest_signal_engine.application.signal_llm import (
     SignalLlmEnrichmentUseCase,
 )
 from tinvest_signal_engine.domain.signal_llm import (
+    AssetPositionAnalysisResult,
     DerivativesAnomalyContext,
     DerivativesAnomalyResult,
     DividendGapContext,
@@ -64,7 +65,19 @@ class MockLlmAnalyzer(LlmAnalyzerPort):
         return None
 
     def analyze_position_report(self, context: Any) -> Any:
-        return None
+        return AssetPositionAnalysisResult(
+            commodity=context.commodity,
+            sentiment="BULLISH",
+            bias_title="Умные деньги в покупках",
+            smart_money_summary="Фонды наращивают длинные позиции",
+            crowd_bias="Розница в коротких позициях",
+            interpretation="Дисбаланс позиций в сторону роста",
+            macro_drivers="Спрос на физический металл",
+            actionable_advice="Удержание длинных позиций",
+            risk_factors="Укрепление доллара",
+            model_used="gemini-mock",
+            tokens_used=180,
+        )
 
     def generate_premarket_briefing(self, context: PreMarketBriefingContext) -> PreMarketBriefingResult | None:
         return PreMarketBriefingResult(
@@ -323,4 +336,24 @@ def test_enrich_signal_for_delivery_integration(llm_service):
     assert enriched_div.payload["dividend_gap"]["is_dividend_gap"] is True
     assert "Дивидендная отсечка" in enriched_div.payload["telegram_html"]
     assert "[ДИВГЭП]" in enriched_div.summary
+
+    # Test daily futures position report integration
+    pos_sig = _sample_signal(
+        signal_id="pos-001",
+        ticker="GOLD",
+        signal_type="daily_futures_position_report",
+        summary="Дневные позиции SHFE",
+        payload={
+            "commodity": "gold",
+            "trading_day": "2026-11-12",
+            "previous_day": "2026-11-11",
+            "source_exchange": "SHFE",
+            "source_url": "http://example.com",
+            "daily_report_version": "1.0.0",
+            "products": [],
+        },
+    )
+    enriched_pos = enrich_signal_for_delivery(pos_sig, llm_service=llm_service)
+    assert "position_analysis" in enriched_pos.payload
+    assert "Анализ позиционирования" in enriched_pos.payload["telegram_html"]
 

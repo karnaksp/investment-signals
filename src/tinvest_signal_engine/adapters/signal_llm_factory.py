@@ -25,8 +25,8 @@ def create_llm_enrichment_service(
     *,
     api_key: str | None = None,
     enabled: bool | None = None,
-    gatekeeper_model: str = "gemini-3.5-flash-lite",
-    analyzer_model: str = "gemini-3.5-flash",
+    gatekeeper_model: str = "gemini-flash-lite-latest",
+    analyzer_model: str = "gemini-flash-lite-latest",
     timeout_seconds: float = 25.0,
     cooldown_seconds: int = 1800,
     min_quality_score: float = 0.65,
@@ -44,10 +44,13 @@ def create_llm_enrichment_service(
         logger.debug("LLM enrichment is disabled or API key is not configured")
         return None
 
+    eff_gatekeeper = os.getenv("GEMINI_GATEKEEPER_MODEL") or gatekeeper_model
+    eff_analyzer = os.getenv("GEMINI_ANALYZER_MODEL") or analyzer_model
+
     analyzer = GeminiLlmAnalyzer(
         api_key=key,
-        gatekeeper_model=gatekeeper_model or os.getenv("GEMINI_GATEKEEPER_MODEL", "gemini-3.5-flash-lite"),
-        analyzer_model=analyzer_model or os.getenv("GEMINI_ANALYZER_MODEL", "gemini-3.5-flash"),
+        gatekeeper_model=eff_gatekeeper,
+        analyzer_model=eff_analyzer,
         timeout_seconds=float(os.getenv("GEMINI_TIMEOUT_SECONDS", str(timeout_seconds))),
     )
 

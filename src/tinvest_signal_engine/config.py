@@ -382,8 +382,8 @@ class RuntimeSettings:
     processed_event_purge_batch_size: int
     gemini_api_key: str | None = None
     gemini_enabled: bool = True
-    gemini_analyzer_model: str = "gemini-3.5-flash"
-    gemini_gatekeeper_model: str = "gemini-3.5-flash-lite"
+    gemini_analyzer_model: str = "gemini-flash-lite-latest"
+    gemini_gatekeeper_model: str = "gemini-flash-lite-latest"
     gemini_timeout_seconds: float = 25.0
     gemini_cooldown_seconds: int = 1800
     gemini_min_quality_score: float = 0.65
@@ -759,12 +759,12 @@ class RuntimeSettings:
             or None,
             gemini_enabled=_env_bool("GEMINI_ENABLED", default=True),
             gemini_analyzer_model=(
-                os.getenv("GEMINI_ANALYZER_MODEL", "gemini-3.5-flash").strip()
-                or "gemini-3.5-flash"
+                os.getenv("GEMINI_ANALYZER_MODEL", "gemini-flash-lite-latest").strip()
+                or "gemini-flash-lite-latest"
             ),
             gemini_gatekeeper_model=(
-                os.getenv("GEMINI_GATEKEEPER_MODEL", "gemini-3.5-flash-lite").strip()
-                or "gemini-3.5-flash-lite"
+                os.getenv("GEMINI_GATEKEEPER_MODEL", "gemini-flash-lite-latest").strip()
+                or "gemini-flash-lite-latest"
             ),
             gemini_timeout_seconds=float(
                 os.getenv("GEMINI_TIMEOUT_SECONDS", "25.0")

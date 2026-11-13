@@ -219,6 +219,12 @@ def run_telegram_listener(
             try:
                 url = f"https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout={poll_timeout_seconds}"
                 resp = client.get(url)
+                if resp.status_code == 409:
+                    logger.warning(
+                        "getUpdates returned 409 Conflict: another instance is polling Telegram with this bot token. Backing off for 15s..."
+                    )
+                    time.sleep(15.0)
+                    continue
                 if resp.status_code != 200:
                     logger.warning("getUpdates returned status %s: %s", resp.status_code, resp.text)
                     time.sleep(3.0)

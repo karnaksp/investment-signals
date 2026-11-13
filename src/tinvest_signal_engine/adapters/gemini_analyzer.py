@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from typing import Any
 
 import httpx
@@ -38,8 +40,8 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         self,
         *,
         api_key: str,
-        gatekeeper_model: str = "gemini-3.5-flash-lite",
-        analyzer_model: str = "gemini-3.5-flash",
+        gatekeeper_model: str = "gemini-flash-lite-latest",
+        analyzer_model: str = "gemini-flash-lite-latest",
         timeout_seconds: float = 25.0,
         client: httpx.Client | None = None,
     ) -> None:
@@ -83,17 +85,11 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         }
 
         try:
-            resp = self._client.post(
-                url,
-                headers={"x-goog-api-key": self._api_key},
-                json=payload,
-                timeout=self._timeout,
-            )
-            if resp.status_code != 200:
+            resp = self._post_with_fallback(url, payload)
+            if resp is None or resp.status_code != 200:
                 logger.warning(
-                    "Gemini gatekeeper returned HTTP %s: %s",
-                    resp.status_code,
-                    resp.text[:150],
+                    "Gemini gatekeeper returned HTTP %s",
+                    resp.status_code if resp else "None",
                 )
                 return False
 
@@ -673,25 +669,53 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
     def _post_with_fallback(
         self, url: str, payload: dict[str, Any]
     ) -> httpx.Response | None:
-        """Post request with fallback in case thinkingConfig is not accepted."""
+        """Post request with fallback in case thinkingConfig is rejected or model quota exceeded."""
         headers = {"x-goog-api-key": self._api_key}
-        try:
-            resp = self._client.post(
-                url, headers=headers, json=payload, timeout=self._timeout
+
+        current_model = self._analyzer_model
+        match = re.search(r"/models/([^:]+):generateContent", url)
+        if match:
+            current_model = match.group(1)
+
+        models_to_try = [current_model]
+        for fb in ("gemini-flash-lite-latest", "gemini-3-flash-preview"):
+            if fb not in models_to_try:
+                models_to_try.append(fb)
+
+        for model in models_to_try:
+            target_url = (
+                re.sub(r"/models/[^:]+:generateContent", f"/models/{model}:generateContent", url)
+                if match
+                else url
             )
-            if resp.status_code == 400 and "thinkingConfig" in payload.get("generationConfig", {}):
-                # Try without thinkingConfig
-                fallback_payload = dict(payload)
-                gen_cfg = dict(fallback_payload.get("generationConfig", {}))
-                gen_cfg.pop("thinkingConfig", None)
-                fallback_payload["generationConfig"] = gen_cfg
+            try:
                 resp = self._client.post(
-                    url,
-                    headers=headers,
-                    json=fallback_payload,
-                    timeout=self._timeout,
+                    target_url, headers=headers, json=payload, timeout=self._timeout
                 )
-            return resp
-        except Exception as ex:
-            logger.warning("Gemini POST failed: %s", ex)
-            return None
+                if resp.status_code == 400 and "thinkingConfig" in payload.get("generationConfig", {}):
+                    # Try without thinkingConfig
+                    fallback_payload = dict(payload)
+                    gen_cfg = dict(fallback_payload.get("generationConfig", {}))
+                    gen_cfg.pop("thinkingConfig", None)
+                    fallback_payload["generationConfig"] = gen_cfg
+                    resp = self._client.post(
+                        target_url,
+                        headers=headers,
+                        json=fallback_payload,
+                        timeout=self._timeout,
+                    )
+                if resp.status_code == 200:
+                    return resp
+                if resp.status_code in {429, 404, 503}:
+                    logger.warning(
+                        "Gemini model %s returned HTTP %s, trying fallback...",
+                        model,
+                        resp.status_code,
+                    )
+                    if resp.status_code == 503:
+                        time.sleep(1.0)
+                    continue
+                return resp
+            except Exception as ex:
+                logger.warning("Gemini POST failed for %s: %s", model, ex)
+        return None
