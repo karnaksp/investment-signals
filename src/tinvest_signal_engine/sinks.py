@@ -1266,6 +1266,19 @@ class TelegramAlertSink:
         # версией детектора, не протащит в Telegram устаревший многословный шаблон.
         signal = enrich_signal_for_delivery(signal)
         p = signal.payload or {}
+        has_llm = bool(
+            p.get("llm_analysis_html")
+            or p.get("position_analysis_html")
+            or p.get("retracement_guard_html")
+            or p.get("derivatives_interpretation_html")
+            or p.get("dividend_gap_html")
+        )
+        logger.info(
+            "Delivering Telegram alert for %s (%s, LLM enriched: %s)",
+            signal.ticker,
+            signal.signal_type,
+            has_llm,
+        )
         tg = p.get("telegram_html")
         text = (
             tg

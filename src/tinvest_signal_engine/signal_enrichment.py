@@ -126,7 +126,7 @@ def enrich_signal_for_delivery(
                 signal = replace(signal, payload=p)
 
             # 6. Dividend Gap Guard (Check sharp downward jumps for ex-dividend dates)
-            elif signal.signal_type in {"price_jump", "candle_range_spike", "confirmed_impulse_short"} and "dividend_gap" not in p:
+            if signal.signal_type in {"price_jump", "candle_range_spike", "confirmed_impulse_short"} and "dividend_gap" not in p:
                 raw_ch = p.get("price_change_pct") or p.get("delta_pct") or ep.get("price_change_pct") or ep.get("delta_pct")
                 try:
                     price_ch = float(raw_ch) if raw_ch is not None else 0.0
@@ -143,8 +143,8 @@ def enrich_signal_for_delivery(
                         p["dividend_gap_html"] = format_dividend_gap_html(div_dec)
                         signal = replace(signal, payload=p)
 
-            # General signal LLM analysis
-            elif "llm_analysis" not in p:
+            # General signal LLM analysis (runs for all qualifying signals if not already analyzed)
+            if "llm_analysis" not in p:
                 q_score = quality.get("quality_score")
                 q_float = float(q_score) if q_score is not None else None
                 p = effective_llm.enrich_payload(

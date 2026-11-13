@@ -62,7 +62,18 @@ class MockLlmAnalyzer(LlmAnalyzerPort):
         return "дивиденд" in news_title.lower() or "отчет" in news_title.lower()
 
     def analyze_signal(self, context: Any) -> Any:
-        return None
+        from tinvest_signal_engine.domain.signal_llm import LlmAnalysisResult
+
+        return LlmAnalysisResult(
+            has_catalyst=True,
+            catalyst_summary="Тестовый катализатор",
+            reaction_type="FUNDAMENTAL",
+            trade_bias="LONG",
+            suggested_action="BUY",
+            risk_factor="Рыночный шум",
+            model_used="gemini-mock",
+            tokens_used=120,
+        )
 
     def analyze_position_report(self, context: Any) -> Any:
         return AssetPositionAnalysisResult(
@@ -367,5 +378,21 @@ def test_enrich_signal_for_delivery_integration(llm_service):
     )
     enriched_briefing = enrich_signal_for_delivery(briefing_sig, llm_service=llm_service)
     assert enriched_briefing.payload["telegram_html"] == "<b>Утренний обзор сессии · 2026-11-13</b>"
+
+    # Test upward price jump gets general LLM analysis (was blocked by elif bug)
+    jump_sig = _sample_signal(
+        signal_id="jump-001",
+        ticker="SBER",
+        signal_type="price_jump",
+        severity=3,
+        z_score=7.5,
+        metric_value=4000.0,
+        baseline_value=400.0,
+        summary="Скачок цены вверх",
+        payload={"price_change_pct": 2.5},
+    )
+    enriched_jump = enrich_signal_for_delivery(jump_sig, llm_service=llm_service)
+    assert "llm_analysis" in enriched_jump.payload
+    assert "Анализ катализатора" in enriched_jump.payload["telegram_html"]
 
 

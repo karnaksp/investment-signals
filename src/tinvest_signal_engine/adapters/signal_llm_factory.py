@@ -28,7 +28,7 @@ def create_llm_enrichment_service(
     gatekeeper_model: str = "gemini-flash-lite-latest",
     analyzer_model: str = "gemini-flash-lite-latest",
     timeout_seconds: float = 25.0,
-    cooldown_seconds: int = 1800,
+    cooldown_seconds: int = 180,
     min_quality_score: float = 0.65,
     rss_urls: list[str] | None = None,
 ) -> SignalLlmEnrichmentUseCase | None:

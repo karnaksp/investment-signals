@@ -45,6 +45,10 @@ DEFAULT_RELEVANT_SIGNAL_TYPES: frozenset[str] = frozenset(
         "open_interest_spike",
         "candle_range_spike",
         "morning_retracement_recommendation",
+        "price_volume_range_combo_long",
+        "price_volume_range_combo_short",
+        "orderbook_imbalance",
+        "spread_widening",
     }
 )
 
@@ -158,19 +162,33 @@ class SignalLlmEnrichmentUseCase:
             return False
 
         if signal_type not in self._relevant_types:
+            logger.debug(
+                "Skipping LLM analysis for %s: signal_type '%s' not in relevant_types",
+                ticker,
+                signal_type,
+            )
             return False
 
         if quality_score is not None:
             norm_quality = quality_score / 100.0 if quality_score > 1.0 else quality_score
             if norm_quality < self._min_quality_score:
+                logger.info(
+                    "Skipping LLM analysis for %s (%s): quality %.2f < min_quality %.2f",
+                    ticker,
+                    signal_type,
+                    norm_quality,
+                    self._min_quality_score,
+                )
                 return False
 
         now_ts = self._clock().timestamp()
-        last_ts = self._last_analysis_at.get(ticker)
+        cache_key = f"{ticker}:{signal_type}"
+        last_ts = self._last_analysis_at.get(cache_key)
         if last_ts is not None and (now_ts - last_ts) < self._cooldown_seconds:
-            logger.debug(
-                "Skipping LLM analysis for %s due to cooldown (%.0fs left)",
+            logger.info(
+                "Skipping LLM analysis for %s (%s) due to cooldown (%.0fs left)",
                 ticker,
+                signal_type,
                 self._cooldown_seconds - (now_ts - last_ts),
             )
             return False
@@ -244,7 +262,8 @@ class SignalLlmEnrichmentUseCase:
                 return payload
 
             # Update cooldown timestamp
-            self._last_analysis_at[ticker] = self._clock().timestamp()
+            cache_key = f"{ticker}:{signal_type}"
+            self._last_analysis_at[cache_key] = self._clock().timestamp()
 
             html_block = format_llm_analysis_html(result)
             plain_block = format_llm_analysis_plain(result)

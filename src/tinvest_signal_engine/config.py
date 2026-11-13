@@ -393,7 +393,7 @@ class RuntimeSettings:
     gemini_analyzer_model: str = "gemini-flash-lite-latest"
     gemini_gatekeeper_model: str = "gemini-flash-lite-latest"
     gemini_timeout_seconds: float = 25.0
-    gemini_cooldown_seconds: int = 1800
+    gemini_cooldown_seconds: int = 180
     gemini_min_quality_score: float = 0.65
     gemini_news_rss_urls: str | None = None
 
@@ -778,7 +778,7 @@ class RuntimeSettings:
                 os.getenv("GEMINI_TIMEOUT_SECONDS", "25.0")
             ),
             gemini_cooldown_seconds=int(
-                os.getenv("GEMINI_COOLDOWN_SECONDS", "1800")
+                os.getenv("GEMINI_COOLDOWN_SECONDS", "180")
             ),
             gemini_min_quality_score=float(
                 os.getenv("GEMINI_MIN_QUALITY_SCORE", "0.65")
