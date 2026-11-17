@@ -27,9 +27,16 @@ class LlmSignalContext:
 
     ticker: str
     signal_type: str
+    instrument_name: str = ""
+    asset_class: str = ""
+    notional_rub: float | None = None
+    lots: float | None = None
+    last_price: float | None = None
+    spread_bps: float | None = None
     price_change_pct: float | None = None
     volume_ratio: float | None = None
     orderbook_imbalance: float | None = None
+    trade_direction: str = ""
     headline_ru: str = ""
     news_items: tuple[NewsArticle, ...] = ()
     market_regime: str = ""
@@ -46,6 +53,7 @@ class LlmAnalysisResult:
     suggested_action: str
     risk_factor: str
     invalidation_level: str = ""
+    market_context_summary: str = ""
     confidence_score: float = 0.0
     model_used: str = ""
     tokens_used: int = 0
@@ -59,6 +67,7 @@ class LlmAnalysisResult:
             "suggested_action": self.suggested_action,
             "risk_factor": self.risk_factor,
             "invalidation_level": self.invalidation_level,
+            "market_context_summary": self.market_context_summary,
             "confidence_score": self.confidence_score,
             "model_used": self.model_used,
             "tokens_used": self.tokens_used,
@@ -71,16 +80,24 @@ def format_llm_analysis_html(result: LlmAnalysisResult) -> str:
         "LONG": "<b>LONG</b>",
         "SHORT": "<b>SHORT</b>",
         "NEUTRAL": "<b>NEUTRAL</b>",
+        "RANGE": "<b>RANGE</b>",
     }.get(result.trade_bias.upper(), f"<b>{html.escape(result.trade_bias)}</b>")
 
     lines = [
         f"<b>Анализ катализатора:</b> {bias_text} · <i>{html.escape(result.suggested_action)}</i>"
     ]
 
-    if result.has_catalyst and result.catalyst_summary:
-        lines.append(f"• <b>Катализатор:</b> {html.escape(result.catalyst_summary)}")
-    elif not result.has_catalyst:
-        lines.append("• <b>Катализатор:</b> Прямой инфоповод не подтвержден (возможно спекулятивный импульс)")
+    context_text = result.market_context_summary.strip() if result.market_context_summary else ""
+    if context_text:
+        lines.append(f"• <b>Конъюнктура:</b> {html.escape(context_text)}")
+
+    driver_text = result.catalyst_summary.strip() if result.catalyst_summary else ""
+    if driver_text:
+        lines.append(f"• <b>Катализатор:</b> {html.escape(driver_text)}")
+    elif result.has_catalyst:
+        lines.append("• <b>Катализатор:</b> Корпоративный новостной фон")
+    else:
+        lines.append("• <b>Катализатор:</b> Локальный дисбаланс рыночных заявок в стакане")
 
     if result.risk_factor:
         lines.append(f"• <b>Риск:</b> {html.escape(result.risk_factor)}")
@@ -94,13 +111,114 @@ def format_llm_analysis_html(result: LlmAnalysisResult) -> str:
 def format_llm_analysis_plain(result: LlmAnalysisResult) -> str:
     """Format structured analysis into plain text for fallback."""
     lines = [f"[Анализ катализатора: {result.trade_bias} - {result.suggested_action}]"]
+    if result.market_context_summary:
+        lines.append(f"Конъюнктура: {result.market_context_summary}")
     if result.has_catalyst and result.catalyst_summary:
+        lines.append(f"Катализатор: {result.catalyst_summary}")
+    elif result.catalyst_summary:
         lines.append(f"Катализатор: {result.catalyst_summary}")
     if result.risk_factor:
         lines.append(f"Риск: {result.risk_factor}")
     if result.invalidation_level:
         lines.append(f"Отмена: {result.invalidation_level}")
     return "\n".join(lines)
+
+
+# ==============================================================================
+# Helper mappings for human-readable instrument context (Domain pure functions)
+# ==============================================================================
+
+FUTURES_PREFIX_MAP: dict[str, tuple[str, str]] = {
+    "EU": ("Фьючерс на курс EUR/RUB (евро к рублю)", "валютный фьючерс"),
+    "SI": ("Фьючерс на курс USD/RUB (доллар к рублю)", "валютный фьючерс"),
+    "CR": ("Фьючерс на курс CNY/RUB (юань к рублю)", "валютный фьючерс"),
+    "ED": ("Фьючерс на валютную пару EUR/USD", "валютный фьючерс"),
+    "RI": ("Фьючерс на долларовый индекс РТС", "индексный фьючерс"),
+    "MX": ("Фьючерс на рублевый индекс Мосбиржи (IMOEX)", "индексный фьючерс"),
+    "MM": ("Мини-фьючерс на индекс Мосбиржи", "индексный фьючерс"),
+    "GD": ("Фьючерс на золото (XAU)", "сырьевой фьючерс"),
+    "SV": ("Фьючерс на серебро (XAG)", "сырьевой фьючерс"),
+    "BR": ("Фьючерс на нефть марки Brent", "сырьевой фьючерс"),
+    "NG": ("Фьючерс на природный газ (Henry Hub)", "сырьевой фьючерс"),
+    "PD": ("Фьючерс на палладий", "сырьевой фьючерс"),
+    "PT": ("Фьючерс на платину", "сырьевой фьючерс"),
+    "SR": ("Фьючерс на акции Сбербанка", "акционный фьючерс"),
+    "GZ": ("Фьючерс на акции Газпрома", "акционный фьючерс"),
+    "LK": ("Фьючерс на акции Лукойла", "акционный фьючерс"),
+    "RN": ("Фьючерс на акции Роснефти", "акционный фьючерс"),
+    "VB": ("Фьючерс на акции ВТБ", "акционный фьючерс"),
+    "MN": ("Фьючерс на акции Магнита", "акционный фьючерс"),
+    "AL": ("Фьючерс на акции Алроса", "акционный фьючерс"),
+    "CH": ("Фьючерс на акции Северстали", "акционный фьючерс"),
+    "NL": ("Фьючерс на акции НЛМК", "акционный фьючерс"),
+    "PZ": ("Фьючерс на акции Полюса", "акционный фьючерс"),
+    "AF": ("Фьючерс на акции Аэрофлота", "акционный фьючерс"),
+    "SN": ("Фьючерс на акции Сургутнефтегаза", "акционный фьючерс"),
+    "TT": ("Фьючерс на акции Т-Технологий (ТКС)", "акционный фьючерс"),
+    "YD": ("Фьючерс на акции Яндекса", "акционный фьючерс"),
+}
+
+EQUITIES_MAP: dict[str, tuple[str, str]] = {
+    "SBER": ("Акции Сбербанка", "акции РФ"),
+    "SBERP": ("Привилегированные акции Сбербанка", "акции РФ"),
+    "GAZP": ("Акции Газпрома", "акции РФ"),
+    "LKOH": ("Акции Лукойла", "акции РФ"),
+    "ROSN": ("Акции Роснефти", "акции РФ"),
+    "NVTK": ("Акции Новатэка", "акции РФ"),
+    "GMKN": ("Акции ГМК Норильский никель", "акции РФ"),
+    "VTBR": ("Акции Банка ВТБ", "акции РФ"),
+    "T": ("Акции Т-Технологий (ТКС Холдинг)", "акции РФ"),
+    "YNDX": ("Акции Яндекса", "акции РФ"),
+    "YDEX": ("Акции Яндекса", "акции РФ"),
+    "MGNT": ("Акции Магнита", "акции РФ"),
+    "PLZL": ("Акции Полюса (золотодобыча)", "акции РФ"),
+    "ALRS": ("Акции Алроса (алмазы)", "акции РФ"),
+    "CHMF": ("Акции Северстали", "акции РФ"),
+    "NLMK": ("Акции НЛМК", "акции РФ"),
+    "MAGN": ("Акции ММК", "акции РФ"),
+    "MOEX": ("Акции Московской Биржи", "акции РФ"),
+    "AFLT": ("Акции Аэрофлота", "акции РФ"),
+    "SNGS": ("Акции Сургутнефтегаза", "акции РФ"),
+    "SNGSP": ("Привилегированные акции Сургутнефтегаза", "акции РФ"),
+    "TATN": ("Акции Татнефти", "акции РФ"),
+    "TATNP": ("Привилегированные акции Татнефти", "акции РФ"),
+    "MTSS": ("Акции МТС", "акции РФ"),
+    "OZON": ("Акции Ozon", "акции РФ"),
+    "VKCO": ("Акции VK", "акции РФ"),
+    "AFKS": ("Акции АФК Система", "акции РФ"),
+    "FEES": ("Акции ФСК-Россети", "акции РФ"),
+    "IRAO": ("Акции Интер РАО", "акции РФ"),
+    "HYDR": ("Акции РусГидро", "акции РФ"),
+    "RUAL": ("Акции РУСАЛ", "акции РФ"),
+    "TRNFP": ("Привилегированные акции Транснефти", "акции РФ"),
+    "POSI": ("Акции Positive Technologies", "акции РФ"),
+    "ASTR": ("Акции Группы Астра", "акции РФ"),
+    "SOFL": ("Акции Софтлайн", "акции РФ"),
+    "CBOM": ("Акции МКБ", "акции РФ"),
+    "BSPB": ("Акции Банка Санкт-Петербург", "акции РФ"),
+    "SELG": ("Акции Селигдар", "акции РФ"),
+    "UGLD": ("Акции ЮГК", "акции РФ"),
+}
+
+
+def resolve_instrument_info(ticker: str, class_code: str = "") -> tuple[str, str]:
+    """Returns (human_readable_name, asset_class) for a ticker."""
+    raw_t = (ticker or "").upper().strip()
+    if not raw_t:
+        return "Неизвестный инструмент", "актив"
+
+    if raw_t in EQUITIES_MAP:
+        return EQUITIES_MAP[raw_t]
+
+    prefix2 = raw_t[:2]
+    if class_code == "SPBFUT" or (len(raw_t) >= 4 and prefix2 in FUTURES_PREFIX_MAP):
+        if prefix2 in FUTURES_PREFIX_MAP:
+            return FUTURES_PREFIX_MAP[prefix2]
+        return f"Фьючерс {raw_t}", "дериватив"
+
+    if class_code == "SPBFUT":
+        return f"Фьючерс {raw_t}", "дериватив"
+    return f"Акции {raw_t}", "акции РФ"
 
 
 @dataclass(frozen=True)

@@ -436,3 +436,125 @@ def test_use_case_analyze_asset_positions() -> None:
     assert result.commodity == "brent"
     assert "Производители агрессивно" in result.bias_title
     assert "Managed Money" in analyzer.position_context.sections_summary
+
+
+def test_domain_formatting_with_market_context() -> None:
+    result = LlmAnalysisResult(
+        has_catalyst=False,
+        catalyst_summary="Локальный спекулятивный импульс спроса в валютной секции",
+        reaction_type="MOMENTUM_FLOW",
+        trade_bias="LONG",
+        suggested_action="BUY_MOMENTUM",
+        risk_factor="Ложный пробой с резким возвратом к VWAP при затухании объема",
+        invalidation_level="Пробой ниже 91.10",
+        market_context_summary="Фьючерс EUR/RUB (EuZ6) зафиксировал оборот 97.34 млн ₽ при росте объема в 12.6 раз к норме",
+        confidence_score=0.82,
+    )
+    html = format_llm_analysis_html(result)
+    assert "<b>LONG</b>" in html
+    assert "BUY_MOMENTUM" in html
+    assert "• <b>Конъюнктура:</b>" in html
+    assert "Фьючерс EUR/RUB" in html
+    assert "• <b>Катализатор:</b> Локальный спекулятивный импульс" in html
+    assert "• <b>Риск:</b> Ложный пробой" in html
+    assert "• <b>Отмена:</b> Пробой ниже 91.10" in html
+
+
+def test_resolve_instrument_info() -> None:
+    from tinvest_signal_engine.domain.signal_llm import resolve_instrument_info
+
+    name, asset_type = resolve_instrument_info("EuZ6", "SPBFUT")
+    assert "EUR/RUB" in name
+    assert "валютный фьючерс" in asset_type
+
+    name_sber, asset_sber = resolve_instrument_info("SBER", "TQBR")
+    assert "Сбербанк" in name_sber
+    assert "акции" in asset_sber
+
+
+def test_google_news_provider_and_keywords() -> None:
+    from tinvest_signal_engine.adapters.news_provider import (
+        GoogleNewsProvider,
+        get_search_query_for_ticker,
+        resolve_ticker_keywords,
+    )
+    from tinvest_signal_engine.domain.trader_copilot import InternetNewsItem
+
+    assert "курс евро рубль" in get_search_query_for_ticker("EuZ6")
+    assert "ЕВРО" in resolve_ticker_keywords("EuZ6")
+
+    class DummySearchAdapter:
+        def search_news(self, query: str, limit: int = 5):
+            return (
+                InternetNewsItem(
+                    title="ЦБ установил курс евро",
+                    summary="Евро вырос",
+                    url="https://cbr.ru",
+                ),
+            )
+
+    provider = GoogleNewsProvider(search_adapter=DummySearchAdapter())
+    news = provider.get_recent_news("EuZ6")
+    assert len(news) == 1
+    assert "ЦБ установил курс евро" in news[0].title
+
+
+def test_volume_spike_without_news_still_analyzed_with_market_context() -> None:
+    # Simulates the user's EuZ6 case: volume spike, no news in feed, but rich microstructure
+    analyzer = MockLlmAnalyzer(
+        relevant_titles=set(),
+        analysis_to_return=LlmAnalysisResult(
+            has_catalyst=False,
+            catalyst_summary="Спекулятивный приток в стакан EUR/RUB без внешнего инфоповода",
+            reaction_type="MOMENTUM_FLOW",
+            trade_bias="LONG",
+            suggested_action="BUY_MOMENTUM",
+            risk_factor="Быстрое затухание ликвидности",
+            invalidation_level="Ниже 91.20",
+            market_context_summary="Фьючерс EUR/RUB: резкий всплеск объема 1065 лотов (~97.34 млн ₽, x12.6 к базе)",
+            confidence_score=0.85,
+        ),
+    )
+    # News provider returns zero news
+    news_provider = MockNewsProvider(())
+    service = SignalLlmEnrichmentUseCase(
+        news_provider=news_provider,
+        llm_analyzer=analyzer,
+        min_quality_score=0.65,
+    )
+
+    payload = {
+        "class_code": "SPBFUT",
+        "window_lots": 1065,
+        "window_notional": 97340000.0,
+        "ratio_to_baseline": 12.59,
+        "last_price": 91.45,
+        "spread_bps": 1.8,
+        "obi": 0.45,
+        "direction": "long",
+        "quality_score": 0.70,
+    }
+
+    enriched = service.enrich_payload(
+        ticker="EuZ6",
+        signal_type="volume_spike",
+        payload=payload,
+        quality_score=0.70,
+        headline_ru="Объём за 180 с: 1065 лотов, оборот ≈ 97,34 млн ₽ (x12,59 к базе).",
+    )
+
+    assert "llm_analysis" in enriched
+    assert len(analyzer.analyze_signal_calls) == 1
+    ctx = analyzer.analyze_signal_calls[0]
+    assert ctx.ticker == "EuZ6"
+    assert "EUR/RUB" in ctx.instrument_name
+    assert ctx.lots == 1065
+    assert ctx.notional_rub == 97340000.0
+    assert ctx.volume_ratio == 12.59
+    assert ctx.spread_bps == 1.8
+
+    html = enriched["llm_analysis_html"]
+    assert "Конъюнктура:" in html
+    assert "97.34 млн ₽" in html
+    assert "Спекулятивный приток" in html
+

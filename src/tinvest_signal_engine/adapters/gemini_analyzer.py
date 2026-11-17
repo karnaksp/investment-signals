@@ -121,40 +121,58 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         )
 
         facts_lines = [
-            f"Инструмент: {context.ticker}",
-            f"Сигнал: {context.signal_type}",
+            f"Тикер: {context.ticker}",
         ]
+        if context.instrument_name:
+            facts_lines.append(f"Инструмент: {context.instrument_name} ({context.asset_class or 'актив'})")
+        facts_lines.append(f"Тип сигнала: {context.signal_type}")
         if context.headline_ru:
-            facts_lines.append(f"Интерпретация движка: {context.headline_ru}")
+            facts_lines.append(f"Данные сигнала: {context.headline_ru}")
+        if context.trade_direction:
+            facts_lines.append(f"Направление: {context.trade_direction}")
         if context.price_change_pct is not None:
             facts_lines.append(f"Изменение цены: {context.price_change_pct:+.2f}%")
+        if context.last_price is not None:
+            facts_lines.append(f"Текущая/последняя цена: {context.last_price}")
+        if context.lots is not None:
+            facts_lines.append(f"Объем сделок: {context.lots:.0f} лотов")
+        if context.notional_rub is not None:
+            if context.notional_rub >= 1_000_000:
+                facts_lines.append(f"Оборот: {context.notional_rub / 1_000_000:.2f} млн ₽")
+            else:
+                facts_lines.append(f"Оборот: {context.notional_rub:,.0f} ₽")
         if context.volume_ratio is not None:
             facts_lines.append(f"Кратность объема к норме: {context.volume_ratio:.1f}x")
         if context.orderbook_imbalance is not None:
             facts_lines.append(f"Дисбаланс стакана (OBI): {context.orderbook_imbalance:+.2f}")
+        if context.spread_bps is not None:
+            facts_lines.append(f"Спред в стакане: {context.spread_bps:.1f} б.п.")
         if context.market_regime:
-            facts_lines.append(f"Общий рынок: {context.market_regime}")
+            facts_lines.append(f"Рыночный режим: {context.market_regime}")
 
         system_prompt = (
-            "Ты — профессиональный финансовый аналитик Мосбиржи и микроструктуры рынка. "
-            "Твоя задача — сопоставить техническую аномалию цены/объема с подтвержденным новостным фоном "
-            "и сформировать точный, емкий торговый сценарий в формате строгого JSON без лишних вводных слов."
+            "Ты — профессиональный трейдер и количественный аналитик микроструктуры Мосбиржи (акции и срочный рынок). "
+            "Твоя задача — проанализировать технический импульс, торговую конъюнктуру (объемы, оборот в рублях, динамику стакана, поведение базового актива) "
+            "и новостной фон, чтобы дать трейдеру содержательное, профессиональное объяснение ситуации и конкретный торговый план. "
+            "Категорически запрещены бессодержательные шаблонные отписки вроде 'Прямой инфоповод не подтвержден', 'NEUTRAL AVOID' без объяснения. "
+            "Объясни конкретную конъюнктуру и природу импульса. Ответ выдавай в формате строгого JSON без Markdown-разметки."
         )
 
-        user_prompt = f"""РЫНОЧНЫЕ ФАКТЫ:
+        user_prompt = f"""ФАКТЫ И МИКРОСТРУКТУРА СИГНАЛА:
 {chr(10).join(facts_lines)}
 
-ПОДТВЕРЖДЕННЫЕ НОВОСТИ:
+НОВОСТНОЙ И РЫНОЧНЫЙ ФОН:
 {news_text}
 
 Сформируй JSON со следующими полями:
-- "has_catalyst": boolean (есть ли прямая связь с новостью)
-- "catalyst_summary": string (суть катализатора в 1 предложение на русском)
-- "reaction_type": string (одно из: FUNDAMENTAL_PRICING, SPECULATIVE_PUMP, NOISE, LATE_OVERREACTION)
-- "trade_bias": string ("LONG", "SHORT" или "NEUTRAL")
-- "suggested_action": string (краткий план: BUY_MOMENTUM, BUY_PULLBACK, FADE, AVOID, HOLD)
-- "risk_factor": string (главный риск для сценария в 1 предложение на русском)
-- "invalidation_level": string (условие отмены сценария, например ценовой уровень)
+- "market_context_summary": string (краткий содержательный анализ конъюнктуры: что за актив, каков масштаб оборота в рублях/лотах, динамика спроса/предложения в стакане, в 1-2 предложениях на русском)
+- "catalyst_summary": string (содержательное объяснение импульса/драйвера: если есть новость - суть новости; если новости нет - характер импульса: спекулятивный перелив ликвидности, крупный рыночный ордер, тест плотности в стакане, валютные колебания, в 1 предложение на русском)
+- "has_catalyst": boolean (true если есть прямой внешний новостной инфоповод, иначе false)
+- "reaction_type": string (одно из: FUNDAMENTAL_PRICING, SPECULATIVE_PUMP, LIQUIDITY_SWEEP, VOLATILITY_BREAKOUT, MOMENTUM_FLOW, NOISE)
+- "trade_bias": string ("LONG", "SHORT", "RANGE" или "NEUTRAL")
+- "suggested_action": string (краткий профессиональный торговый план: BUY_MOMENTUM, WAIT_PULLBACK, FADE, AVOID, BREAKOUT_FOLLOW)
+- "risk_factor": string (конкретный рыночный риск для этого сценария в 1 предложение на русском)
+- "invalidation_level": string (условие отмены сценария, конкретный уровень цены или поведение стакана)
 - "confidence_score": float (от 0.0 до 1.0)
 """
 
@@ -164,7 +182,7 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
             "contents": [{"parts": [{"text": user_prompt}]}],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "maxOutputTokens": 350,
+                "maxOutputTokens": 600,
                 "temperature": 0.1,
                 "thinkingConfig": {"thinkingBudget": 0},
             },
@@ -198,6 +216,7 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
                 suggested_action=str(parsed.get("suggested_action") or "AVOID").strip(),
                 risk_factor=str(parsed.get("risk_factor") or "").strip(),
                 invalidation_level=str(parsed.get("invalidation_level") or "").strip(),
+                market_context_summary=str(parsed.get("market_context_summary") or "").strip(),
                 confidence_score=float(parsed.get("confidence_score") or 0.5),
                 model_used=self._analyzer_model,
                 tokens_used=tokens_used,

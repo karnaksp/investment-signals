@@ -9,6 +9,7 @@ from typing import Any
 from tinvest_signal_engine.adapters.gemini_analyzer import GeminiLlmAnalyzer
 from tinvest_signal_engine.adapters.news_provider import (
     CompositeNewsProvider,
+    GoogleNewsProvider,
     PayloadNewsProvider,
     RssNewsProvider,
 )
@@ -56,7 +57,8 @@ def create_llm_enrichment_service(
 
     rss_provider = RssNewsProvider(rss_urls=rss_urls)
     payload_provider = PayloadNewsProvider()
-    composite_news = CompositeNewsProvider([payload_provider, rss_provider])
+    google_news_provider = GoogleNewsProvider()
+    composite_news = CompositeNewsProvider([payload_provider, google_news_provider, rss_provider])
 
     use_case = SignalLlmEnrichmentUseCase(
         news_provider=composite_news,

@@ -31,6 +31,7 @@ from tinvest_signal_engine.domain.signal_llm import (
     format_position_analysis_plain,
     format_premarket_briefing_html,
     format_retracement_guard_html,
+    resolve_instrument_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -235,23 +236,71 @@ class SignalLlmEnrichmentUseCase:
                             "Error checking news relevance for %s: %s", ticker, ex
                         )
 
-            # If no confirmed news, but quality is high (>= 0.80), proceed with technical analysis
-            if not relevant_news:
-                if norm_quality < 0.80:
-                    logger.debug(
-                        "No relevant news passed binary gatekeeper for %s and quality %.2f < 0.80",
-                        ticker,
-                        norm_quality,
-                    )
-                    return payload
+            # 3. Stage 2: Deep structured analysis with market context
+            inst_name, asset_class = resolve_instrument_info(
+                ticker, str(payload.get("class_code") or "")
+            )
 
-            # 3. Stage 2: Deep structured analysis
+            price_change = _to_float(
+                payload.get("price_change_pct")
+                if payload.get("price_change_pct") is not None
+                else (
+                    float(payload["price_change_bps"]) / 100.0
+                    if payload.get("price_change_bps") is not None
+                    else None
+                )
+            )
+            vol_ratio = _to_float(
+                payload.get("volume_ratio")
+                if payload.get("volume_ratio") is not None
+                else payload.get("ratio_to_baseline")
+            )
+            notional = _to_float(
+                payload.get("window_notional")
+                if payload.get("window_notional") is not None
+                else payload.get("notional")
+            )
+            lots = _to_float(
+                payload.get("window_lots")
+                if payload.get("window_lots") is not None
+                else payload.get("lots")
+            )
+            last_price = _to_float(
+                payload.get("last_price")
+                if payload.get("last_price") is not None
+                else payload.get("current_price")
+            )
+            spread_bps = _to_float(payload.get("spread_bps"))
+            obi = _to_float(
+                payload.get("obi")
+                if payload.get("obi") is not None
+                else payload.get("orderbook_imbalance")
+            )
+            direction = str(
+                payload.get("direction")
+                or payload.get("trade_direction")
+                or (
+                    "вверх"
+                    if price_change and price_change > 0
+                    else "вниз"
+                    if price_change and price_change < 0
+                    else ""
+                )
+            )
+
             context = LlmSignalContext(
                 ticker=ticker,
                 signal_type=signal_type,
-                price_change_pct=_to_float(payload.get("price_change_pct")),
-                volume_ratio=_to_float(payload.get("volume_ratio")),
-                orderbook_imbalance=_to_float(payload.get("obi") or payload.get("orderbook_imbalance")),
+                instrument_name=inst_name,
+                asset_class=asset_class,
+                notional_rub=notional,
+                lots=lots,
+                last_price=last_price,
+                spread_bps=spread_bps,
+                price_change_pct=price_change,
+                volume_ratio=vol_ratio,
+                orderbook_imbalance=obi,
+                trade_direction=direction,
                 headline_ru=headline_ru or str(payload.get("interpretation_ru") or ""),
                 news_items=tuple(relevant_news[:3]),
                 market_regime=str(payload.get("market_regime") or ""),

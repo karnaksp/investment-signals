@@ -50,6 +50,102 @@ TICKER_ALIASES: dict[str, tuple[str, ...]] = {
     "EUR_RUB": ("ЕВРО", "РУБЛЬ", "ВАЛЮТА"),
 }
 
+FUTURES_TICKER_ALIASES: dict[str, tuple[str, ...]] = {
+    "EU": ("ЕВРО", "EUR", "РУБЛЬ", "ВАЛЮТА", "ЦБ"),
+    "SI": ("ДОЛЛАР", "USD", "РУБЛЬ", "ВАЛЮТА", "ЦБ"),
+    "CR": ("ЮАНЬ", "CNY", "РУБЛЬ", "ВАЛЮТА", "ЦБ"),
+    "ED": ("EUR/USD", "ЕВРО", "ДОЛЛАР"),
+    "RI": ("РТС", "ИНДЕКС РТС", "RTS"),
+    "MX": ("МОСБИРЖ", "ИНДЕКС МОСБИРЖИ", "IMOEX"),
+    "MM": ("ИНДЕКС МОСБИРЖИ", "IMOEX"),
+    "GD": ("ЗОЛОТО", "GOLD", "XAU"),
+    "SV": ("СЕРЕБРО", "SILVER", "XAG"),
+    "BR": ("НЕФТЬ", "BRENT", "WTI", "ОПЕК"),
+    "NG": ("ГАЗ", "ГАЗА", "HENRY HUB"),
+    "PD": ("ПАЛЛАДИЙ", "PALLADIUM"),
+    "PT": ("ПЛАТИНА", "PLATINUM"),
+    "SR": ("СБЕР", "СБЕРБАНК", "SBER"),
+    "GZ": ("ГАЗПРОМ", "GAZP"),
+    "LK": ("ЛУКОЙЛ", "LKOH"),
+    "RN": ("РОСНЕФТЬ", "ROSN"),
+    "VB": ("ВТБ", "VTBR"),
+    "MN": ("МАГНИТ", "MGNT"),
+    "AL": ("АЛРОСА", "ALRS"),
+    "CH": ("СЕВЕРСТАЛЬ", "CHMF"),
+    "NL": ("НЛМК", "NLMK"),
+    "PZ": ("ПОЛЮС", "PLZL"),
+    "AF": ("АЭРОФЛОТ", "AFLT"),
+    "SN": ("СУРГУТНЕФТЕГАЗ", "SNGS"),
+    "TT": ("Т-ТЕХНОЛОГИИ", "ТКС", "ТИНЬКОФФ"),
+    "YD": ("ЯНДЕКС", "YNDX"),
+}
+
+
+def resolve_ticker_keywords(ticker: str) -> tuple[str, ...]:
+    clean = (ticker or "").upper().strip()
+    if not clean:
+        return ()
+    if clean in TICKER_ALIASES:
+        return TICKER_ALIASES[clean]
+    if len(clean) >= 4 and clean[:2] in FUTURES_TICKER_ALIASES:
+        return FUTURES_TICKER_ALIASES[clean[:2]]
+    if clean.endswith("P") and clean[:-1] in TICKER_ALIASES:
+        return TICKER_ALIASES[clean[:-1]]
+    return (clean,)
+
+
+def get_search_query_for_ticker(ticker: str) -> str:
+    clean = (ticker or "").upper().strip()
+    if clean.startswith("EU"):
+        return "курс евро рубль"
+    if clean.startswith("SI"):
+        return "курс доллар рубль"
+    if clean.startswith("CR"):
+        return "курс юань рубль"
+    if clean.startswith("BR"):
+        return "нефть Brent цена"
+    if clean.startswith("GD"):
+        return "цена золота котировки"
+    if clean.startswith("SV"):
+        return "цена серебра котировки"
+    if clean.startswith("NG"):
+        return "цена газа котировки"
+    if clean.startswith("RI"):
+        return "индекс РТС Мосбиржа"
+    if clean.startswith("MX") or clean == "IMOEX":
+        return "индекс Мосбиржи акции"
+    if clean in ("SBER", "SBERP") or clean.startswith("SR"):
+        return "Сбербанк акции"
+    if clean == "GAZP" or clean.startswith("GZ"):
+        return "Газпром акции"
+    if clean == "LKOH" or clean.startswith("LK"):
+        return "Лукойл акции"
+    if clean == "ROSN" or clean.startswith("RN"):
+        return "Роснефть акции"
+    if clean == "NVTK":
+        return "Новатэк акции"
+    if clean == "VTBR" or clean.startswith("VB"):
+        return "ВТБ банк акции"
+    if clean in ("YNDX", "YDEX") or clean.startswith("YD"):
+        return "Яндекс акции"
+    if clean == "AFLT" or clean.startswith("AF"):
+        return "Аэрофлот акции"
+    if clean == "MGNT" or clean.startswith("MN"):
+        return "Магнит акции"
+    if clean == "PLZL" or clean.startswith("PZ"):
+        return "Полюс золото акции"
+    if clean == "ALRS" or clean.startswith("AL"):
+        return "Алроса акции"
+    if clean == "CHMF" or clean.startswith("CH"):
+        return "Северсталь акции"
+    if clean == "NLMK" or clean.startswith("NL"):
+        return "НЛМК акции"
+    if clean in ("T", "TCSG") or clean.startswith("TT"):
+        return "Т-Технологии ТКС акции"
+    if clean == "MOEX":
+        return "Московская Биржа акции"
+    return f"{clean} акции новости"
+
 
 class PayloadNewsProvider(NewsProviderPort):
     """Extracts news items directly from signal payload if present."""
@@ -128,7 +224,7 @@ class RssNewsProvider(NewsProviderPort):
         payload: dict[str, Any] | None = None,
     ) -> tuple[NewsArticle, ...]:
         self._ensure_cache()
-        keywords = TICKER_ALIASES.get(ticker.upper(), (ticker.upper(),))
+        keywords = resolve_ticker_keywords(ticker)
 
         matched: list[NewsArticle] = []
         for article in self._cached_articles:
@@ -173,6 +269,67 @@ class RssNewsProvider(NewsProviderPort):
         if articles:
             self._cached_articles = articles
             self._last_fetch_ts = now
+
+
+class GoogleNewsProvider(NewsProviderPort):
+    """Fetches real-time financial news for a ticker via Google News RSS search."""
+
+    def __init__(
+        self,
+        search_adapter: Any | None = None,
+        cache_ttl_seconds: float = 120.0,
+    ) -> None:
+        if search_adapter is None:
+            from tinvest_signal_engine.adapters.internet_news_search import (
+                GoogleNewsRssSearchAdapter,
+            )
+
+            self._search_adapter = GoogleNewsRssSearchAdapter()
+        else:
+            self._search_adapter = search_adapter
+        self._ttl = cache_ttl_seconds
+        self._cache: dict[str, tuple[float, tuple[NewsArticle, ...]]] = {}
+
+    def get_recent_news(
+        self,
+        ticker: str,
+        *,
+        max_age_hours: int = 4,
+        limit: int = 5,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[NewsArticle, ...]:
+        clean_t = (ticker or "").upper().strip()
+        if not clean_t:
+            return ()
+
+        now = time.time()
+        cached = self._cache.get(clean_t)
+        if cached and (now - cached[0]) < self._ttl:
+            return cached[1][:limit]
+
+        query = get_search_query_for_ticker(clean_t)
+        try:
+            raw_items = self._search_adapter.search_news(query, limit=limit)
+            articles: list[NewsArticle] = []
+            for it in raw_items:
+                summary_val = getattr(it, "summary", "") or getattr(it, "snippet", "")
+                articles.append(
+                    NewsArticle(
+                        title=it.title,
+                        summary=summary_val,
+                        source=it.source or "Google News",
+                        url=it.url,
+                        published_at=it.published_at,
+                        ticker=clean_t,
+                    )
+                )
+            result = tuple(articles)
+        except Exception as ex:
+            logger.warning("GoogleNewsProvider failed for %s: %s", clean_t, ex)
+            result = ()
+
+        self._cache[clean_t] = (now, result)
+        return result[:limit]
 
 
 class CompositeNewsProvider(NewsProviderPort):
