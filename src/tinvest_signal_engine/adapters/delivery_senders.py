@@ -111,7 +111,8 @@ def telegram_http_client() -> httpx.Client | TelegramMultiAddressHttpClient:
     """Use the operator's HTTPS proxy when direct Telegram egress is blocked."""
 
     if os.environ.get("TELEGRAM_DIRECT_EGRESS", "false").lower() in {"1", "true", "yes"}:
-        return TelegramMultiAddressHttpClient()
+        # The system HTTPS transport also supports VPN synthetic DNS addresses.
+        return httpx.Client(timeout=5.0, trust_env=False)
     if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
         if "172.18.0.1:17898" in proxy:

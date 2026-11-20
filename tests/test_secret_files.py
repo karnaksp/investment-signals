@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import socket
 
 import httpx
 import pytest
@@ -189,5 +190,38 @@ def test_telegram_delivery_uses_operator_https_proxy(
 
     try:
         assert isinstance(client, httpx.Client)
+    finally:
+        client.close()
+
+
+def test_direct_telegram_delivery_supports_vpn_dns_and_bypasses_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TELEGRAM_DIRECT_EGRESS", "true")
+    monkeypatch.setenv("HTTPS_PROXY", "http://unreachable-proxy.invalid:17898")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("240.0.0.1", 443)),
+        ],
+    )
+    requests: list[httpx.Request] = []
+
+    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    client = telegram_http_client()
+    try:
+        response = client.post(
+            "https://api.telegram.org/botredacted/sendMessage",
+            json={"chat_id": "redacted", "text": "test"},
+        )
+        assert response.json()["ok"] is True
+        assert len(requests) == 1
+        assert requests[0].url.host == "api.telegram.org"
+        assert client._mounts == {}
     finally:
         client.close()
