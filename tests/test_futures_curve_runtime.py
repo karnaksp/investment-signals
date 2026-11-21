@@ -114,12 +114,12 @@ def test_recovery_backfill_cannot_seed_curve_or_send_notifications(tmp_path):
 
 def _signal(kind=TYPES[0], **overrides):
     legs = [{"instrument_id": f"{ticker}_SPBFUT", "ticker": ticker,
-             "notional_rub": 10_000_000, "trade_count": 30}
+             "notional_rub": 15_000_000, "trade_count": 30}
             for ticker in ("SiZ6", "SiH7", "SiM7")]
     payload = {
         "curve_strong": True, "curve_version": "futures_curve_v1", "evidence_status": "experimental",
         "baseline_points": 120, "persistence_seconds": 30, "quote_age_seconds": 1,
-        "quote_skew_seconds": 1, "window_notional": 30_000_000, "legs": legs,
+        "quote_skew_seconds": 1, "window_notional": 45_000_000, "window_notional_currency": "RUB", "legs": legs,
     }
     payload.update(overrides)
     return TriggerSignal(

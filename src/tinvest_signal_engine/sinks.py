@@ -1234,12 +1234,30 @@ class TelegramAlertSink:
         self._chat_id = chat_id
         self._message_thread_id = message_thread_id
         self._client = (
-            (client or httpx.Client(timeout=5.0)) if self.enabled else None
+            (client or httpx.Client(timeout=10.0, trust_env=False)) if self.enabled else None
         )
 
     @property
     def enabled(self) -> bool:
         return bool(self._bot_token and self._chat_id)
+
+    def send_message(self, text: str, *, parse_mode: str = "HTML") -> None:
+        """Прямая отправка произвольного форматированного сообщения в Telegram."""
+        if self._client is None or not self._bot_token or not self._chat_id:
+            return
+        payload: dict[str, Any] = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+        }
+        if self._message_thread_id is not None:
+            payload["message_thread_id"] = self._message_thread_id
+        response = self._client.post(
+            f"https://api.telegram.org/bot{self._bot_token}/sendMessage",
+            json=payload,
+        )
+        response.raise_for_status()
 
     def send(self, signal: TriggerSignal) -> None:
         if self._client is None or not self._bot_token or not self._chat_id:
@@ -1248,6 +1266,19 @@ class TelegramAlertSink:
         # версией детектора, не протащит в Telegram устаревший многословный шаблон.
         signal = enrich_signal_for_delivery(signal)
         p = signal.payload or {}
+        has_llm = bool(
+            p.get("llm_analysis_html")
+            or p.get("position_analysis_html")
+            or p.get("retracement_guard_html")
+            or p.get("derivatives_interpretation_html")
+            or p.get("dividend_gap_html")
+        )
+        logger.info(
+            "Delivering Telegram alert for %s (%s, LLM enriched: %s)",
+            signal.ticker,
+            signal.signal_type,
+            has_llm,
+        )
         tg = p.get("telegram_html")
         text = (
             tg

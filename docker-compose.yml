@@ -249,6 +249,7 @@ services:
       DELIVERY_HEALTH_SNAPSHOT_PATH: /app/var/runtime-health/delivery-worker.json
       PYTHONPATH: /app/live-src
     volumes:
+      - ./conf:/app/conf:ro
       - ./var/runtime-health:/app/var/runtime-health
       - ./src:/app/live-src:ro
     command: ["tinvest-delivery-worker"]

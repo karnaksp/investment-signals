@@ -630,7 +630,7 @@ def test_admin_delivery_simulation_endpoint(monkeypatch: pytest.MonkeyPatch) -> 
                 "summary": "x",
                 "payload": {
                     "quality_score": 95,
-                    "window_notional": 40_000_001.0,
+                    "window_notional": 45_000_001.0,
                 },
                 "delivery_status": "unknown",
                 "delivery_reason": "unknown",

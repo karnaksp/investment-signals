@@ -11,6 +11,8 @@ from tinvest_signal_engine.adapters.telegram_http import (
     TelegramMultiAddressHttpClient,
 )
 from tinvest_signal_engine.config import RuntimeSettings, load_secret
+from tinvest_signal_engine.delivery_policy import DeliveryNotionalThresholds
+from tinvest_signal_engine.adapters.signal_turnover import normalize_signal_turnover
 from tinvest_signal_engine.domain.reliable_processing import DeliveryTask
 from tinvest_signal_engine.domain.asset_positions import ASSET_REPORT_VERSION
 from tinvest_signal_engine.domain.daily_positions import REPORT_SIGNAL_TYPE
@@ -20,6 +22,8 @@ from tinvest_signal_engine.sinks import TelegramAlertSink, WebhookAlertSink
 
 class ConfiguredDeliverySender:
     def __init__(self, settings: RuntimeSettings) -> None:
+        self._notional_thresholds = DeliveryNotionalThresholds(settings)
+        self._instruments_path = settings.instruments_path
         self._webhook = WebhookAlertSink(settings.alert_webhook_url)
         self._telegram = TelegramAlertSink(
             bot_token=settings.telegram_bot_token,
@@ -28,7 +32,11 @@ class ConfiguredDeliverySender:
         )
 
     def send(self, task: DeliveryTask) -> None:
-        signal = TriggerSignal.from_dict(task.payload)
+        signal = normalize_signal_turnover(TriggerSignal.from_dict(task.payload), self._instruments_path)
+        if not self._notional_thresholds.allows(
+            signal.signal_type, signal.payload, class_code=signal.class_code
+        ):
+            raise DeliveryFailure("notional_below_delivery_threshold")
         try:
             if task.destination_type == "webhook":
                 webhook = self._current_webhook_sink()
@@ -110,6 +118,12 @@ class ConfiguredDeliverySender:
 def telegram_http_client() -> httpx.Client | TelegramMultiAddressHttpClient:
     """Use the operator's HTTPS proxy when direct Telegram egress is blocked."""
 
+    if os.environ.get("TELEGRAM_DIRECT_EGRESS", "false").lower() in {"1", "true", "yes"}:
+        # The system HTTPS transport also supports VPN synthetic DNS addresses.
+        return httpx.Client(timeout=5.0, trust_env=False)
     if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
+        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+        if "172.18.0.1:17898" in proxy:
+            return TelegramMultiAddressHttpClient()
         return httpx.Client(timeout=5.0, trust_env=True)
     return TelegramMultiAddressHttpClient()

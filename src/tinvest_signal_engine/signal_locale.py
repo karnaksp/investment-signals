@@ -299,6 +299,10 @@ def build_telegram_html(
         lines.append(detail)
     if hint:
         lines.append(hint)
+    llm_html = str((signal.payload or {}).get("llm_analysis_html") or "").strip()
+    if llm_html:
+        lines.append("")
+        lines.append(llm_html)
     return "\n".join(lines)
 
 
@@ -323,6 +327,10 @@ def format_plain_alert_ru(
         lines.append(detail)
     if hint:
         lines.append(hint)
+    llm_plain = str(payload.get("llm_analysis_plain") or "").strip()
+    if llm_plain:
+        lines.append("")
+        lines.append(llm_plain)
     return "\n".join(lines)
 
 

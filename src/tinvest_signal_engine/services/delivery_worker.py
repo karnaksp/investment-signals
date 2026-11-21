@@ -57,6 +57,46 @@ def main() -> None:
             clock=clock,
         )
     )
+
+    from tinvest_signal_engine.adapters.signal_llm_factory import (
+        create_llm_enrichment_service,
+        set_global_llm_service,
+    )
+    llm_service = create_llm_enrichment_service(
+        api_key=settings.gemini_api_key,
+        enabled=settings.gemini_enabled,
+        analyzer_model=settings.gemini_analyzer_model,
+        gatekeeper_model=settings.gemini_gatekeeper_model,
+        timeout_seconds=settings.gemini_timeout_seconds,
+        cooldown_seconds=settings.gemini_cooldown_seconds,
+        min_quality_score=settings.gemini_min_quality_score,
+        rss_urls=(
+            [u.strip() for u in settings.gemini_news_rss_urls.split(",") if u.strip()]
+            if settings.gemini_news_rss_urls
+            else None
+        ),
+    )
+    set_global_llm_service(llm_service)
+
+    # Start Trade Desk Copilot Telegram listener in background daemon thread
+    if settings.telegram_bot_token and settings.gemini_enabled and settings.gemini_api_key:
+        import threading
+        from tinvest_signal_engine.services.trader_copilot_service import run_telegram_listener
+
+        def _start_copilot() -> None:
+            try:
+                run_telegram_listener(bot_token=settings.telegram_bot_token)
+            except Exception as ex:
+                logger.warning("Trade Desk Copilot listener exited: %s", ex)
+
+        copilot_thread = threading.Thread(
+            target=_start_copilot,
+            name="trader-copilot-listener",
+            daemon=True,
+        )
+        copilot_thread.start()
+        logger.info("Started Trade Desk Copilot Telegram listener thread")
+
     queue = connect_delivery_queue(settings)
     sender = ConfiguredDeliverySender(settings)
     worker = DurableDeliveryWorker(

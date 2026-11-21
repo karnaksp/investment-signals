@@ -45,6 +45,7 @@ from tinvest_signal_engine.models import NormalizedEvent, TriggerSignal
 from tinvest_signal_engine.redis_detector_state import flush_detector_to_redis
 from tinvest_signal_engine.serialization import json_dumps_bytes
 from tinvest_signal_engine.signal_enrichment import enrich_signal_for_delivery
+from tinvest_signal_engine.adapters.signal_turnover import normalize_signal_turnover
 
 logger = logging.getLogger(__name__)
 _STATE_SCHEMA_VERSION_V1 = "detector-state-v1"
@@ -135,7 +136,8 @@ class LegacyDetectionAdapter:
         signals = self._detector.enrich_signals_with_unary(signals)
         prepared: list[PreparedSignal] = []
         for signal in signals:
-            enriched = enrich_signal_for_delivery(signal)
+            normalized = normalize_signal_turnover(signal, self._settings.instruments_path)
+            enriched = enrich_signal_for_delivery(normalized, llm_service=False)
             governed = self._govern_delivery(enriched)
             targets = (
                 self._delivery_targets()

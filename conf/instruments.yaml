@@ -329,27 +329,7 @@ instruments:
       expiration_at: "2026-12-02T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.01
-      min_price_increment_amount: 0.80866
-      settlement_currency: "rub"
-      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
-      maturity_rank: 2
-    subscriptions:
-      trades: true
-      last_price: true
-      info: false
-      order_book_depth: 50
-      candles: false
-      candle_interval: 1m
-  - ticker: BMX6
-    class_code: SPBFUT
-    alias: brent_oil__BMX6
-    futures_contract:
-      chain_id: "brent_oil"
-      basic_asset: "Brent"
-      expiration_at: "2026-11-03T00:00:00+00:00"
-      basic_asset_size: 1.0
-      min_price_increment: 0.01
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -369,7 +349,27 @@ instruments:
       expiration_at: "2027-01-05T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.01
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: BMG7
+    class_code: SPBFUT
+    alias: brent_oil__BMG7
+    futures_contract:
+      chain_id: "brent_oil"
+      basic_asset: "Brent"
+      expiration_at: "2027-02-02T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 0.01
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3
@@ -389,7 +389,7 @@ instruments:
       expiration_at: "2026-12-21T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.1
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -409,7 +409,7 @@ instruments:
       expiration_at: "2027-03-22T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.1
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 2
@@ -429,7 +429,7 @@ instruments:
       expiration_at: "2027-06-21T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.1
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3
@@ -449,7 +449,7 @@ instruments:
       expiration_at: "2026-12-21T00:00:00+00:00"
       basic_asset_size: 10.0
       min_price_increment: 0.01
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -469,7 +469,7 @@ instruments:
       expiration_at: "2027-03-22T00:00:00+00:00"
       basic_asset_size: 10.0
       min_price_increment: 0.01
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 2
@@ -489,7 +489,7 @@ instruments:
       expiration_at: "2027-06-21T00:00:00+00:00"
       basic_asset_size: 10.0
       min_price_increment: 0.01
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3
@@ -692,26 +692,6 @@ instruments:
       min_price_increment_amount: 10.0
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
-      maturity_rank: 2
-    subscriptions:
-      trades: true
-      last_price: true
-      info: false
-      order_book_depth: 50
-      candles: false
-      candle_interval: 1m
-  - ticker: W4V6
-    class_code: SPBFUT
-    alias: wheat__W4V6
-    futures_contract:
-      chain_id: "wheat"
-      basic_asset: "Пшеница"
-      expiration_at: "2026-11-02T00:00:00+00:00"
-      basic_asset_size: 1.0
-      min_price_increment: 10.0
-      min_price_increment_amount: 10.0
-      settlement_currency: "rub"
-      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
     subscriptions:
       trades: true
@@ -727,6 +707,26 @@ instruments:
       chain_id: "wheat"
       basic_asset: "Пшеница"
       expiration_at: "2026-12-31T00:00:00+00:00"
+      basic_asset_size: 1.0
+      min_price_increment: 10.0
+      min_price_increment_amount: 10.0
+      settlement_currency: "rub"
+      settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
+      maturity_rank: 2
+    subscriptions:
+      trades: true
+      last_price: true
+      info: false
+      order_book_depth: 50
+      candles: false
+      candle_interval: 1m
+  - ticker: W4F7
+    class_code: SPBFUT
+    alias: wheat__W4F7
+    futures_contract:
+      chain_id: "wheat"
+      basic_asset: "Пшеница"
+      expiration_at: "2027-02-01T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 10.0
       min_price_increment_amount: 10.0
@@ -749,7 +749,7 @@ instruments:
       expiration_at: "2026-12-21T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.01
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -769,7 +769,7 @@ instruments:
       expiration_at: "2027-03-22T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.01
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 2
@@ -789,7 +789,7 @@ instruments:
       expiration_at: "2027-06-21T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.01
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3
@@ -809,7 +809,7 @@ instruments:
       expiration_at: "2026-12-21T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.1
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -829,7 +829,7 @@ instruments:
       expiration_at: "2027-03-22T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.1
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 2
@@ -849,7 +849,7 @@ instruments:
       expiration_at: "2027-06-21T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 0.1
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3
@@ -869,7 +869,7 @@ instruments:
       expiration_at: "2026-11-26T00:00:00+00:00"
       basic_asset_size: 100.0
       min_price_increment: 0.001
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -889,7 +889,7 @@ instruments:
       expiration_at: "2026-12-30T00:00:00+00:00"
       basic_asset_size: 100.0
       min_price_increment: 0.001
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 2
@@ -909,7 +909,7 @@ instruments:
       expiration_at: "2027-01-28T00:00:00+00:00"
       basic_asset_size: 100.0
       min_price_increment: 0.001
-      min_price_increment_amount: 8.08664
+      min_price_increment_amount: 8.21516
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3
@@ -929,7 +929,7 @@ instruments:
       expiration_at: "2026-12-21T00:00:00+00:00"
       basic_asset_size: 41.0
       min_price_increment: 1.0
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -949,7 +949,7 @@ instruments:
       expiration_at: "2027-03-22T00:00:00+00:00"
       basic_asset_size: 41.0
       min_price_increment: 1.0
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 2
@@ -969,7 +969,7 @@ instruments:
       expiration_at: "2027-06-21T00:00:00+00:00"
       basic_asset_size: 41.0
       min_price_increment: 1.0
-      min_price_increment_amount: 0.80866
+      min_price_increment_amount: 0.82152
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3
@@ -1169,7 +1169,7 @@ instruments:
       expiration_at: "2026-12-18T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 10.0
-      min_price_increment_amount: 16.17328
+      min_price_increment_amount: 16.43032
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 1
@@ -1189,7 +1189,7 @@ instruments:
       expiration_at: "2027-03-19T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 10.0
-      min_price_increment_amount: 16.17328
+      min_price_increment_amount: 16.43032
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 2
@@ -1209,7 +1209,7 @@ instruments:
       expiration_at: "2027-06-18T00:00:00+00:00"
       basic_asset_size: 1.0
       min_price_increment: 10.0
-      min_price_increment_amount: 16.17328
+      min_price_increment_amount: 16.43032
       settlement_currency: "rub"
       settlement_type: "DELIVERY_TYPE_CASH_SETTLEMENT"
       maturity_rank: 3

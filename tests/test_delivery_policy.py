@@ -6,7 +6,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tinvest_signal_engine.config import RuntimeSettings
-from tinvest_signal_engine.delivery_policy import DeliveryPolicy
+from tinvest_signal_engine.delivery_policy import DeliveryPolicy, DeliveryNotionalThresholds
+from tinvest_signal_engine.adapters.signal_turnover import normalize_signal_turnover
+from tinvest_signal_engine.adapters.delivery_senders import ConfiguredDeliverySender
+from tinvest_signal_engine.application.delivery import DeliveryFailure
+from tinvest_signal_engine.domain.reliable_processing import DeliveryTask
 from tinvest_signal_engine.models import TriggerSignal
 
 
@@ -31,7 +35,7 @@ def _settings(monkeypatch, **env: str) -> RuntimeSettings:
 def _signal(**kwargs) -> TriggerSignal:
     payload = {
         "quality_score": 70,
-        "window_notional": 40_000_001.0,
+        "window_notional": 45_000_001.0,
     }
     payload.update(kwargs.pop("payload", {}))
     defaults = {
@@ -67,7 +71,7 @@ def test_combo_score_six_is_delivered(monkeypatch) -> None:
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "combo_score_ge_6"
-    assert out.payload["delivery_policy_version"] == "delivery_v8"
+    assert out.payload["delivery_policy_version"] == "delivery_v9"
     assert out.payload["delivery_priority"] == "high"
     assert out.payload["delivery_channel"] == "realtime"
     assert out.payload["delivery_explanation_ru"]
@@ -487,7 +491,7 @@ def test_tqbr_aggressive_trade_burst_below_turnover_floor_is_suppressed(
 
     assert out.payload["delivery_status"] == "suppressed"
     assert out.payload["delivery_reason"] == "notional_below_delivery_threshold"
-    assert out.payload["delivery_min_notional_rub"] == 20_000_000.0
+    assert out.payload["delivery_min_notional_rub"] == 45_000_000.0
     assert out.payload["delivery_notional_field"] == "estimated_notional"
     assert out.payload["delivery_observed_notional_rub"] == 19_999_999.0
 
@@ -505,15 +509,15 @@ def test_tqbr_aggressive_trade_burst_at_turnover_floor_is_realtime(
     out = policy.apply(
         _signal(
             signal_type="aggressive_trade_burst",
-            payload={"quality_score": 1, "estimated_notional": 20_000_000.0},
+            payload={"quality_score": 1, "estimated_notional": 45_000_000.0},
             z_score=0.0,
         )
     )
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "owner_realtime_rollout"
-    assert out.payload["delivery_min_notional_rub"] == 20_000_000.0
-    assert out.payload["delivery_observed_notional_rub"] == 20_000_000.0
+    assert out.payload["delivery_min_notional_rub"] == 45_000_000.0
+    assert out.payload["delivery_observed_notional_rub"] == 45_000_000.0
 
 
 def test_spbfut_aggressive_trade_burst_below_turnover_floor_is_suppressed(
@@ -539,7 +543,7 @@ def test_spbfut_aggressive_trade_burst_below_turnover_floor_is_suppressed(
 
     assert out.payload["delivery_status"] == "suppressed"
     assert out.payload["delivery_reason"] == "notional_below_delivery_threshold"
-    assert out.payload["delivery_min_notional_rub"] == 20_000_000.0
+    assert out.payload["delivery_min_notional_rub"] == 45_000_000.0
     assert out.payload["delivery_notional_field"] == "estimated_notional"
     assert out.payload["delivery_observed_notional_rub"] == 19_999_999.0
 
@@ -560,14 +564,14 @@ def test_spbfut_aggressive_trade_burst_at_turnover_floor_is_realtime(
             ticker="SiZ6",
             class_code="SPBFUT",
             signal_type="aggressive_trade_burst",
-            payload={"quality_score": 1, "estimated_notional": 20_000_000.0},
+            payload={"quality_score": 1, "estimated_notional": 45_000_000.0},
             z_score=0.0,
         )
     )
 
     assert out.payload["delivery_status"] == "delivered"
     assert out.payload["delivery_reason"] == "owner_realtime_rollout"
-    assert out.payload["delivery_min_notional_rub"] == 20_000_000.0
+    assert out.payload["delivery_min_notional_rub"] == 45_000_000.0
     assert out.payload["delivery_notional_field"] == "estimated_notional"
 
 
@@ -680,3 +684,69 @@ def test_notional_threshold_file_is_hot_reloaded(monkeypatch, tmp_path) -> None:
     )
 
     assert policy.apply(signal).payload["delivery_status"] == "delivered"
+
+
+@pytest.mark.parametrize("kind", [
+    "obi_dynamics", "confirmed_impulse_long", "confirmed_impulse_short",
+    "liquidity_vacuum", "futures_positioning", "aggressive_trade_burst",
+])
+@pytest.mark.parametrize("amount", [None, 0, 44_999_999.99, float("nan"), float("inf")])
+def test_rollout_signals_cannot_bypass_mandatory_turnover(monkeypatch, kind, amount):
+    policy = DeliveryPolicy(_settings(
+        monkeypatch,
+        SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE="conf/delivery-notional-policy.json",
+    ))
+    signal = _signal(signal_type=kind, payload={
+        "quality_score": 99, "window_notional": amount, "estimated_notional": amount,
+    })
+    assert policy.apply(signal).payload["delivery_reason"] == "notional_below_delivery_threshold"
+
+
+def test_zero_override_cannot_disable_trading_minimum(monkeypatch, tmp_path):
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps({
+        "default_min_notional_rub": 0,
+        "signal_min_notional_rub": {"obi_dynamics": 0},
+    }))
+    thresholds = DeliveryNotionalThresholds(_settings(
+        monkeypatch, SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE=str(path),
+    ))
+    assert not thresholds.allows("obi_dynamics", {"window_notional": 44_999_999})
+    assert thresholds.allows("obi_dynamics", {"window_notional": 45_000_000})
+
+
+def test_futures_turnover_is_converted_once_and_unknown_specification_fails_closed(tmp_path):
+    path = tmp_path / "instruments.yaml"
+    path.write_text(
+        'instruments:\n- ticker: GDZ6\n  class_code: SPBFUT\n  futures_contract:\n'
+        '    settlement_currency: RUB\n    min_price_increment: 0.1\n'
+        '    min_price_increment_amount: 8.0\n'
+    )
+    signal = _signal(ticker="GDZ6", class_code="SPBFUT", payload={
+        "window_notional": 1_000_000, "estimated_notional": 600_000,
+    })
+    normalized = normalize_signal_turnover(signal, path)
+    assert normalized.payload["window_notional"] == 80_000_000
+    assert normalized.payload["estimated_notional"] == 48_000_000
+    assert normalize_signal_turnover(normalized, path) == normalized
+    missing = normalize_signal_turnover(_signal(ticker="UNKNOWN", class_code="SPBFUT"), path)
+    assert missing.payload["window_notional"] is None
+
+
+@pytest.mark.parametrize("previous_error", [None, "delivery_network_error"])
+def test_queued_signal_below_floor_is_rejected_before_external_delivery(monkeypatch, previous_error):
+    settings = _settings(
+        monkeypatch, SIGNAL_DELIVERY_NOTIONAL_POLICY_FILE="conf/delivery-notional-policy.json",
+    )
+    sender = ConfiguredDeliverySender(settings)
+    signal = _signal(signal_type="obi_dynamics", payload={"window_notional": 1_000_000})
+    task = DeliveryTask(
+        "00000000-0000-4000-8000-000000000099", signal.signal_id,
+        "telegram", signal.to_dict(), 2, previous_error,
+    )
+    monkeypatch.setattr(sender, "_current_telegram_sink", lambda: pytest.fail("weak signal reached Telegram"))
+    try:
+        with pytest.raises(DeliveryFailure, match="notional_below_delivery_threshold"):
+            sender.send(task)
+    finally:
+        sender.close()

@@ -17,6 +17,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
         {
             "ADMIN_API_TOKEN",
             "CLICKHOUSE_PASSWORD",
+            "GEMINI_API_KEY",
             "POSTGRES_PASSWORD",
             "REDIS_URL",
             "TELEGRAM_BOT_TOKEN",
@@ -33,8 +34,17 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "detector": frozenset(
         {
             "ALERT_WEBHOOK_URL",
+            "GEMINI_API_KEY",
             "POSTGRES_PASSWORD",
             "REDIS_URL",
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "TELEGRAM_MESSAGE_THREAD_ID",
+        }
+    ),
+    "premarket_briefing": frozenset(
+        {
+            "GEMINI_API_KEY",
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
             "TELEGRAM_MESSAGE_THREAD_ID",
@@ -43,6 +53,7 @@ _SERVICE_SECRET_NAMES: dict[str, frozenset[str]] = {
     "delivery_worker": frozenset(
         {
             "ALERT_WEBHOOK_URL",
+            "GEMINI_API_KEY",
             "POSTGRES_PASSWORD",
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
@@ -377,6 +388,14 @@ class RuntimeSettings:
     processed_event_retention_days: int
     processed_event_purge_interval_seconds: int
     processed_event_purge_batch_size: int
+    gemini_api_key: str | None = None
+    gemini_enabled: bool = True
+    gemini_analyzer_model: str = "gemini-flash-lite-latest"
+    gemini_gatekeeper_model: str = "gemini-flash-lite-latest"
+    gemini_timeout_seconds: float = 25.0
+    gemini_cooldown_seconds: int = 180
+    gemini_min_quality_score: float = 0.65
+    gemini_news_rss_urls: str | None = None
 
     @classmethod
     def from_env(cls, *, service_name: str | None = None) -> "RuntimeSettings":
@@ -596,7 +615,7 @@ class RuntimeSettings:
                 os.getenv("SIGNAL_DELIVERY_TYPE_RULES_JSON", "").strip()
             ),
             signal_delivery_default_min_notional_rub=float(
-                os.getenv("SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "40000000")
+                os.getenv("SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "45000000")
             ),
             signal_delivery_notional_policy_path=Path(
                 os.getenv(
@@ -741,6 +760,31 @@ class RuntimeSettings:
                     1,
                     int(os.getenv("PROCESSED_EVENT_PURGE_BATCH_SIZE", "100000")),
                 ),
+            ),
+            gemini_api_key=load_secret(
+                "GEMINI_API_KEY", service_name=service_name
+            )
+            or None,
+            gemini_enabled=_env_bool("GEMINI_ENABLED", default=True),
+            gemini_analyzer_model=(
+                os.getenv("GEMINI_ANALYZER_MODEL", "gemini-flash-lite-latest").strip()
+                or "gemini-flash-lite-latest"
+            ),
+            gemini_gatekeeper_model=(
+                os.getenv("GEMINI_GATEKEEPER_MODEL", "gemini-flash-lite-latest").strip()
+                or "gemini-flash-lite-latest"
+            ),
+            gemini_timeout_seconds=float(
+                os.getenv("GEMINI_TIMEOUT_SECONDS", "25.0")
+            ),
+            gemini_cooldown_seconds=int(
+                os.getenv("GEMINI_COOLDOWN_SECONDS", "180")
+            ),
+            gemini_min_quality_score=float(
+                os.getenv("GEMINI_MIN_QUALITY_SCORE", "0.65")
+            ),
+            gemini_news_rss_urls=(
+                (os.getenv("GEMINI_NEWS_RSS_URLS") or "").strip() or None
             ),
         )
 

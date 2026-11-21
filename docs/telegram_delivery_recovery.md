@@ -10,6 +10,24 @@ IP-адреса Telegram в коде и конфигурации не фикси
 запрещено, поскольку результат запроса уже может быть неоднозначным и повтор
 способен создать дублирующее уведомление.
 
+## VPN с подменой DNS
+
+VPN может возвращать для Telegram служебный адрес, например `240.0.0.1`.
+Если worker получает `telegram_dns_has_no_public_addresses`, а обычный HTTPS-запрос
+к Telegram из того же контейнера проходит, задайте в `.env`
+
+```dotenv
+TELEGRAM_DIRECT_EGRESS=true
+```
+
+Этот режим использует системный HTTPS-клиент с проверкой TLS для
+`api.telegram.org` и обходит proxy-переменные окружения. Примените настройку
+к worker
+
+```bash
+docker compose up -d --no-deps --no-build --force-recreate delivery-worker
+```
+
 ## Ручной повтор dead-letter
 
 Сначала выполните безопасный просмотр одной записи:

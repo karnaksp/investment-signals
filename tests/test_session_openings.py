@@ -321,3 +321,34 @@ def test_all_daily_group_messages_fit_telegram(calendar):
         html=render_session_boundary_html(boundary_payload(tuple(events),display_timezone='Europe/Istanbul'))
         assert len(html)<=4096
         assert all(word not in html for word in ('местное','(Стамбул)','Сталь, резина','Технический перерыв'))
+
+
+def test_europe_openings_group_into_single_european_notice(calendar):
+    now = moment("2026-11-05T08:00:00+00:00")
+    groups = []
+    publisher = SimpleNamespace(publish=lambda events, **_: groups.append(events) or True)
+    AnnounceSessionBoundaries(calendar=calendar, publisher=publisher).execute(now=now)
+    opens = [g for g in groups if g[0].event_kind == "open"]
+    assert len(opens) == 1
+    assert {"london", "frankfurt", "paris", "amsterdam", "zurich", "fx_london"} <= {e.session_id for e in opens[0]}
+    html = render_session_boundary_html(boundary_payload(opens[0], display_timezone="Europe/Moscow"))
+    assert "Открытие торгов в Европе" in html
+    assert "Европейские биржи" in html
+    assert "Париж" in html and "Франкфурт" in html and "Амстердам" in html and "Лондон" in html
+    assert len(html) < 600  # Compact notice, not 2000+ chars
+
+
+def test_us_openings_group_into_consolidated_notice(calendar):
+    now = moment("2026-11-05T14:30:00+00:00")
+    groups = []
+    publisher = SimpleNamespace(publish=lambda events, **_: groups.append(events) or True)
+    AnnounceSessionBoundaries(calendar=calendar, publisher=publisher).execute(now=now)
+    opens = [g for g in groups if g[0].event_kind == "open"]
+    assert len(opens) == 1
+    assert {"us_stocks", "toronto", "mexico"} <= {e.session_id for e in opens[0]}
+    html = render_session_boundary_html(boundary_payload(opens[0], display_timezone="Europe/Moscow"))
+    assert "Открытие торгов в США и Северной Америке" in html
+    assert "Биржи Северной Америки" in html
+    assert "NYSE" in html and "TSX" in html and "BMV" in html
+    assert len(html) < 500
+
