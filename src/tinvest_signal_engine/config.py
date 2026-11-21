@@ -615,7 +615,7 @@ class RuntimeSettings:
                 os.getenv("SIGNAL_DELIVERY_TYPE_RULES_JSON", "").strip()
             ),
             signal_delivery_default_min_notional_rub=float(
-                os.getenv("SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "40000000")
+                os.getenv("SIGNAL_DELIVERY_DEFAULT_MIN_NOTIONAL_RUB", "45000000")
             ),
             signal_delivery_notional_policy_path=Path(
                 os.getenv(

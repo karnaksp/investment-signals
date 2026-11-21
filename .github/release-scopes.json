@@ -9,6 +9,19 @@
     "*.md",
     "docs/**"
   ],
+  "docker_paths": [
+    ".dockerignore",
+    "Dockerfile",
+    "docker-compose.yml",
+    "pyproject.toml",
+    "src/**",
+    "proto/**",
+    "conf/**",
+    "config/scientific_hypotheses/**",
+    "certs/**",
+    "sql/**",
+    "LICENSE"
+  ],
   "indicator_paths": [
     "conf/detectors.yaml",
     "conf/detectors.overrides.yaml",

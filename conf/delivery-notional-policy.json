@@ -1,26 +1,26 @@
 {
-  "default_min_notional_rub": 40000000,
+  "default_min_notional_rub": 45000000,
   "signal_min_notional_rub": {
-    "calendar_spread_dislocation": 20000000,
-    "roll_migration_anomaly": 20000000,
-    "futures_curve_kink": 20000000,
-    "term_premium_shock": 20000000,
-    "futures_basis_momentum": 20000000,
-    "aggressive_trade_burst": 0,
-    "confirmed_impulse_long": 0,
-    "confirmed_impulse_short": 0,
-    "futures_positioning": 0,
-    "liquidity_vacuum": 0,
-    "obi_dynamics": 0,
-    "open_interest_spike": 0,
+    "calendar_spread_dislocation": 45000000,
+    "roll_migration_anomaly": 45000000,
+    "futures_curve_kink": 45000000,
+    "term_premium_shock": 45000000,
+    "futures_basis_momentum": 45000000,
+    "aggressive_trade_burst": 45000000,
+    "confirmed_impulse_long": 45000000,
+    "confirmed_impulse_short": 45000000,
+    "futures_positioning": 45000000,
+    "liquidity_vacuum": 45000000,
+    "obi_dynamics": 45000000,
+    "open_interest_spike": 45000000,
     "volume_spike": 500000000
   },
   "class_signal_min_notional_rub": {
     "SPBFUT": {
-      "aggressive_trade_burst": 20000000
+      "aggressive_trade_burst": 45000000
     },
     "TQBR": {
-      "aggressive_trade_burst": 20000000
+      "aggressive_trade_burst": 45000000
     }
   },
   "signal_notional_field": {

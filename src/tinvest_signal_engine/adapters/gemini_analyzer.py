@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -49,7 +50,11 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         self._gatekeeper_model = gatekeeper_model
         self._analyzer_model = analyzer_model
         self._timeout = timeout_seconds
-        self._client = client or httpx.Client(timeout=timeout_seconds, trust_env=False)
+        self._client = client or httpx.Client(
+            timeout=timeout_seconds, trust_env=False,
+            proxy=os.getenv("GEMINI_HTTPS_PROXY") or None,
+        )
+        self._retry_after = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -690,6 +695,9 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
     ) -> httpx.Response | None:
         """Post request with fallback in case thinkingConfig is rejected or model quota exceeded."""
         headers = {"x-goog-api-key": self._api_key}
+        if time.monotonic() < self._retry_after:
+            return None
+        deadline = time.monotonic() + self._timeout
 
         current_model = self._analyzer_model
         match = re.search(r"/models/([^:]+):generateContent", url)
@@ -715,18 +723,34 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
 
             for attempt in range(2):
                 try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
                     resp = self._client.post(
-                        target_url, headers=headers, json=curr_payload, timeout=self._timeout
+                        target_url, headers=headers, json=curr_payload, timeout=remaining
                     )
+                    if resp.status_code >= 400:
+                        try:
+                            error = resp.json().get("error", {})
+                        except ValueError:
+                            error = {}
+                        status = str(error.get("status", ""))
+                        message = str(error.get("message", "")).replace(self._api_key, "[REDACTED]")[:300]
+                        logger.warning("Gemini model %s HTTP %s %s: %s", model, resp.status_code, status, message)
+                        if status == "FAILED_PRECONDITION" or resp.status_code in {401, 403}:
+                            self._retry_after = time.monotonic() + 60
+                            return resp
                     if resp.status_code == 400 and "thinkingConfig" in curr_payload.get("generationConfig", {}):
                         curr_payload = dict(curr_payload)
                         gen_cfg = dict(curr_payload.get("generationConfig", {}))
                         gen_cfg.pop("thinkingConfig", None)
                         curr_payload["generationConfig"] = gen_cfg
                         resp = self._client.post(
-                            target_url, headers=headers, json=curr_payload, timeout=self._timeout
+                            target_url, headers=headers, json=curr_payload,
+                            timeout=max(0.1, deadline - time.monotonic()),
                         )
                     if resp.status_code == 200:
+                        resp.extensions["gemini_model"] = model
                         return resp
                     if resp.status_code == 503 and attempt == 0:
                         logger.warning("Gemini model %s returned HTTP 503, retrying in 1.5s...", model)
@@ -740,6 +764,8 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
                         )
                         break
                     return resp
-                except Exception as ex:
-                    logger.warning("Gemini POST failed for %s: %s", model, ex)
+                except httpx.RequestError as ex:
+                    logger.warning("Gemini POST failed for %s: %s", model, type(ex).__name__)
                     break
+        self._retry_after = time.monotonic() + 30
+        return None

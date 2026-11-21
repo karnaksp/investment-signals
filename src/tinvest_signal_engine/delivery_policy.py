@@ -16,8 +16,10 @@ from typing import Any, Callable
 from .config import RuntimeSettings
 from .models import TriggerSignal
 from .serialization import utc_now
+from .domain.session_open import SESSION_SIGNAL_TYPES
+from .domain.daily_positions import REPORT_SIGNAL_TYPE
 
-POLICY_VERSION = "delivery_v8"
+POLICY_VERSION = "delivery_v9"
 DELIVERY_DELIVERED = "delivered"
 DELIVERY_SUPPRESSED = "suppressed"
 logger = logging.getLogger(__name__)
@@ -30,6 +32,10 @@ _FUTURES_CURVE_TYPES = {
 }
 
 _ALWAYS_TYPES = {"trading_status_changed", "market_access_changed"}
+INFORMATIONAL_NOTIFICATION_TYPES = SESSION_SIGNAL_TYPES | _ALWAYS_TYPES | {
+    REPORT_SIGNAL_TYPE, "premarket_briefing",
+}
+MINIMUM_TRADING_NOTIONAL_RUB = 45_000_000.0
 _COMBO_TYPES = {"microstructure_combo_long", "microstructure_combo_short"}
 _LARGE_TRADE_TYPES = {"large_trade_print"}
 _VALIDATED_LONG_HORIZON_TYPES = {"bond_maturity_convergence"}
@@ -73,7 +79,7 @@ class DeliveryNotionalThresholds:
     """Hot-reloaded external-delivery turnover thresholds.
 
     Thresholds may be specialized by market class and may read a signal-specific
-    payload field. A zero threshold disables this gate for one signal type.
+    payload field. Trading signals always require at least 45 million rubles.
     Invalid runtime files never replace the last known-good policy.
     """
 
@@ -82,7 +88,7 @@ class DeliveryNotionalThresholds:
         self._fallback_default = (
             configured_default
             if math.isfinite(configured_default) and configured_default >= 0.0
-            else 40_000_000.0
+            else MINIMUM_TRADING_NOTIONAL_RUB
         )
         self._default = self._fallback_default
         self._overrides: dict[str, float] = {}
@@ -182,14 +188,16 @@ class DeliveryNotionalThresholds:
 
     def minimum_for(self, signal_type: str, class_code: str | None = None) -> float:
         self.refresh()
+        if signal_type in INFORMATIONAL_NOTIFICATION_TYPES:
+            return 0.0
         normalized_class_code = (class_code or "").strip().upper()
         if normalized_class_code:
             class_override = self._class_overrides.get(
                 (normalized_class_code, signal_type)
             )
             if class_override is not None:
-                return class_override
-        return self._overrides.get(signal_type, self._default)
+                return max(MINIMUM_TRADING_NOTIONAL_RUB, class_override)
+        return max(MINIMUM_TRADING_NOTIONAL_RUB, self._overrides.get(signal_type, self._default))
 
     def field_for(self, signal_type: str) -> str:
         self.refresh()

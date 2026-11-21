@@ -558,3 +558,23 @@ def test_volume_spike_without_news_still_analyzed_with_market_context() -> None:
     assert "97.34 млн ₽" in html
     assert "Спекулятивный приток" in html
 
+
+
+@pytest.mark.parametrize("signal_type", [
+    "obi_dynamics", "aggressive_trade_burst", "futures_positioning",
+    "liquidity_vacuum", "microstructure_combo_long", "large_trade_print",
+])
+def test_realtime_signal_types_receive_analysis(signal_type):
+    result = LlmAnalysisResult(
+        False, "Активный поток", "MOMENTUM_FLOW", "LONG", "WAIT_PULLBACK", "Риск отката",
+    )
+    analyzer = MockLlmAnalyzer(analysis_to_return=result)
+    service = SignalLlmEnrichmentUseCase(
+        news_provider=MockNewsProvider(()), llm_analyzer=analyzer,
+    )
+    enriched = service.enrich_payload(
+        ticker="SBER", signal_type=signal_type,
+        payload={"window_notional": 45_000_000}, quality_score=0.95,
+    )
+    assert enriched["llm_analysis_status"] == "completed"
+    assert len(analyzer.analyze_signal_calls) == 1

@@ -50,6 +50,13 @@ DEFAULT_RELEVANT_SIGNAL_TYPES: frozenset[str] = frozenset(
         "price_volume_range_combo_short",
         "orderbook_imbalance",
         "spread_widening",
+        "obi_dynamics",
+        "aggressive_trade_burst",
+        "futures_positioning",
+        "liquidity_vacuum",
+        "microstructure_combo_long",
+        "microstructure_combo_short",
+        "large_trade_print",
     }
 )
 
@@ -308,7 +315,7 @@ class SignalLlmEnrichmentUseCase:
 
             result = self._llm_analyzer.analyze_signal(context)
             if result is None:
-                return payload
+                return {**payload, "llm_analysis_status": "unavailable"}
 
             # Update cooldown timestamp
             cache_key = f"{ticker}:{signal_type}"
@@ -320,6 +327,7 @@ class SignalLlmEnrichmentUseCase:
             return {
                 **payload,
                 "llm_analysis": result.to_dict(),
+                "llm_analysis_status": "completed",
                 "llm_analysis_html": html_block,
                 "llm_analysis_plain": plain_block,
             }

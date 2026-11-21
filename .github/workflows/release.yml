@@ -83,14 +83,18 @@ jobs:
           python -m mkdocs build --strict
           python -m build
 
-      - name: Build and smoke production image
+      - name: Validate Compose configuration
+        if: env.RELEASE_SCOPE == 'full'
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+      - name: Build and smoke shared production image
         if: env.RELEASE_DOCKER_REQUIRED == 'true'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_SHA: ${{ github.sha }}
         run: |
-          cp .env.example .env
-          docker compose config --quiet
           docker build \
             --build-arg APP_VERSION="${RELEASE_TAG#v}" \
             --build-arg APP_COMMIT_SHA="${RELEASE_SHA}" \
