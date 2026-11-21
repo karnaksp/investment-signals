@@ -9,6 +9,7 @@ import time
 from typing import Any, Sequence
 
 import httpx
+from tinvest_signal_engine.adapters.llm_http import create_llm_http_client
 
 from tinvest_signal_engine.application.trader_copilot import TraderLlmPort
 from tinvest_signal_engine.domain.trader_copilot import (
@@ -88,7 +89,7 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
         self._api_key = api_key.strip()
         self._models = (model, *fallback_models)
         self._timeout = timeout_seconds
-        self._client = client or httpx.Client(timeout=timeout_seconds, trust_env=False)
+        self._client = client or create_llm_http_client(timeout_seconds=timeout_seconds)
 
     def close(self) -> None:
         try:
@@ -219,10 +220,10 @@ class GeminiTraderCopilotAdapter(TraderLlmPort):
         last_model = self._models[0]
         for candidate_model in self._models:
             last_model = candidate_model
-            url = f"{GEMINI_API_BASE}/models/{candidate_model}:generateContent?key={self._api_key}"
+            url = f"{GEMINI_API_BASE}/models/{candidate_model}:generateContent"
             for attempt in range(2):
                 try:
-                    resp = self._client.post(url, json=data)
+                    resp = self._client.post(url, json=data, headers={"x-goog-api-key": self._api_key})
                     if resp.status_code == 200:
                         body = resp.json()
                         usage = body.get("usageMetadata") or {}

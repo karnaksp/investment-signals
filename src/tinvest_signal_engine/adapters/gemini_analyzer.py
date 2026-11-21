@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from typing import Any
 
 import httpx
+from tinvest_signal_engine.adapters.llm_http import create_llm_http_client
 
 from tinvest_signal_engine.application.signal_llm import LlmAnalyzerPort
 from tinvest_signal_engine.domain.signal_llm import (
@@ -50,10 +50,7 @@ class GeminiLlmAnalyzer(LlmAnalyzerPort):
         self._gatekeeper_model = gatekeeper_model
         self._analyzer_model = analyzer_model
         self._timeout = timeout_seconds
-        self._client = client or httpx.Client(
-            timeout=timeout_seconds, trust_env=False,
-            proxy=os.getenv("GEMINI_HTTPS_PROXY") or None,
-        )
+        self._client = client or create_llm_http_client(timeout_seconds=timeout_seconds)
         self._retry_after = 0.0
 
     @property

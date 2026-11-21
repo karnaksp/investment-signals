@@ -9,6 +9,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 
 import httpx
+from tinvest_signal_engine.adapters.llm_http import create_llm_http_client
 
 from tinvest_signal_engine.application.trader_copilot import InternetNewsSearchPort
 from tinvest_signal_engine.domain.trader_copilot import InternetNewsItem
@@ -26,8 +27,8 @@ class GoogleNewsRssSearchAdapter(InternetNewsSearchPort):
         client: httpx.Client | None = None,
     ) -> None:
         self._timeout = timeout_seconds
-        self._client = client or httpx.Client(
-            timeout=timeout_seconds, follow_redirects=True, trust_env=False
+        self._client = client or create_llm_http_client(
+            timeout_seconds=timeout_seconds, follow_redirects=True,
         )
 
     def close(self) -> None:

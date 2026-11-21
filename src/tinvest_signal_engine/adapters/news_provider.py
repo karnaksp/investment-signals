@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Sequence
 
 import httpx
+from tinvest_signal_engine.adapters.llm_http import create_llm_http_client
 
 from tinvest_signal_engine.application.signal_llm import NewsProviderPort
 from tinvest_signal_engine.domain.signal_llm import NewsArticle
@@ -205,7 +206,7 @@ class RssNewsProvider(NewsProviderPort):
             )
         )
         self._ttl = cache_ttl_seconds
-        self._client = client or httpx.Client(timeout=4.0, follow_redirects=True, trust_env=False)
+        self._client = client or create_llm_http_client(timeout_seconds=4.0, follow_redirects=True)
         self._cached_articles: list[NewsArticle] = []
         self._last_fetch_ts: float = 0.0
 
